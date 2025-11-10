@@ -16,7 +16,7 @@ graph TD
         Nano["Arduino Nano running motor.ino"]
         Nano -->|PWM: D9→RPWM, D10→LPWM| IBT2
         Nano -->|5V / GND| IBT2
-        Nano -. optional .->|D4/D5 current range select| ShuntConfig["Current Shunt Relays"]
+        Nano -. "Optional D4/D5 current range select" .-> ShuntConfig["Current Shunt Relays"]
         Nano -->|A0 voltage sense divider| Battery
         Nano -->|A1 current sense| IBT2_IS["IBT-2 R_IS / L_IS"]
         Nano -->|A2 H-bridge thermistor| HBTemp["Bridge Thermistor"]
