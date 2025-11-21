@@ -259,8 +259,7 @@ def prompt_int(prompt: str, default=None, min_val=None, max_val=None) -> int:
 
 def show_status() -> None:
     with print_lock:
-        print("
---- Latest telemetry ---")
+        print("\n--- Latest telemetry ---")
         print(f"Flags     : {telemetry['flags']} (decoded: {decode_flags(telemetry['flags'])})")
         if telemetry["current_A"] is not None:
             print(f"Current   : {telemetry['current_A']:.2f} A (raw={telemetry['current_raw']})")
@@ -282,9 +281,7 @@ def show_status() -> None:
         if telemetry["last_eeprom"] is not None:
             addr, val = telemetry["last_eeprom"]
             print(f"EEPROM    : last read addr=0x{addr:02X} value=0x{val:02X} ({val})")
-        print("------------------------
-")
-
+        print("------------------------")
 
 # ---------------- Main menu ----------------
 
@@ -326,9 +323,9 @@ def main() -> None:
         print(f"Error opening {port_name}: {e}")
         sys.exit(1)
 
+
     print(f"Opened {ser.port} at {ser.baudrate} bps")
-    print("Press Ctrl+C or choose 'q' to exit.
-")
+    print("Press Ctrl+C or choose 'q' to exit.")
 
     # Start reader thread
     t = threading.Thread(target=reader_thread, args=(ser,), daemon=True)
@@ -338,7 +335,6 @@ def main() -> None:
         while True:
             print(MENU_TEXT)
             choice = input("Select option: ").strip().lower()
-
             if choice == "q":
                 break
 
@@ -450,8 +446,7 @@ def main() -> None:
                 print("Unknown option.")
 
     except KeyboardInterrupt:
-        print("
-Interrupted by user.")
+        print("\nInterrupted by user.")
 
     finally:
         running_flag["run"] = False
