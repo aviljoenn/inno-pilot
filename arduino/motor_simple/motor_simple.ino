@@ -35,7 +35,7 @@ const uint8_t HBRIDGE_RPWM_PIN = 2;   // RPWM
 const uint8_t HBRIDGE_LPWM_PIN = 3;   // LPWM
 const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN (R_EN + L_EN tied together)
 
-// Clutch pin (active-LOW: LOW = engaged)
+// Clutch pin (active-HIGH: HIGH = engaged)
 const uint8_t CLUTCH_PIN       = 11;
 
 // Limit switches (NC -> GND, HIGH = tripped / broken)
@@ -53,6 +53,7 @@ const uint8_t ADC_SAMPLES = 16;
 const float PI_VSENSE_SCALE = 5.25f;
 const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
+const float MAX_CONTROLLER_TEMP_C = 50.0f;
 
 // ---- DS18B20 scheduling ----
 const unsigned long TEMP_PERIOD_MS = 1000;
@@ -311,7 +312,7 @@ void oled_draw() {
 
   display.setCursor(0, 32);
   display.print(F("Clutch: "));
-  display.println(digitalRead(CLUTCH_PIN) == LOW ? F("ON") : F("OFF"));
+  display.println(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
   display.setCursor(0, 42);
   display.print(F("Pi V: "));
@@ -346,9 +347,9 @@ bool stbd_limit_switch_hit() {
 void update_motor_from_command() {
   // Clutch: engaged whenever ENGAGED flag is set
   if (flags & ENGAGED) {
-    digitalWrite(CLUTCH_PIN, LOW);   // active-LOW -> engage
+    digitalWrite(CLUTCH_PIN, HIGH);   // active-HIGH -> engage
   } else {
-    digitalWrite(CLUTCH_PIN, HIGH);  // disengage
+    digitalWrite(CLUTCH_PIN, LOW);  // disengage
   }
 
   // Always update rudder ADC for limit logic
@@ -491,7 +492,7 @@ void setup() {
 
   // Clutch
   pinMode(CLUTCH_PIN, OUTPUT);
-  digitalWrite(CLUTCH_PIN, HIGH);    // clutch disengaged (active-LOW)
+  digitalWrite(CLUTCH_PIN, LOW);    // clutch disengaged (active-HIGH)
 
   // Limits
   pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
@@ -575,6 +576,18 @@ void loop() {
     flags |= BADVOLTAGE_FAULT;
   } else {
     flags &= ~BADVOLTAGE_FAULT;
+  }
+
+  bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
+  if (temp_valid && temp_c > MAX_CONTROLLER_TEMP_C) {
+    flags |= OVERTEMP_FAULT;
+  } else {
+    flags &= ~OVERTEMP_FAULT;
+  }
+
+  if ((flags & OVERTEMP_FAULT) || pi_fault) {
+    flags &= ~ENGAGED;
+    last_command_val = 1000;
   }
 
   // --- RX: parse incoming pypilot-style frames ---
