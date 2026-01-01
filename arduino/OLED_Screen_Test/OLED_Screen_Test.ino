@@ -41,7 +41,7 @@ const uint8_t PIN_PI_VSENSE = A3;
 // Scale ADC reading (0–1023) to Pi 5V voltage:
 //   V_pi = V_adc * PI_VSENSE_SCALE
 // Example: if divider halves 5V to ~2.5V -> scale ≈ 2.0
-const float PI_VSENSE_SCALE = 5.34f;  // <-- tune this to your divider
+const float PI_VSENSE_SCALE = 5.25f;  // <-- tune this to your divider
 
 // Fault thresholds:
 const float PI_VOLT_HIGH_FAULT = 5.40f; // over-voltage fault
@@ -81,7 +81,7 @@ const float VOLTAGE_SCALE = 5.156f;   // <-- tune to your divider
 
 // Current sensor calibration (ACS758LCB-050B-ish):
 // Adjust these with real measurements.
-const float CURRENT_ZERO_V         = 2.50f;   // zero-current offset (V) ~ Vcc/2
+const float CURRENT_ZERO_V         = 2.10f;   // zero-current offset (V) ~ Vcc/2
 const float CURRENT_SENS_V_PER_A   = 0.040f;  // 40 mV/A at 5V
 const bool  CURRENT_V_DROPS_WITH_A = true;    // true if V drops when I rises
 
@@ -510,4 +510,5 @@ void loop() {
     oled_draw();
   }
 }
+
 
