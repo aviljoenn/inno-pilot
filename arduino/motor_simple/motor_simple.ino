@@ -9,11 +9,26 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include <math.h>
+#include <string.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include "crc.h"    // your existing CRC-8 table + crc8()
 
 // ---- Pins ----
 const uint8_t LED_PIN          = 13;
-const uint8_t RUDDER_PIN       = A4;
+const uint8_t RUDDER_PIN       = A2;
+
+const uint8_t PTM_PIN          = 4;
+const uint8_t BUZZER_PIN       = 10;
+
+const uint8_t PIN_DS18B20      = 12;
+const uint8_t PIN_PI_VSENSE    = A3;
+const uint8_t PIN_VOLTAGE      = A0;
+const uint8_t PIN_CURRENT      = A1;
 
 // IBT-2 (BTS7960) pins
 const uint8_t HBRIDGE_RPWM_PIN = 2;   // RPWM
@@ -26,6 +41,33 @@ const uint8_t CLUTCH_PIN       = 11;
 // Limit switches (NC -> GND, HIGH = tripped / broken)
 const uint8_t PORT_LIMIT_PIN   = 7;
 const uint8_t STBD_LIMIT_PIN   = 8;
+
+// ---- Analog measurement calibration ----
+const float ADC_VREF = 5.00f;
+const float VOLTAGE_SCALE = 5.156f;
+const float CURRENT_ZERO_V = 2.10f;
+const float CURRENT_SENS_V_PER_A = 0.133f;
+const bool  CURRENT_V_DROPS_WITH_A = true;
+const uint8_t ADC_SAMPLES = 16;
+
+const float PI_VSENSE_SCALE = 5.25f;
+const float PI_VOLT_HIGH_FAULT = 5.40f;
+const float PI_VOLT_LOW_FAULT  = 4.80f;
+
+// ---- DS18B20 scheduling ----
+const unsigned long TEMP_PERIOD_MS = 1000;
+const unsigned long TEMP_CONV_MS = 200;
+
+// ---- OLED ----
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDR  0x3C
+
+OneWire oneWire(PIN_DS18B20);
+DallasTemperature tempSensors(&oneWire);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool oled_ok = false;
 
 // ---- Rudder calibration (from motor_limit_test) ----
 // Raw ADC counts (0..1023)
@@ -94,11 +136,32 @@ uint16_t last_command_val = 1000;       // 0..2000, 1000 = neutral
 uint16_t rudder_raw       = 0;          // 0..65535 (scaled)
 int      rudder_adc_last  = 0;          // 0..1023
 
+float pi_voltage_v = 0.0f;
+bool  pi_overvolt_fault = false;
+bool  pi_undervolt_fault = false;
+bool  pi_fault = false;
+bool  pi_fault_alarm_silenced = false;
+
+float temp_c = NAN;
+bool temp_pending = false;
+unsigned long temp_cycle_ms = 0;
+unsigned long temp_req_ms = 0;
+
+float current_ema_a = 0.0f;
+bool  current_ema_init = false;
+const float CURRENT_EMA_ALPHA = 0.20f;
+
 // ---- Telemetry timing ----
 unsigned long last_flags_ms  = 0;
 unsigned long last_rudder_ms = 0;
+unsigned long last_current_ms = 0;
+unsigned long last_voltage_ms = 0;
+unsigned long last_temp_ms = 0;
 const unsigned long FLAGS_PERIOD_MS  = 200; // 5 Hz
 const unsigned long RUDDER_PERIOD_MS = 200; // 5 Hz
+const unsigned long CURRENT_PERIOD_MS = 200; // 5 Hz
+const unsigned long VOLTAGE_PERIOD_MS = 200; // 5 Hz
+const unsigned long TEMP_PERIOD_SEND_MS = 500; // 2 Hz
 
 // Helper: send a 4-byte frame [code, value_lo, value_hi, crc]
 void send_frame(uint8_t code, uint16_t value) {
@@ -109,6 +172,157 @@ void send_frame(uint8_t code, uint16_t value) {
   uint8_t c = crc8(body, 3);
   Serial.write(body, 3);
   Serial.write(c);
+}
+
+uint16_t read_adc_avg(uint8_t pin, uint8_t samples) {
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < samples; i++) {
+    sum += (uint16_t)analogRead(pin);
+    delayMicroseconds(200);
+  }
+  return (uint16_t)(sum / samples);
+}
+
+float adc_to_volts(uint16_t adc) {
+  return (adc * ADC_VREF) / 1023.0f;
+}
+
+float read_voltage_v() {
+  uint16_t adc = read_adc_avg(PIN_VOLTAGE, ADC_SAMPLES);
+  float v_adc = adc_to_volts(adc);
+  return v_adc * VOLTAGE_SCALE;
+}
+
+float read_current_a() {
+  uint16_t adc = read_adc_avg(PIN_CURRENT, ADC_SAMPLES);
+  float v = adc_to_volts(adc);
+  float delta = v - CURRENT_ZERO_V;
+  if (CURRENT_V_DROPS_WITH_A) {
+    delta = -delta;
+  }
+  float a = delta / CURRENT_SENS_V_PER_A;
+  if (a < 0.0f) {
+    a = 0.0f;
+  }
+  return a;
+}
+
+float smooth_current_for_display(float a_instant) {
+  if (!current_ema_init) {
+    current_ema_a = a_instant;
+    current_ema_init = true;
+    return current_ema_a;
+  }
+
+  current_ema_a = (CURRENT_EMA_ALPHA * a_instant) +
+                  ((1.0f - CURRENT_EMA_ALPHA) * current_ema_a);
+  return current_ema_a;
+}
+
+float read_pi_voltage_v() {
+  uint16_t adc = read_adc_avg(PIN_PI_VSENSE, ADC_SAMPLES);
+  float v_adc = adc_to_volts(adc);
+  return v_adc * PI_VSENSE_SCALE;
+}
+
+void temp_service(unsigned long now) {
+  if (!temp_pending) {
+    if (temp_cycle_ms == 0 || (now - temp_cycle_ms >= TEMP_PERIOD_MS)) {
+      tempSensors.requestTemperatures();
+      temp_req_ms = now;
+      temp_cycle_ms = now;
+      temp_pending = true;
+    }
+  }
+
+  if (temp_pending && (now - temp_req_ms >= TEMP_CONV_MS)) {
+    float t = tempSensors.getTempCByIndex(0);
+    if (t > -55.0f && t < 125.0f) {
+      temp_c = t;
+    }
+    temp_pending = false;
+  }
+}
+
+void oled_print_right(uint8_t y, const char* text) {
+  uint8_t len = (uint8_t)strlen(text);
+  int16_t x = SCREEN_WIDTH - (int16_t)(len * 6);
+  if (x < 0) {
+    x = 0;
+  }
+  display.setCursor(x, y);
+  display.print(text);
+}
+
+void oled_draw() {
+  if (!oled_ok) {
+    return;
+  }
+
+  float vin = read_voltage_v();
+  float ia_instant = read_current_a();
+  float ia = smooth_current_for_display(ia_instant);
+
+  char vnum[10], inum[10];
+  char vbuf[12], ibuf[12];
+
+  dtostrf(vin, 0, 1, vnum);
+  dtostrf(ia,  0, 1, inum);
+
+  strncpy(vbuf, vnum, sizeof(vbuf));
+  vbuf[sizeof(vbuf) - 1] = '\0';
+  strncat(vbuf, "V", sizeof(vbuf) - strlen(vbuf) - 1);
+
+  strncpy(ibuf, inum, sizeof(ibuf));
+  ibuf[sizeof(ibuf) - 1] = '\0';
+  strncat(ibuf, "A", sizeof(ibuf) - strlen(ibuf) - 1);
+
+  char tnum[10], tbuf[12];
+  bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
+  if (!temp_valid) {
+    strncpy(tbuf, "--.-C", sizeof(tbuf));
+    tbuf[sizeof(tbuf) - 1] = '\0';
+  } else {
+    dtostrf(temp_c, 0, 1, tnum);
+    strncpy(tbuf, tnum, sizeof(tbuf));
+    tbuf[sizeof(tbuf) - 1] = '\0';
+    strncat(tbuf, "C", sizeof(tbuf) - strlen(tbuf) - 1);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(0, 0);
+  display.println(F("IBT-2 + Clutch"));
+
+  if (pi_fault) {
+    display.setCursor(0, 10);
+    if (pi_overvolt_fault) {
+      display.println(F("FAULT: PI V HIGH"));
+    } else if (pi_undervolt_fault) {
+      display.println(F("FAULT: PI V LOW"));
+    }
+  }
+
+  display.setCursor(0, 22);
+  display.print(F("Engaged: "));
+  display.println((flags & ENGAGED) ? F("YES") : F("NO"));
+
+  display.setCursor(0, 32);
+  display.print(F("Clutch: "));
+  display.println(digitalRead(CLUTCH_PIN) == LOW ? F("ON") : F("OFF"));
+
+  display.setCursor(0, 42);
+  display.print(F("Pi V: "));
+  display.print(pi_voltage_v, 2);
+  display.println(F("V"));
+
+  oled_print_right(0, vbuf);
+  oled_print_right(10, ibuf);
+  oled_print_right(20, tbuf);
+
+  display.display();
 }
 
 // Read rudder pot and scale to 0..65535 for telemetry
@@ -283,7 +497,27 @@ void setup() {
   pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
   pinMode(STBD_LIMIT_PIN, INPUT_PULLUP);
 
+  pinMode(PTM_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
   Serial.begin(38400);
+
+  tempSensors.begin();
+  tempSensors.setResolution(10);
+  tempSensors.setWaitForConversion(false);
+  temp_cycle_ms = 0;
+
+  Wire.begin();
+  oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  if (oled_ok) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(F("OLED OK"));
+    display.display();
+  }
 
   // Startup blink so we know this firmware is running
   digitalWrite(LED_PIN, HIGH);
@@ -293,9 +527,56 @@ void setup() {
   unsigned long now = millis();
   last_flags_ms  = now;
   last_rudder_ms = now;
+  last_current_ms = now;
+  last_voltage_ms = now;
+  last_temp_ms = now;
 }
 
 void loop() {
+  unsigned long now = millis();
+
+  temp_service(now);
+
+  static unsigned long last_pi_ms = 0;
+  if (now - last_pi_ms >= 200) {
+    last_pi_ms = now;
+    pi_voltage_v = read_pi_voltage_v();
+    pi_overvolt_fault = (pi_voltage_v > PI_VOLT_HIGH_FAULT);
+    pi_undervolt_fault = (pi_voltage_v < PI_VOLT_LOW_FAULT);
+    pi_fault = pi_overvolt_fault || pi_undervolt_fault;
+    if (!pi_fault) {
+      pi_fault_alarm_silenced = false;
+    }
+  }
+
+  static bool ptm_prev = false;
+  bool ptm_pressed = (digitalRead(PTM_PIN) == LOW);
+  bool ptm_edge = ptm_pressed && !ptm_prev;
+  ptm_prev = ptm_pressed;
+
+  if (ptm_edge && pi_fault) {
+    pi_fault_alarm_silenced = true;
+  }
+
+  if (pi_fault && !pi_fault_alarm_silenced) {
+    static unsigned long buzz_last = 0;
+    static bool buzz_on = false;
+    unsigned long period = buzz_on ? 500UL : 250UL;
+    if (now - buzz_last >= period) {
+      buzz_last = now;
+      buzz_on = !buzz_on;
+      digitalWrite(BUZZER_PIN, buzz_on ? HIGH : LOW);
+    }
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  if (pi_fault) {
+    flags |= BADVOLTAGE_FAULT;
+  } else {
+    flags &= ~BADVOLTAGE_FAULT;
+  }
+
   // --- RX: parse incoming pypilot-style frames ---
   while (Serial.available()) {
     uint8_t c = Serial.read();
@@ -330,8 +611,6 @@ void loop() {
   }
 
   // --- Telemetry: periodic FLAGS and RUDDER ---
-  unsigned long now = millis();
-
   if (now - last_flags_ms >= FLAGS_PERIOD_MS) {
     uint16_t out_flags = flags;
     flags &= ~REBOOTED;           // REBOOTED appears once
@@ -345,6 +624,50 @@ void loop() {
     last_rudder_ms = now;
   }
 
+  if (now - last_current_ms >= CURRENT_PERIOD_MS) {
+    float current_a = read_current_a();
+    int scaled = (int)(current_a * 100.0f + 0.5f);
+    if (scaled < 0) {
+      scaled = 0;
+    } else if (scaled > 65535) {
+      scaled = 65535;
+    }
+    send_frame(CURRENT_CODE, (uint16_t)scaled);
+    last_current_ms = now;
+  }
+
+  if (now - last_voltage_ms >= VOLTAGE_PERIOD_MS) {
+    float voltage_v = read_voltage_v();
+    int scaled = (int)(voltage_v * 100.0f + 0.5f);
+    if (scaled < 0) {
+      scaled = 0;
+    } else if (scaled > 65535) {
+      scaled = 65535;
+    }
+    send_frame(VOLTAGE_CODE, (uint16_t)scaled);
+    last_voltage_ms = now;
+  }
+
+  if (now - last_temp_ms >= TEMP_PERIOD_SEND_MS) {
+    bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
+    if (temp_valid) {
+      int scaled = (int)(temp_c * 100.0f + 0.5f);
+      if (scaled < 0) {
+        scaled = 0;
+      } else if (scaled > 65535) {
+        scaled = 65535;
+      }
+      send_frame(CONTROLLER_TEMP_CODE, (uint16_t)scaled);
+    }
+    last_temp_ms = now;
+  }
+
   // --- Motor + clutch control with limit logic ---
   update_motor_from_command();
+
+  static unsigned long last_draw = 0;
+  if (oled_ok && (now - last_draw >= 200)) {
+    last_draw = now;
+    oled_draw();
+  }
 }
