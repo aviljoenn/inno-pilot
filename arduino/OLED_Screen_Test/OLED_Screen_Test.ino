@@ -82,7 +82,7 @@ const float VOLTAGE_SCALE = 5.156f;   // <-- tune to your divider
 // Current sensor calibration (ACS758LCB-050B-ish):
 // Adjust these with real measurements.
 const float CURRENT_ZERO_V         = 2.10f;   // zero-current offset (V) ~ Vcc/2
-const float CURRENT_SENS_V_PER_A   = 0.040f;  // 40 mV/A at 5V
+const float CURRENT_SENS_V_PER_A   = 0.133f;  // 40 mV/A at 5V
 const bool  CURRENT_V_DROPS_WITH_A = true;    // true if V drops when I rises
 
 const uint8_t ADC_SAMPLES = 16;  // averaging
@@ -510,5 +510,6 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
