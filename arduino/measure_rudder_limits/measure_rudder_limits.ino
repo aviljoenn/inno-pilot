@@ -35,6 +35,7 @@ const uint16_t RUDDER_MAX_LIMIT = 1023;
 const uint8_t ADC_SAMPLES = 8;
 const uint8_t CHANGE_THRESHOLD = 4;     // minimum delta to consider movement
 const uint16_t CENTER_TOLERANCE = 2;    // stop within +/- this value
+const uint16_t LIMIT_CLEAR_DELTA = 20;   // ADC counts to move away from a found limit before arming next limit detect
 const unsigned long STALL_TIMEOUT_MS = 700;
 const unsigned long DISPLAY_PERIOD_MS = 200;
 const unsigned long TELEMETRY_PERIOD_MS = 250;
@@ -76,6 +77,9 @@ uint16_t stall_retry_reading = 0;
 String last_event = "";
 String error_scroll_text = "";
 String last_error_event = "";
+
+bool limit_clear_required = false;
+uint16_t limit_clear_reference = 0;
 
 // ==============================
 // Motor and clutch helpers
@@ -272,8 +276,10 @@ void loop() {
       last_event = "START";
       limit_a_valid = false;
       limit_b_valid = false;
-      min_reading = 1023;
-      max_reading = 0;
+      min_reading = 1022;
+      max_reading = 1;
+      limit_clear_required = false;
+      limit_clear_reference = reading;
       clutch_on();
       motor_move_negative();
       run_state = FIND_LIMIT_A;
@@ -312,9 +318,23 @@ void loop() {
 
   // While searching for limits, treat "stall" as a limit event.
   bool searching = (run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B);
-  bool limit_reached = searching && (at_limit_value || stalled);
 
-  if (motion != STOPPED && stalled && !searching) {
+  // After finding limit A and reversing, wait until we've moved away enough
+  if (searching && limit_clear_required) {
+    if ((uint16_t)abs((int)reading - (int)limit_clear_reference) >= LIMIT_CLEAR_DELTA) {
+      limit_clear_required = false;
+    }
+  }
+
+  bool clear_failed  = searching && limit_clear_required && stalled; // couldn't move away from the end stop
+  bool limit_reached = searching && !limit_clear_required && (at_limit_value || stalled);
+
+   if (motion != STOPPED && clear_failed) {
+    motor_stop();
+    run_state = ERROR;
+    last_event = "CLEAR_FAIL";
+    clutch_off();
+  } else if (motion != STOPPED && stalled && !searching) {
     MotionState prev_motion = motion;   // capture BEFORE motor_stop() clears it
     motor_stop();
     last_event = "STALL";
@@ -346,6 +366,8 @@ void loop() {
       limit_a = reading;
       limit_a_valid = true;
       run_state = FIND_LIMIT_B;
+      limit_clear_required = true;
+      limit_clear_reference = reading;
       motor_move_positive();
       stall_retry_active = false;
       last_change_ms = now;
