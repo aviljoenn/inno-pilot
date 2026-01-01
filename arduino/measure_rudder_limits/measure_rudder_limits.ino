@@ -40,7 +40,8 @@ const unsigned long DISPLAY_PERIOD_MS = 200;
 const unsigned long TELEMETRY_PERIOD_MS = 250;
 const unsigned long PTM_HOLD_MS = 3000;
 const unsigned long PTM_DEBOUNCE_MS = 30;
-const unsigned long ERROR_SCROLL_PERIOD_MS = 75;
+const unsigned long ERROR_SCROLL_PERIOD_MS = 38;
+const uint8_t LIMIT_TOLERANCE = 2;
 
 // ==============================
 // State
@@ -299,7 +300,8 @@ void loop() {
     last_change_ms = now;
   }
 
-  bool at_limit_value = (reading == RUDDER_MIN_LIMIT || reading == RUDDER_MAX_LIMIT);
+  bool at_limit_value = (reading <= (RUDDER_MIN_LIMIT + LIMIT_TOLERANCE) ||
+                         reading >= (RUDDER_MAX_LIMIT - LIMIT_TOLERANCE));
   bool stalled = (motion != STOPPED) && (now - last_change_ms > STALL_TIMEOUT_MS);
   bool limit_reached = (run_state == FIND_LIMIT_A || run_state == FIND_LIMIT_B) && at_limit_value;
 
