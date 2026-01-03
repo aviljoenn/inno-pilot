@@ -30,6 +30,7 @@ const uint8_t PIN_DS18B20      = 12;
 const uint8_t PIN_PI_VSENSE    = A3;
 const uint8_t PIN_VOLTAGE      = A0;
 const uint8_t PIN_CURRENT      = A1;
+const uint8_t BUTTON_ADC_PIN   = A6;   // analog-only pin for button ladder
 
 // IBT-2 (BTS7960) pins
 const uint8_t HBRIDGE_RPWM_PIN = 2;   // RPWM
@@ -320,9 +321,16 @@ void oled_draw() {
   display.print(pi_voltage_v, 2);
   display.println(F("V"));
 
-  oled_print_right(0, vbuf);
-  oled_print_right(10, ibuf);
-  oled_print_right(20, tbuf);
+  // NEW: show raw ADC for button ladder on A6
+  int btn_adc = analogRead(BUTTON_ADC_PIN);  // 0..1023
+  display.setCursor(0, 52);
+  display.print(F("Btn ADC: "));
+  display.print(btn_adc);
+
+  // Right column: main Vin, current, temp
+  oled_print_right(0,  vbuf);  // main Vin
+  oled_print_right(10, ibuf);  // current
+  oled_print_right(20, tbuf);  // temp
 
   display.display();
 }
@@ -650,6 +658,7 @@ void loop() {
   }
 
   if (now - last_rudder_ms >= RUDDER_PERIOD_MS) {
+
     rudder_raw = read_rudder_scaled();
     send_frame(RUDDER_SENSE_CODE, rudder_raw);
     last_rudder_ms = now;
