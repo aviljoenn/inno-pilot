@@ -47,11 +47,12 @@ const uint8_t STBD_LIMIT_PIN   = 8;
 const float ADC_VREF              = 5.00f;
 const float VOLTAGE_SCALE         = 5.156f;
 
-// Calibrated from OLED debug:
-// @ 0 A  : V = 2.072
-// @ 2.2 A: V = 2.033
-const float CURRENT_ZERO_V        = 2.063f;  // zero-current sensor voltage
-const float CURRENT_SENS_V_PER_A  = 0.0136f; // ~17.7 mV per Amp
+// New sensor calibration from ADC readings:
+// @ 0 A  : ADC = 430 -> V0 ≈ 2.103 V
+// @ 10 A : ADC = 417 -> V10 ≈ 2.039 V
+// drop ≈ 0.064 V over 10 A => ~6.4 mV/A
+const float CURRENT_ZERO_V        = 2.103f;   // zero-current sensor voltage
+const float CURRENT_SENS_V_PER_A  = 0.0064f;  // ≈ 6.4 mV per Amp
 const bool  CURRENT_V_DROPS_WITH_A = true;
 
 const uint8_t ADC_SAMPLES         = 16;
@@ -727,6 +728,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
