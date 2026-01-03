@@ -50,8 +50,8 @@ const float VOLTAGE_SCALE         = 5.156f;
 // Calibrated from OLED debug:
 // @ 0 A  : V = 2.072
 // @ 2.2 A: V = 2.033
-const float CURRENT_ZERO_V        = 2.072f;  // zero-current sensor voltage
-const float CURRENT_SENS_V_PER_A  = 0.0177f; // ~17.7 mV per Amp
+const float CURRENT_ZERO_V        = 2.063f;  // zero-current sensor voltage
+const float CURRENT_SENS_V_PER_A  = 0.0136f; // ~17.7 mV per Amp
 const bool  CURRENT_V_DROPS_WITH_A = true;
 
 const uint8_t ADC_SAMPLES         = 16;
@@ -727,6 +727,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
