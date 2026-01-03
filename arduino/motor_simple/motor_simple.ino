@@ -199,6 +199,13 @@ float read_voltage_v() {
 float read_current_a() {
   uint16_t adc = read_adc_avg(PIN_CURRENT, ADC_SAMPLES);
   float v = adc_to_volts(adc);
+
+  // DEBUG: dump raw sensor reading to serial
+  Serial.print("CURRENT ADC=");
+  Serial.print(adc);
+  Serial.print("  V=");
+  Serial.println(v, 4);
+
   float delta = v - CURRENT_ZERO_V;
   if (CURRENT_V_DROPS_WITH_A) {
     delta = -delta;
@@ -711,6 +718,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
