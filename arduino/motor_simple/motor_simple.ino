@@ -51,17 +51,18 @@ const float VOLTAGE_SCALE         = 5.156f;
 // @ 0 A  : ADC = 430 -> V0 ≈ 2.103 V
 // @ 10 A : ADC = 417 -> V10 ≈ 2.039 V
 // drop ≈ 0.064 V over 10 A => ~6.4 mV/A
-const float CURRENT_ZERO_V        = 2.103f;   // zero-current sensor voltage
-const float CURRENT_SENS_V_PER_A  = 0.0064f;  // ≈ 6.4 mV per Amp
-const bool  CURRENT_V_DROPS_WITH_A = true;
 
 const uint8_t ADC_SAMPLES         = 16;
-
 
 const float PI_VSENSE_SCALE = 5.25f;
 const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
 const float MAX_CONTROLLER_TEMP_C = 50.0f;
+
+// Current calibration points: ADC reading vs measured amps
+const uint8_t  CURR_N = 8;
+const uint16_t CURR_ADC[CURR_N] = {430, 427, 426, 424, 423, 422, 420, 417};
+const float    CURR_A[CURR_N]   = {0.0f, 0.11f, 0.65f, 1.70f, 2.23f, 2.33f, 4.00f, 5.30f};
 
 // ---- DS18B20 scheduling ----
 const unsigned long TEMP_PERIOD_MS = 1000;
@@ -207,21 +208,37 @@ float read_voltage_v() {
 
 float read_current_a() {
   uint16_t adc = read_adc_avg(PIN_CURRENT, ADC_SAMPLES);
-  float v = adc_to_volts(adc);
 
-  // DEBUG: capture raw current sensor reading
-  current_debug_adc = adc;
-  current_debug_v   = v;
+  // Above "zero" point → treat as 0 A
+  if (adc >= CURR_ADC[0]) {
+    return CURR_A[0];
+  }
+  // Below or equal to lowest calibration → clamp to max
+  if (adc <= CURR_ADC[CURR_N - 1]) {
+    return CURR_A[CURR_N - 1];
+  }
 
-  float delta = v - CURRENT_ZERO_V;
-  if (CURRENT_V_DROPS_WITH_A) {
-    delta = -delta;
+  // Find the segment CURR_ADC[i] >= adc >= CURR_ADC[i+1]
+  for (uint8_t i = 0; i < CURR_N - 1; i++) {
+    uint16_t a0 = CURR_ADC[i];
+    uint16_t a1 = CURR_ADC[i + 1];
+
+    if (adc <= a0 && adc >= a1) {
+      float x0 = (float)a0;
+      float x1 = (float)a1;
+      float y0 = CURR_A[i];
+      float y1 = CURR_A[i + 1];
+
+      // Since ADC decreases with current, invert the fraction:
+      float t = (x0 - (float)adc) / (x0 - x1);   // 0 at x0, 1 at x1
+      float I = y0 + t * (y1 - y0);
+      if (I < 0.0f) I = 0.0f;
+      return I;
+    }
   }
-  float a = delta / CURRENT_SENS_V_PER_A;
-  if (a < 0.0f) {
-    a = 0.0f;
-  }
-  return a;
+
+  // Fallback (shouldn't hit if table covers full range)
+  return 0.0f;
 }
 
 float smooth_current_for_display(float a_instant) {
@@ -728,6 +745,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
