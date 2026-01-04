@@ -209,6 +209,10 @@ float read_voltage_v() {
 float read_current_a() {
   uint16_t adc = read_adc_avg(PIN_CURRENT, ADC_SAMPLES);
 
+    // debug tracking
+  current_debug_adc = adc;
+  current_debug_v   = adc_to_volts(adc);
+
   // Above "zero" point → treat as 0 A
   if (adc >= CURR_ADC[0]) {
     return CURR_A[0];
@@ -745,6 +749,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
