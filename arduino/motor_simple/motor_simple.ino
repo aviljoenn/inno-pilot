@@ -422,9 +422,9 @@ void oled_draw() {
 
   // Engaged / Clutch
   display.setCursor(0, LINE2_Y + 10);
-  display.print(F("Eng: "));
-  display.print((flags & ENGAGED) ? F("YES") : F("NO"));
-  display.print(F("  Cl: "));
+  display.print(F("AP: "));
+  display.print((flags & ENGAGED) ? F("ON") : F("Off"));
+  display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
   // Main Vin & current
@@ -437,7 +437,7 @@ void oled_draw() {
 
   // Controller temperature
   display.setCursor(0, LINE2_Y + 30);
-  display.print(F("CtlT: "));
+  display.print(F("Temp: "));
   if (temp_valid) {
     display.print(temp_c, 1);
     display.print(F("C"));
@@ -447,7 +447,7 @@ void oled_draw() {
 
   // Pi 5V rail
   display.setCursor(0, LINE2_Y + 40);
-  display.print(F("PiV: "));
+  display.print(F("5V_Bus: "));
   display.print(piv, 2);
   display.print(F("V"));
 
@@ -880,6 +880,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
