@@ -122,6 +122,11 @@ enum commands {
   CLUTCH_PWM_AND_BRAKE_CODE = 0x36
 };
 
+// ---- Forward declarations ----
+uint16_t read_rudder_scaled();
+bool port_limit_switch_hit();
+bool stbd_limit_switch_hit();
+
 // ---- Result codes ----
 enum results {
   CURRENT_CODE         = 0x1C,
@@ -423,6 +428,30 @@ void oled_draw() {
   display.print(F("V"));
 
   display.display();
+}
+
+// Read rudder pot and scale to 0..65535 for telemetry
+uint16_t read_rudder_scaled() {
+  int a = analogRead(RUDDER_PIN);   // 0..1023
+  rudder_adc_last = a;              // save raw for limit logic
+  return (uint16_t)a * 64;          // 0..~65472
+}
+
+// ---- Limit logic helpers ----
+// V2: if LIMIT_SWITCHES_ACTIVE is false, ignore the switch pins completely.
+bool port_limit_switch_hit() {
+  if (!LIMIT_SWITCHES_ACTIVE) {
+    return false;
+  }
+  // NC -> GND, so HIGH = open/tripped/broken
+  return digitalRead(PORT_LIMIT_PIN) == HIGH;
+}
+
+bool stbd_limit_switch_hit() {
+  if (!LIMIT_SWITCHES_ACTIVE) {
+    return false;
+  }
+  return digitalRead(STBD_LIMIT_PIN) == HIGH;
 }
 
 // ---- Motor + clutch drive based on last_command_val & flags ----
@@ -804,6 +833,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
