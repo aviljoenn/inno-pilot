@@ -22,7 +22,7 @@
 const char INNOPILOT_VERSION[] = "V2";
 
 // Boot / online timing (user-tweakable)
-const unsigned long PI_BOOT_EST_MS    = 60000UL;  // 60s estimate, tweak later
+const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
 const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
 
 bool any_serial_rx = false;
@@ -660,12 +660,11 @@ void setup() {
     display.println(F("Inno-Pilot"));
 
     display.setTextSize(1);
-    display.setCursor(36, 36);
+    display.setCursor(30, 36);
     display.print(F("Version "));
     display.println(INNOPILOT_VERSION);
 
     display.display();
-    delay(3000);   // splash for 3 seconds (was 1.5s)
   }
 
   // after splash, start boot timer reference
@@ -855,6 +854,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
