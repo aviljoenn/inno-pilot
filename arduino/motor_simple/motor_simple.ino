@@ -656,7 +656,7 @@ void setup() {
 
     // Splash: big Inno-Pilot
     display.setTextSize(2);
-    display.setCursor(10, 10);
+    display.setCursor(0, 10);
     display.println(F("Inno-Pilot"));
 
     display.setTextSize(1);
@@ -855,6 +855,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
