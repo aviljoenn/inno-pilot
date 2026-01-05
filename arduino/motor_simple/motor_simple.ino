@@ -24,6 +24,7 @@ const char INNOPILOT_VERSION[] = "V2";
 // Boot / online timing (user-tweakable)
 const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
 const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
+bool pi_online_at_boot = false;
 
 bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
@@ -652,6 +653,18 @@ void setup() {
   digitalWrite(BUZZER_PIN, LOW);
 
   Serial.begin(38400);
+  
+  // Quick check: is Pi/pypilot already talking?
+  // Look for any incoming serial for ~200ms
+  {
+    unsigned long t0 = millis();
+    while (millis() - t0 < 200UL) {
+      if (Serial.available()) {
+        pi_online_at_boot = true;
+        break;
+      }
+    }
+  }
 
   tempSensors.begin();
   tempSensors.setResolution(10);
@@ -675,7 +688,11 @@ void setup() {
     display.println(INNOPILOT_VERSION);
 
     display.display();
-  }
+    // Only block for the full splash if the Pi doesn't appear online yet
+    if (!pi_online_at_boot) {
+      delay(3000);   // Pi booting: OK to block
+    }
+}
 
   // after splash, start boot timer reference
   boot_start_ms = millis();
@@ -864,6 +881,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
