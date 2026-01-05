@@ -6,6 +6,8 @@
 // - Sends periodic FLAGS and RUDDER frames
 // - Drives IBT-2 H-bridge + clutch based on COMMAND / DISENGAGE
 // - Obeys limit switches + rudder pot min/max
+// ---- Inno-Pilot version ----
+const char INNOPILOT_VERSION[] = "V2";
 
 #include <Arduino.h>
 #include <stdint.h>
@@ -88,6 +90,11 @@ const int RUDDER_ADC_MARGIN    = 10;    // safety margin on each end
 // Tolerance for centring (not used here but handy later)
 const int RUDDER_CENTRE_ADC    = (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END) / 2;
 const int RUDDER_CENTRE_TOL    = 5;
+
+// Enable/disable physical limit switches on D7/D8. (Optional)
+// true  -> use NC limit switches on PORT_LIMIT_PIN / STBD_LIMIT_PIN.
+// false -> ignore switch pins, use only pot-based soft limits.
+const bool LIMIT_SWITCHES_ACTIVE = false;
 
 // ---- Command codes (same as motor.ino) ----
 enum commands {
@@ -297,78 +304,66 @@ void oled_draw() {
     return;
   }
 
-  float vin = read_voltage_v();
+  // Measurements
+  float vin        = read_voltage_v();
   float ia_instant = read_current_a();
-  float ia = smooth_current_for_display(ia_instant);
+  float ia         = smooth_current_for_display(ia_instant);
+  float piv        = pi_voltage_v;  // already maintained in loop
 
-  char vnum[10], inum[10];
-  char vbuf[12], ibuf[12];
-
-  dtostrf(vin, 0, 1, vnum);
-  dtostrf(ia,  0, 2, inum);
-
-  strncpy(vbuf, vnum, sizeof(vbuf));
-  vbuf[sizeof(vbuf) - 1] = '\0';
-  strncat(vbuf, "V", sizeof(vbuf) - strlen(vbuf) - 1);
-
-  strncpy(ibuf, inum, sizeof(ibuf));
-  ibuf[sizeof(ibuf) - 1] = '\0';
-  strncat(ibuf, "A", sizeof(ibuf) - strlen(ibuf) - 1);
-
-  char tnum[10], tbuf[12];
-  bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
-  if (!temp_valid) {
-    strncpy(tbuf, "--.-C", sizeof(tbuf));
-    tbuf[sizeof(tbuf) - 1] = '\0';
-  } else {
-    dtostrf(temp_c, 0, 1, tnum);
-    strncpy(tbuf, tnum, sizeof(tbuf));
-    tbuf[sizeof(tbuf) - 1] = '\0';
-    strncat(tbuf, "C", sizeof(tbuf) - strlen(tbuf) - 1);
-  }
+  bool temp_valid  = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
 
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
+  // Header: Inno-Pilot + version
   display.setCursor(0, 0);
-  display.println(F("IBT-2 + Clutch"));
+  display.print(F("Inno-Pilot "));
+  display.print(INNOPILOT_VERSION);
 
-  if (pi_fault) {
+  // Fault line (Pi voltage and/or overtemp)
+  if (pi_fault || (flags & OVERTEMP_FAULT)) {
     display.setCursor(0, 10);
+    display.print(F("FAULT: "));
     if (pi_overvolt_fault) {
-      display.println(F("FAULT: PI V HIGH"));
+      display.print(F("PiV HIGH"));
     } else if (pi_undervolt_fault) {
-      display.println(F("FAULT: PI V LOW"));
+      display.print(F("PiV LOW"));
+    } else if (flags & OVERTEMP_FAULT) {
+      display.print(F("TEMP"));
     }
   }
 
+  // Engaged / Clutch status
   display.setCursor(0, 22);
-  display.print(F("Engaged: "));
-  display.println((flags & ENGAGED) ? F("YES") : F("NO"));
+  display.print(F("Eng: "));
+  display.print((flags & ENGAGED) ? F("YES") : F("NO"));
+  display.print(F("  Cl: "));
+  display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
+  // Main supply voltage & current
   display.setCursor(0, 32);
-  display.print(F("Clutch: "));
-  display.println(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+  display.print(F("Vin: "));
+  display.print(vin, 1);
+  display.print(F("V  I: "));
+  display.print(ia, 2);
+  display.print(F("A"));
 
+  // Controller temperature
   display.setCursor(0, 42);
-  display.print(F("Pi V: "));
-  display.print(pi_voltage_v, 2);
-  display.println(F("V"));
+  display.print(F("CtlT: "));
+  if (temp_valid) {
+    display.print(temp_c, 1);
+    display.print(F("C"));
+  } else {
+    display.print(F("--.-C"));
+  }
 
-  // DEBUG: show current sensor raw ADC and voltage
+  // Pi 5V rail
   display.setCursor(0, 52);
-  display.print(F("CurADC: "));
-  display.print(current_debug_adc);
-
-  display.setCursor(70, 52);   // shift right a bit
-  display.print(F("V="));
-  display.print(current_debug_v, 3);  // 3 decimals for sensor voltage
-
-  // Right column: main Vin, current, temp
-  oled_print_right(0,  vbuf);  // main Vin
-  oled_print_right(10, ibuf);  // current
-  oled_print_right(20, tbuf);  // temp
+  display.print(F("PiV: "));
+  display.print(piv, 2);
+  display.print(F("V"));
 
   display.display();
 }
@@ -381,12 +376,19 @@ uint16_t read_rudder_scaled() {
 }
 
 // ---- Limit logic helpers ----
+// V2: if LIMIT_SWITCHES_ACTIVE is false, ignore the switch pins completely.
 bool port_limit_switch_hit() {
+  if (!LIMIT_SWITCHES_ACTIVE) {
+    return false;
+  }
   // NC -> GND, so HIGH = open/tripped/broken
   return digitalRead(PORT_LIMIT_PIN) == HIGH;
 }
 
 bool stbd_limit_switch_hit() {
+  if (!LIMIT_SWITCHES_ACTIVE) {
+    return false;
+  }
   return digitalRead(STBD_LIMIT_PIN) == HIGH;
 }
 
@@ -542,8 +544,10 @@ void setup() {
   digitalWrite(CLUTCH_PIN, LOW);    // clutch disengaged (active-HIGH)
 
   // Limits
-  pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
-  pinMode(STBD_LIMIT_PIN, INPUT_PULLUP);
+  if (LIMIT_SWITCHES_ACTIVE) {
+    pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
+    pinMode(STBD_LIMIT_PIN, INPUT_PULLUP);
+  }
 
   pinMode(PTM_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -558,13 +562,24 @@ void setup() {
 
   Wire.begin();
   oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  Wire.begin();
+  oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oled_ok) {
     display.clearDisplay();
-    display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(F("OLED OK"));
+
+    // Splash: big Inno-Pilot
+    display.setTextSize(2);            // larger font
+    display.setCursor(10, 10);
+    display.println(F("Inno-Pilot"));
+
+    display.setTextSize(1);
+    display.setCursor(40, 36);
+    display.print(F("Version "));
+    display.println(INNOPILOT_VERSION);
+
     display.display();
+    delay(1500);   // show splash for 1.5 seconds
   }
 
   // Startup blink so we know this firmware is running
@@ -749,6 +764,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
