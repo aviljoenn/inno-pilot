@@ -20,10 +20,13 @@
 
 // ---- Inno-Pilot version ----
 const char INNOPILOT_VERSION[] = "V2";
+
 // Boot / online timing (user-tweakable)
 const unsigned long PI_BOOT_EST_MS    = 60000UL;  // 60s estimate, tweak later
 const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
 
+bool any_serial_rx = false;
+unsigned long last_serial_rx_ms = 0;
 bool pi_online           = false;    // true once we see first valid frame
 unsigned long boot_start_ms    = 0;  // reference after splash
 unsigned long pi_online_time_ms = 0; // when we first saw Pi online
@@ -348,25 +351,25 @@ void oled_draw() {
   const uint8_t LINE2_Y = 10;
 
   // ----- Online splash (Pi controller online) -----
+unsigned long elapsed  = now - boot_start_ms;
+bool show_online       = pi_online && (now - pi_online_time_ms < ONLINE_SPLASH_MS);
+bool pi_offline        = !pi_online;
+bool in_boot_window    = pi_offline && (elapsed < PI_BOOT_EST_MS);
+bool offline_timeout   = pi_offline && (elapsed >= PI_BOOT_EST_MS);
+
   if (show_online) {
     display.setTextSize(1);
     display.setCursor(0, LINE2_Y);
     display.println(F("Inno-Controller"));
-
     display.setCursor(0, LINE2_Y + 10);
     display.println(F("On-line..."));
-
     display.display();
     return;
   }
 
-  // ----- Booting indication (Pi offline) -----
-  if (pi_offline) {
-    // Approximate boot percentage based on time since boot_start_ms
-    unsigned long elapsed = now - boot_start_ms;
-    if (elapsed > PI_BOOT_EST_MS) elapsed = PI_BOOT_EST_MS;
+  if (in_boot_window) {
+    // Show estimated boot progress
     uint8_t pct = (uint8_t)((elapsed * 100UL) / PI_BOOT_EST_MS);
-
     display.setTextSize(1);
     display.setCursor(0, LINE2_Y);
     display.println(F("Inno-Controller"));
@@ -380,6 +383,27 @@ void oled_draw() {
     return;
   }
 
+  if (offline_timeout) {
+    // Pi hasn't come online within estimated time -> controller offline
+    display.setTextSize(1);
+    display.setCursor(0, LINE2_Y);
+    display.println(F("Inno-Controller"));
+
+    display.setCursor(0, LINE2_Y + 10);
+    display.println(F("OFFLINE"));
+
+    // Optionally: still show Vin/I etc below
+    display.setCursor(0, LINE2_Y + 20);
+    display.print(F("Vin: "));
+    display.print(vin, 1);
+    display.print(F("V  I: "));
+    display.print(ia, 2);
+    display.print(F("A"));
+
+    display.display();
+    return;
+  }
+
   // ----- Normal telemetry display (Pi online, no online splash) -----
   display.setTextSize(1);
 
@@ -387,6 +411,9 @@ void oled_draw() {
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
     display.setCursor(0, LINE2_Y);
     display.print(F("FAULT: "));
+    // in the normal telemetry section, for debug
+    display.setCursor(90, 0);
+    display.print(any_serial_rx ? F("RX") : F("--"));
     if (pi_overvolt_fault) {
       display.print(F("PiV HIGH"));
     } else if (pi_undervolt_fault) {
@@ -741,6 +768,8 @@ void loop() {
   // --- RX: parse incoming pypilot-style frames ---
   while (Serial.available()) {
     uint8_t c = Serial.read();
+    any_serial_rx = true;
+    last_serial_rx_ms = now;
 
     if (sync_b < 3) {
       in_bytes[sync_b++] = c;
@@ -833,6 +862,7 @@ void loop() {
     oled_draw();
   }
 }
+
 
 
 
