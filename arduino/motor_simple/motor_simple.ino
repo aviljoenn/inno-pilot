@@ -866,8 +866,12 @@ void loop() {
   }
 
   if (ptm_edge) {
+    // Emergency stop: disengage servo and neutral command
     flags &= ~ENGAGED;
     last_command_val = 1000;
+
+    // Show big STOP overlay
+    show_overlay("STOP");
   }
 
   // ----- Button ladder on A6 (B1..B5) -----
@@ -1027,6 +1031,7 @@ if (stable_b != last_stable_button) {
     oled_draw();
   }
 }
+
 
 
 
