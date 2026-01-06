@@ -276,12 +276,12 @@ void handle_button(ButtonID b) {
       break;
     }
 
-    case BTN_B4:  // +10
+    case BTN_B4:  // +1
       show_overlay("+1");
       send_button_event(BTN_EVT_PLUS1);
       break;
 
-    case BTN_B5:  // +1
+    case BTN_B5:  // +10
       show_overlay("+10");
       send_button_event(BTN_EVT_PLUS10);
       break;
@@ -1031,6 +1031,7 @@ if (stable_b != last_stable_button) {
     oled_draw();
   }
 }
+
 
 
 
