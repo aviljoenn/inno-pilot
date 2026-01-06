@@ -3,6 +3,8 @@ import time
 import serial
 from pypilot.client import pypilotClient
 
+DEBUG_NANO_STREAM = True
+
 # Serial devices
 # Real Nano USB port: original by-id symlink moved to .real
 NANO_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"
@@ -104,6 +106,10 @@ def main():
                     if data_from_nano:
                         # Always forward raw bytes unchanged
                         pilot.write(data_from_nano)
+
+                        if DEBUG_NANO_STREAM:
+                           # Log the raw bytes in hex for analysis
+                            print("Inno-Pilot: nano->pilot:", " ".join(f"{b:02X}" for b in data_from_nano))
 
                         # Scan Nano stream for BUTTON_EVENT_CODE frames
                         for b in data_from_nano:
