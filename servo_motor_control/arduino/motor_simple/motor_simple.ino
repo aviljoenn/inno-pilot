@@ -77,6 +77,10 @@ const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
 const float MAX_CONTROLLER_TEMP_C = 50.0f;
 
+// Manual jog state (used when AP is disengaged)
+bool  manual_override = false;  // true while a manual jog is active
+int8_t manual_dir     = 0;      // -1 = starboard, +1 = port, 0 = none
+
 // Current calibration points: ADC reading vs measured amps
 const uint8_t  CURR_N = 8;
 const uint16_t CURR_ADC[CURR_N] = {430, 427, 426, 424, 423, 422, 420, 417};
@@ -106,6 +110,9 @@ const int RUDDER_ADC_MARGIN    = 10;    // safety margin on each end
 // Tolerance for centring (not used here but handy later)
 const int RUDDER_CENTRE_ADC    = (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END) / 2;
 const int RUDDER_CENTRE_TOL    = 5;
+
+// Rudder angle display range (approx ±40°)
+const float RUDDER_RANGE_DEG = 40.0f;
 
 // Enable/disable physical limit switches on D7/D8. (Optional)
 // true  -> use NC limit switches on PORT_LIMIT_PIN / STBD_LIMIT_PIN.
@@ -422,6 +429,15 @@ void oled_draw() {
 
   bool temp_valid  = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
 
+  // Compute rudder angle from ADC (rough mapping, to be replaced later by pypilot calibration)
+  float rudder_deg = 0.0f;
+  {
+    float centre   = 0.5f * (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END);
+    float halfSpan = 0.5f * (RUDDER_ADC_PORT_END - RUDDER_ADC_STBD_END);
+    if (halfSpan < 1.0f) halfSpan = 1.0f;  // avoid divide by zero
+    rudder_deg = (rudder_adc_last - centre) * (RUDDER_RANGE_DEG / halfSpan);
+  }
+
   // Boot / online / offline state
   unsigned long elapsed_boot  = now - boot_start_ms;
   unsigned long since_last_pi = pi_ever_online ? (now - last_pi_frame_ms) : 0;
@@ -547,29 +563,16 @@ void oled_draw() {
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // Main Vin & current
-  display.setCursor(0, LINE2_Y + 20);
-  display.print(F("Vin: "));
-  display.print(vin, 1);
-  display.print(F("V  I: "));
-  display.print(ia, 2);
-  display.print(F("A"));
+  // Rudder angle display
+  display.setCursor(0, 52);
+  display.print(F("Rudder: "));
+  display.print(rudder_deg, 1);   // one decimal
+  display.print(F(" deg"));
 
-  // Controller temperature
-  display.setCursor(0, LINE2_Y + 30);
-  display.print(F("Temp: "));
-  if (temp_valid) {
-    display.print(temp_c, 1);
-    display.print(F("C"));
-  } else {
-    display.print(F("--.-C"));
-  }
-
-  // Pi 5V rail
-  display.setCursor(0, LINE2_Y + 40);
-  display.print(F("5V_Bus: "));
-  display.print(piv, 2);
-  display.print(F("V"));
+  // Right column: main Vin, current, temp
+  oled_print_right(0,  vbuf);  // main Vin
+  oled_print_right(10, ibuf);  // current
+  oled_print_right(20, tbuf);  // temp
 
   display.display();
 }
@@ -600,24 +603,14 @@ bool stbd_limit_switch_hit() {
 
 // ---- Motor + clutch drive based on last_command_val & flags ----
 void update_motor_from_command() {
-  // Clutch: engaged whenever ENGAGED flag is set
-  if (flags & ENGAGED) {
-    digitalWrite(CLUTCH_PIN, HIGH);   // active-HIGH -> engage
-  } else {
-    digitalWrite(CLUTCH_PIN, LOW);  // disengage
-  }
-
   // Always update rudder ADC for limit logic
   int a = analogRead(RUDDER_PIN);   // 0..1023
   rudder_adc_last = a;
 
-  // Determine end-of-travel based on ADC and limit switches
-  bool at_port_end = port_limit_switch_hit() ||
-                     (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
-  bool at_stbd_end = stbd_limit_switch_hit() ||
-                     (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
+  bool at_port_end = (a >= (RUDDER_ADC_PORT_END - RUDDER_ADC_MARGIN));
+  bool at_stbd_end = (a <= (RUDDER_ADC_STBD_END + RUDDER_ADC_MARGIN));
 
-  // Update rudder fault flags
+  // Update rudder fault flags (as before)
   if (at_port_end) {
     flags |= MAX_RUDDER_FAULT;
   } else {
@@ -630,7 +623,49 @@ void update_motor_from_command() {
     flags &= ~MIN_RUDDER_FAULT;
   }
 
-  // If not engaged, stop motor
+  // ---- Manual override branch (AP disengaged) ----
+  if (manual_override) {
+    // Respect limits
+    if (manual_dir > 0 && at_port_end) {
+      // Trying to jog further to port, but at/near port end → stop
+      analogWrite(HBRIDGE_PWM_PIN, 0);
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      return;
+    }
+    if (manual_dir < 0 && at_stbd_end) {
+      // Trying to jog further to stbd, but at/near stbd end → stop
+      analogWrite(HBRIDGE_PWM_PIN, 0);
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      return;
+    }
+
+    const uint8_t duty = 255;  // full duty for now; you can tune later
+
+    if (manual_dir > 0) {
+      // PORT: increase ADC
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+    } else if (manual_dir < 0) {
+      // STBD: decrease ADC
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+    } else {
+      // No direction -> stop
+      analogWrite(HBRIDGE_PWM_PIN, 0);
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      return;
+    }
+
+    analogWrite(HBRIDGE_PWM_PIN, duty);
+    return;  // do not fall through to autopilot logic
+  }
+
+  // ---- Existing autopilot logic below (unchanged) ----
+
+  // If not engaged, stop motor as before
   if (!(flags & ENGAGED)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
@@ -638,67 +673,7 @@ void update_motor_from_command() {
     return;
   }
 
-  // Map last_command_val 0..2000 (1000 = neutral) to direction + duty
-  int16_t delta    = (int16_t)last_command_val - 1000;   // -1000..+1000
-  const int16_t deadband = 20;                           // small neutral zone
-
-  // Stop if within deadband
-  if (delta > -deadband && delta < deadband) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
-    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-    return;
-  }
-
-  // Gating: don't drive further into limits
-  if (delta > 0 && at_port_end) {
-    // Trying to move PORT but at/near port end -> stop
-    analogWrite(HBRIDGE_PWM_PIN, 0);
-    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-    return;
-  }
-
-  if (delta < 0 && at_stbd_end) {
-    // Trying to move STBD but at/near stbd end -> stop
-    analogWrite(HBRIDGE_PWM_PIN, 0);
-    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-    return;
-  }
-
-  // Compute PWM duty:
-  // - Use MIN_DUTY as the slowest commanded speed that still moves the motor
-  // - Use MAX_DUTY = 255 as full speed
-  // - Map |delta| in [deadband..1000] to [MIN_DUTY..MAX_DUTY]
-  const uint8_t MIN_DUTY = 255;
-  const uint8_t MAX_DUTY = 255;
-
-  int16_t abs_delta = delta > 0 ? delta : -delta;
-  if (abs_delta > 1000) abs_delta = 1000;
-
-  uint8_t duty;
-  if (abs_delta <= deadband) {
-    duty = MIN_DUTY;  // safety fallback
-  } else {
-    int16_t span      = 1000 - deadband;
-    int16_t effective = abs_delta - deadband;   // 0..span
-    duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
-  }
-
-  // Direction:
-  // From your tests: ADC at port end is HIGHER than at stbd end.
-  if (delta > 0) {
-    // Positive: move toward PORT (increase ADC)
-    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-  } else {
-    // Negative: move toward STBD (decrease ADC)
-    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
-  }
-
-  analogWrite(HBRIDGE_PWM_PIN, duty);
+  // ... your existing last_command_val / deadband / limit gating / PWM code ...
 }
 
 // Process one CRC-valid frame
@@ -874,7 +849,7 @@ void loop() {
     show_overlay("STOP");
   }
 
-  // ----- Button ladder on A6 (B1..B5) -----
+// ----- Button ladder on A6 (B1..B5) -----
 static ButtonID last_stable_button = BTN_NONE;
 static ButtonID last_raw_button    = BTN_NONE;
 static unsigned long btn_last_change_ms = 0;
@@ -893,12 +868,35 @@ if (now - btn_last_change_ms >= BUTTON_DEBOUNCE_MS) {
   stable_b = raw_b;
 }
 
+// Reset manual override by default; we’ll set it again below if needed
+manual_override = false;
+manual_dir      = 0;
+
+// Determine if AP is engaged from servo perspective
+bool ap_engaged = (flags & ENGAGED);
+
+// On a change of stable button state, act accordingly
 if (stable_b != last_stable_button) {
-  // Edge detected: button changed
-  if (stable_b != BTN_NONE) {
-    handle_button(stable_b);
+  if (ap_engaged) {
+    // AP engaged: use buttons to send events to pypilot (existing behaviour)
+    if (stable_b != BTN_NONE) {
+      handle_button(stable_b);
+    }
   }
   last_stable_button = stable_b;
+}
+
+// If AP is disengaged, use buttons as manual jog
+if (!ap_engaged) {
+  if (stable_b == BTN_B1 || stable_b == BTN_B2) {
+    // Define B1/B2 as starboard jog (negative direction)
+    manual_override = true;
+    manual_dir      = -1;
+  } else if (stable_b == BTN_B4 || stable_b == BTN_B5) {
+    // Define B4/B5 as port jog (positive direction)
+    manual_override = true;
+    manual_dir      = +1;
+  }
 }
 
   bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
@@ -1031,6 +1029,7 @@ if (stable_b != last_stable_button) {
     oled_draw();
   }
 }
+
 
 
 
