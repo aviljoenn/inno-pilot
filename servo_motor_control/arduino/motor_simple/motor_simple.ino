@@ -19,7 +19,7 @@
 #include "crc.h"    // your existing CRC-8 table + crc8()
 
 // ---- Inno-Pilot version ----
-const char INNOPILOT_VERSION[] = "V2";
+const char INNOPILOT_VERSION[] = "V2b";
 
 // Boot / online timing (user-tweakable)
 const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
@@ -1029,6 +1029,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
