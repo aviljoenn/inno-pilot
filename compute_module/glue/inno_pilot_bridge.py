@@ -15,6 +15,7 @@ BTN_EVT_MINUS1  = 2
 BTN_EVT_TOGGLE  = 3
 BTN_EVT_PLUS10  = 4
 BTN_EVT_PLUS1   = 5
+BTN_EVT_STOP    = 6
 
 # Bridge -> Nano state protocol
 AP_ENABLED_CODE = 0xE1  # value: 0/1
@@ -157,6 +158,9 @@ def main():
                                 target = True if ap_enabled is None else (not ap_enabled)
                                 client.set('ap.enabled', target)
                                 print(f"Inno-Pilot: set ap.enabled -> {target}")
+
+                            elif value == BTN_EVT_STOP:
+                                client.set('ap.enabled', False)
 
                             elif value in (BTN_EVT_MINUS10, BTN_EVT_MINUS1, BTN_EVT_PLUS10, BTN_EVT_PLUS1):
                                 if heading_cmd is None:
