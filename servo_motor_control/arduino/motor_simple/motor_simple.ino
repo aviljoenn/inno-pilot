@@ -429,6 +429,33 @@ void oled_draw() {
 
   bool temp_valid  = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
 
+  // Format Vin / I / Temp for right-hand column
+  char vnum[10], inum[10], tnum[10];
+  char vbuf[12], ibuf[12], tbuf[12];
+
+  // Vin
+  dtostrf(vin, 0, 1, vnum);
+  strncpy(vbuf, vnum, sizeof(vbuf));
+  vbuf[sizeof(vbuf) - 1] = '\0';
+  strncat(vbuf, "V", sizeof(vbuf) - strlen(vbuf) - 1);
+
+  // Current
+  dtostrf(ia, 0, 2, inum);
+  strncpy(ibuf, inum, sizeof(ibuf));
+  ibuf[sizeof(ibuf) - 1] = '\0';
+  strncat(ibuf, "A", sizeof(ibuf) - strlen(ibuf) - 1);
+
+  // Temp
+  if (!temp_valid) {
+    strncpy(tbuf, "--.-C", sizeof(tbuf));
+    tbuf[sizeof(tbuf) - 1] = '\0';
+  } else {
+    dtostrf(temp_c, 0, 1, tnum);
+    strncpy(tbuf, tnum, sizeof(tbuf));
+    tbuf[sizeof(tbuf) - 1] = '\0';
+    strncat(tbuf, "C", sizeof(tbuf) - strlen(tbuf) - 1);
+  }
+
   // Compute rudder angle from ADC (rough mapping, to be replaced later by pypilot calibration)
   float rudder_deg = 0.0f;
   {
@@ -485,7 +512,7 @@ void oled_draw() {
     return;
   }
 
-    // ----- Overlay: big transient button feedback -----
+  // ----- Overlay: big transient button feedback -----
   if (overlay_active) {
     if (now - overlay_start_ms < OVERLAY_DURATION_MS) {
       // Draw the header (already done above), then big centered text
@@ -563,7 +590,10 @@ void oled_draw() {
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // Rudder angle display
+  // Main Vin & current (left side line if you want, or we can rely on right column only)
+  // Here we use the bottom line for rudder instead.
+
+  // Rudder angle display on bottom line
   display.setCursor(0, 52);
   display.print(F("Rudder: "));
   display.print(rudder_deg, 1);   // one decimal
@@ -1029,6 +1059,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
