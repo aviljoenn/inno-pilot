@@ -31,11 +31,11 @@ const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
 bool pi_online_at_boot = false;
 
 // Bridge->Nano: extra telemetry (tenths of degrees)
-const uint8_t PILOT_HEADING_CODE = 0xE2; // imu.heading * 10 (uint16)
+const uint8_t PILOT_HEADING_CODE = 0xE2; // ap.heading * 10 (uint16)
 const uint8_t PILOT_COMMAND_CODE = 0xE3; // ap.heading_command * 10 (uint16)
 const uint8_t PILOT_RUDDER_CODE  = 0xE4; // rudder.angle * 10 (int16, two's complement)
-const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // Port limit angle according to pypilot
-const uint8_t PILOT_RUDDER_STBD_LIM_CODE  = 0xE6; // Starboard limit angle according to pypilot
+const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit deg * 10 (int16)
+const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit deg * 10 (int16)
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -46,6 +46,12 @@ uint16_t pilot_command_deg10 = 0;
 
 bool     pilot_rudder_valid  = false;
 int16_t  pilot_rudder_deg10  = 0;
+
+bool     pilot_port_lim_valid = false;
+int16_t  pilot_port_lim_deg10 = 0;
+
+bool     pilot_stbd_lim_valid = false;
+int16_t  pilot_stbd_lim_deg10 = 0;
 
 bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
@@ -1236,6 +1242,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
