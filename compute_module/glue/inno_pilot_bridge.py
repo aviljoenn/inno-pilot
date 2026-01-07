@@ -8,6 +8,18 @@ NANO_PORT  = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"  # real Nan
 PILOT_PORT = "/dev/ttyINNOPILOT_BRIDGE"                               # PTY side that talks to pypilot
 BAUD       = 38400
 
+# Bridge -> Nano state protocol
+AP_ENABLED_CODE = 0xE1  # value: 0/1
+# Bridge -> Nano telemetry (pypilot truth)
+PILOT_HEADING_CODE     = 0xE2  # imu.heading * 10  (uint16)
+PILOT_COMMAND_CODE     = 0xE3  # ap.heading_command * 10 (uint16)
+PILOT_RUDDER_CODE      = 0xE4  # rudder.angle * 10 (int16 -> two's complement in uint16)
+PILOT_RUDDER_PORT_CODE = 0xE5  # +rudder.range * 10 (int16)
+PILOT_RUDDER_STBD_CODE = 0xE6  # -rudder.range * 10 (int16)
+# Optional: send pypilot-calibrated rudder limits too
+PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # +limit * 10 (signed int16)
+PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # -limit * 10 (signed int16)
+
 # Nano -> Bridge button event protocol
 BUTTON_EVENT_CODE = 0xE0
 BTN_EVT_MINUS10 = 1
@@ -24,7 +36,7 @@ PILOT_RUDDER_CODE   = 0xE4  # rudder.angle * 10 (int16 in two's complement)
 
 # How often to refresh telemetry to Nano
 AP_STATE_PERIOD_S = 0.5
-TELEM_PERIOD_S    = 0.25  # heading/command/rudder
+TELEM_PERIOD_S    = 0.2  # heading/command/rudder
 
 def crc8_msb(data: bytes, poly: int = 0x31, init: int = 0xFF) -> int:
     """CRC-8 MSB-first, poly 0x31, init 0xFF (matches Arduino crc8)."""
@@ -43,6 +55,9 @@ def build_frame(code: int, value_u16: int) -> bytes:
     hi = (value_u16 >> 8) & 0xFF
     body = bytes([code, lo, hi])
     return body + bytes([crc8_msb(body)])
+
+def to_u16_signed(v: int) -> int:
+    return v & 0xFFFF
 
 def clamp_heading(deg: float) -> float:
     deg = deg % 360.0
@@ -68,15 +83,22 @@ def enc_deg10_i16(deg: float) -> int:
 def main():
     # pypilot TCP client
     client = pypilotClient()
-    client.watch("ap.enabled", True)
-    client.watch("ap.heading_command", True)
-    client.watch("imu.heading", True)
-    client.watch("rudder.angle", True)
+
+    # pypilot truth we want on the Nano
+    client.watch('ap.enabled', True)
+    client.watch('imu.heading', True)
+    client.watch('ap.heading_command', True)
+    client.watch('rudder.angle', True)
+    client.watch('rudder.range', True)
 
     ap_enabled = None
     heading_cmd = None
     heading = None
     rudder_angle = None
+    imu_heading  = None
+    rudder_range = None
+    pilot_heading = None
+    pilot_rudder  = None
 
     # Open serial ports
     nano  = serial.Serial(NANO_PORT,  BAUD, timeout=0.01)
@@ -87,7 +109,6 @@ def main():
 
     last_ap_sent = None
     last_ap_sent_ts = 0.0
-
     last_telem_ts = 0.0
 
     while True:
@@ -119,6 +140,12 @@ def main():
             except Exception:
                 pass
 
+        if 'rudder.range' in msgs:
+            try: 
+                rudder_range = float(msgs['rudder.range'])
+            except Exception: 
+                pass
+
         # ---- Push AP enabled state down to Nano (keepalive + on change) ----
         if ap_enabled is not None:
             need_send = (last_ap_sent is None) or (ap_enabled != last_ap_sent) or ((now - last_ap_sent_ts) >= AP_STATE_PERIOD_S)
@@ -127,6 +154,55 @@ def main():
                 last_ap_sent = ap_enabled
                 last_ap_sent_ts = now
 
+        # ---- Push extra telemetry down to Nano (periodic) ----
+        # Keep this lightweight; we send at most once per loop tick here.
+        # If values are None, we just skip that frame.
+        if 'last_telem_ts' not in locals():
+            last_telem_ts = 0.0
+
+        TELEM_PERIOD_S = 0.2  # 5 Hz
+        if (now - last_telem_ts) >= TELEM_PERIOD_S:
+            last_telem_ts = now
+
+            # helper packers
+            def u16(v: int) -> int:
+                return max(0, min(65535, int(v)))
+
+            def deg10_heading(x: float) -> int:
+                # Normalize to 0..360 and scale by 10
+                x = x % 360.0
+                if x < 0:
+                    x += 360.0
+                return u16(round(x * 10.0))
+
+            def s16_deg10(x: float) -> int:
+                # signed int16 *10, returned as uint16 two's complement
+                v = int(round(x * 10.0))
+                if v < -32768: v = -32768
+                if v >  32767: v =  32767
+                return v & 0xFFFF
+
+            # imu.heading
+            if pilot_heading is not None:
+                nano.write(build_frame(PILOT_HEADING_CODE, deg10_heading(pilot_heading)))
+
+            # ap.heading_command
+            if heading_cmd is not None:
+                nano.write(build_frame(PILOT_COMMAND_CODE, deg10_heading(heading_cmd)))
+
+            # rudder.angle
+            if pilot_rudder is not None:
+                nano.write(build_frame(PILOT_RUDDER_CODE, s16_deg10(pilot_rudder)))
+
+            # rudder limits (derive from rudder.range if available)
+            # pypilot uses rudder.range as a symmetric limit (±range). If you later move to min/max, we’ll adjust.
+            if rudder_range is not None:
+                port_lim = abs(rudder_range)          # +degrees
+                stbd_lim = -abs(rudder_range)         # -degrees
+                nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, s16_deg10(port_lim)))
+                nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, s16_deg10(stbd_lim)))
+
+        
         # ---- Push heading/command/rudder telemetry ----
         if (now - last_telem_ts) >= TELEM_PERIOD_S:
             last_telem_ts = now
