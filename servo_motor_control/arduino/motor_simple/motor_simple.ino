@@ -527,7 +527,8 @@ void oled_draw() {
   } else if (boot_offline || pi_timed_out) {
     display.print(F("Inno-Cntl: Off-line"));
   } else {
-    display.print(F("Inno-Cntl: On-line"));
+    display.print(F("Inno-Cntl: On-line "));
+    display.print(F(INNOPILOT_VERSION));
   }
 
   // Overlay (big transient button feedback) – leave bottom line off during overlay
@@ -1242,6 +1243,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
