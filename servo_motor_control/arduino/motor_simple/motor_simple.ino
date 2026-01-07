@@ -30,6 +30,21 @@ const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
 const unsigned long ONLINE_SPLASH_MS  = 3000UL;   // 3s "On-line" splash
 bool pi_online_at_boot = false;
 
+// Bridge->Nano: extra telemetry (tenths of degrees)
+const uint8_t PILOT_HEADING_CODE = 0xE2; // imu.heading * 10 (uint16)
+const uint8_t PILOT_COMMAND_CODE = 0xE3; // ap.heading_command * 10 (uint16)
+const uint8_t PILOT_RUDDER_CODE  = 0xE4; // rudder.angle * 10 (int16, two's complement)
+
+// Cached telemetry from pypilot (for OLED)
+bool     pilot_heading_valid = false;
+uint16_t pilot_heading_deg10 = 0;
+
+bool     pilot_command_valid = false;
+uint16_t pilot_command_deg10 = 0;
+
+bool     pilot_rudder_valid  = false;
+int16_t  pilot_rudder_deg10  = 0;
+
 bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
 bool pi_online           = false;    // true once we see first valid frame
@@ -564,11 +579,22 @@ void oled_draw() {
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // y=36: Rudder
-  display.setCursor(0, 36);
-  display.print(F("Rudder: "));
+  // Heading / Command
+  display.setCursor(0, LINE2_Y + 20);
+  display.print(F("Head: "));
+  if (pilot_heading_valid) display.print(pilot_heading_deg10 / 10.0f, 1);
+  else display.print(F("--.-"));
+  display.print(F(" Cmd: "));
+  if (pilot_command_valid) display.print(pilot_command_deg10 / 10.0f, 1);
+  else display.print(F("--.-"));
+
+  // Rudder compare (Nano vs Pypilot)
+  display.setCursor(0, LINE2_Y + 30);
+  display.print(F("Rud N:"));
   display.print(rudder_deg, 1);
-  display.print(F(" deg"));
+  display.print(F(" P:"));
+  if (pilot_rudder_valid) display.print(pilot_rudder_deg10 / 10.0f, 1);
+  else display.print(F("--.-"));
 
   display.display();
 }
@@ -803,6 +829,21 @@ void process_packet() {
       }
       break;
     }
+    
+    case PILOT_HEADING_CODE:
+      pilot_heading_deg10 = value;
+      pilot_heading_valid = true;
+      break;
+
+    case PILOT_COMMAND_CODE:
+      pilot_command_deg10 = value;
+      pilot_command_valid = true;
+      break;
+
+    case PILOT_RUDDER_CODE:
+      pilot_rudder_deg10 = (int16_t)value; // interpret two's complement
+      pilot_rudder_valid = true;
+      break;
 
     default:
       // Unhandled commands ignored for now
@@ -1140,5 +1181,6 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
