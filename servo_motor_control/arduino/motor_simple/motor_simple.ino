@@ -520,8 +520,8 @@ void oled_draw() {
   if (within_boot_window) {
     uint8_t pct = (uint8_t)((elapsed_boot * 100UL) / PI_BOOT_EST_MS);
     if (pct > 100) pct = 100;
-    // tight formatting so it fits: "Inno-Cntl:Booting100%"
-    display.print(F("Inno-Cntl:Booting"));
+    // tight formatting so it fits: "Inno-Cntl:Boot 100%"
+    display.print(F("Inno-Cntl:Boot "));
     display.print(pct);
     display.print(F("%"));
   } else if (boot_offline || pi_timed_out) {
@@ -1242,6 +1242,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
