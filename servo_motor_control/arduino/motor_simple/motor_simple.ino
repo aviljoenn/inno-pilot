@@ -593,16 +593,19 @@ void oled_draw() {
   // Main Vin & current (left side line if you want, or we can rely on right column only)
   // Here we use the bottom line for rudder instead.
 
-  // Rudder angle display on bottom line
-  display.setCursor(0, 52);
+  // Rudder angle line (just above the bottom)
+  display.setCursor(0, LINE2_Y + 30);
   display.print(F("Rudder: "));
   display.print(rudder_deg, 1);   // one decimal
   display.print(F(" deg"));
 
-  // Right column: main Vin, current, temp
-  oled_print_right(0,  vbuf);  // main Vin
-  oled_print_right(10, ibuf);  // current
-  oled_print_right(20, tbuf);  // temp
+  // Bottom line: Vin / I / Temp in one row
+  display.setCursor(0, 52);
+  display.print(vbuf);   // e.g. "12.8V"
+  display.print(F("  "));
+  display.print(ibuf);   // e.g. "0.42A"
+  display.print(F("  "));
+  display.print(tbuf);   // e.g. "31.2C"
 
   display.display();
 }
@@ -907,12 +910,18 @@ bool ap_engaged = (flags & ENGAGED);
 
 // On a change of stable button state, act accordingly
 if (stable_b != last_stable_button) {
-  if (ap_engaged) {
-    // AP engaged: use buttons to send events to pypilot (existing behaviour)
-    if (stable_b != BTN_NONE) {
+  if (stable_b != BTN_NONE) {
+
+    // B3 must always work (it is the AP toggle)
+    if (stable_b == BTN_B3) {
+      handle_button(stable_b);
+
+    // Other buttons only send events when AP is engaged
+    } else if (ap_engaged) {
       handle_button(stable_b);
     }
   }
+
   last_stable_button = stable_b;
 }
 
@@ -1059,6 +1068,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
