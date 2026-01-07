@@ -896,13 +896,13 @@ void process_packet() {
       break;
 
     case PILOT_RUDDER_PORT_LIM_CODE:
-      pilot_port_limit_deg10 = (int16_t)value;
-      pilot_port_limit_valid = true;
+      pilot_port_lim_deg10 = (int16_t)value;
+      pilot_port_lim_valid = true;
       break;
     
     case PILOT_RUDDER_STBD_LIM_CODE:
-      pilot_stbd_limit_deg10 = (int16_t)value;
-      pilot_stbd_limit_valid = true;
+      pilot_stbd_lim_deg10 = (int16_t)value;
+      pilot_stbd_lim_valid = true;
       break;
 
     
@@ -1242,6 +1242,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
