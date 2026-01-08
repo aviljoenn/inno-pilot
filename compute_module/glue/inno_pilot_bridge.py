@@ -175,10 +175,10 @@ def main():
         
         # limits derived from rudder.range (0xE5 port, 0xE6 stbd)
         if rudder_range is not None:
-            port_lim = int(round(+rudder_range * 10))
-            stbd_lim = int(round(-rudder_range * 10))
-            nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, port_lim & 0xFFFF))
-            nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, stbd_lim & 0xFFFF))
+            port_lim = -abs(rudder_range)
+            stbd_lim = abs(rudder_range)
+            nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim)))
+            nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, enc_deg10_i16(stbd_lim)))
     
         # ---- Push extra telemetry down to Nano (periodic) ----
         # Keep this lightweight; we send at most once per loop tick here.
@@ -220,13 +220,7 @@ def main():
             if pilot_rudder is not None:
                 nano.write(build_frame(PILOT_RUDDER_CODE, s16_deg10(pilot_rudder)))
 
-            # rudder limits (derive from rudder.range if available)
-            # pypilot uses rudder.range as a symmetric limit (±range). If you later move to min/max, we’ll adjust.
-            if rudder_range is not None:
-                port_lim = -abs(rudder_range)         # port (negative)
-                stbd_lim =  abs(rudder_range)         # starboard (positive)
-                nano.write(build_frame(PILOT_RUDDER_PORT_LIM_CODE, s16_deg10(port_lim)))
-                nano.write(build_frame(PILOT_RUDDER_STBD_LIM_CODE, s16_deg10(stbd_lim)))
+
 
         
         # ---- Push heading/command/rudder telemetry ----
