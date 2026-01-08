@@ -132,8 +132,10 @@ bool oled_ok = false;
 
 // ---- Rudder calibration (from motor_limit_test) ----
 // Raw ADC counts (0..1023)
-const int RUDDER_ADC_PORT_END  = 153;   // ADC at port end (lower = port)
-const int RUDDER_ADC_STBD_END  = 711;   // ADC at starboard end (higher = stbd)
+// Hard safety endpoints for the rudder pot. These should be near the ADC rails so
+// manual jog only stops at the mechanical ends if everything else fails.
+const int RUDDER_ADC_PORT_END  = 1;     // ADC at port end (lower = port)
+const int RUDDER_ADC_STBD_END  = 1022;  // ADC at starboard end (higher = stbd)
 const int RUDDER_ADC_MARGIN    = 10;    // safety margin on each end
 const int RUDDER_ADC_END_HYST  = 8;    // extra counts to CLEAR end-latch (prevents flicker)
 
