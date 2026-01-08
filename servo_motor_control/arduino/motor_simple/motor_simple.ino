@@ -653,6 +653,13 @@ void update_motor_from_command() {
   unsigned long now = millis();
   bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
   bool ap_active = ap_enabled_remote && pi_alive;
+  bool pilot_limits_ok = pi_alive &&
+                         pilot_rudder_valid &&
+                         pilot_port_lim_valid &&
+                         pilot_stbd_lim_valid &&
+                         (pilot_port_lim_deg10 < pilot_stbd_lim_deg10);
+  bool at_port_pilot = pilot_limits_ok && (pilot_rudder_deg10 <= pilot_port_lim_deg10);
+  bool at_stbd_pilot = pilot_limits_ok && (pilot_rudder_deg10 >= pilot_stbd_lim_deg10);
 
   // Clutch engages when AP is enabled remotely OR manual jog is active.
   // Safety: clutch forced OFF during pi_fault or overtemp.
@@ -732,14 +739,14 @@ void update_motor_from_command() {
   // ---- Manual override branch (AP disengaged) ----
   if (manual_override) {
     // Respect limits
-    if (manual_dir < 0 && at_port_end) {
+    if (manual_dir < 0 && (at_port_end || at_port_pilot)) {
       // Trying to jog further to port, but at/near port end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
-    if (manual_dir > 0 && at_stbd_end) {
+    if (manual_dir > 0 && (at_stbd_end || at_stbd_pilot)) {
       // Trying to jog further to stbd, but at/near stbd end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
