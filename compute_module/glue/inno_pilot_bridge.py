@@ -321,7 +321,7 @@ def main():
         except serial.serialutil.SerialException as exc:
             print("ERROR: Nano serial read failed.")
             print(f"Exception: {exc}")
-            print(f"NANO_PORT: {nano_port}")
+            print(f"NANO_PORT: {NANO_PORT}")
             print(f"PILOT_PORT: {PILOT_PORT}")
             print(f"BAUD: {BAUD}")
             print(f"Nano is_open: {getattr(nano, 'is_open', None)}")
