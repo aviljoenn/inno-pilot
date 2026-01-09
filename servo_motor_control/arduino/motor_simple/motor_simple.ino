@@ -1090,7 +1090,12 @@ void setup() {
 
   Wire.begin();
   oled_last_init_ms = millis();
-  oled_try_init(true);
+  bool init_ok = oled_try_init(true);
+  if (!init_ok) {
+    Serial.println(F("OLED INIT FAILED (0x3C)"));
+  } else {
+    Serial.println(F("OLED INIT OK (0x3C)"));
+  }
 
   // after splash, start boot timer reference
   boot_start_ms = millis();
