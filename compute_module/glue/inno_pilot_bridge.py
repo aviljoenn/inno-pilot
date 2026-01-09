@@ -245,7 +245,19 @@ def main():
             nano.write(data_from_pilot)
 
         # ---- Data from Nano -> pypilot ----
-        data_from_nano = nano.read(256)
+        try:
+            data_from_nano = nano.read(256)
+        except serial.serialutil.SerialException as exc:
+            print("ERROR: Nano serial read failed.")
+            print(f"Exception: {exc}")
+            print(f"NANO_PORT: {NANO_PORT}")
+            print(f"PILOT_PORT: {PILOT_PORT}")
+            print(f"BAUD: {BAUD}")
+            print(f"Nano is_open: {getattr(nano, 'is_open', None)}")
+            print(f"Nano in_waiting: {getattr(nano, 'in_waiting', None)}")
+            print(f"Pilot is_open: {getattr(pilot, 'is_open', None)}")
+            print(f"Pilot in_waiting: {getattr(pilot, 'in_waiting', None)}")
+            raise SystemExit(1) from exc
         if data_from_nano:
             frame_buf.extend(data_from_nano)
 
