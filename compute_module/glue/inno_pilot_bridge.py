@@ -45,6 +45,9 @@ BRIDGE_MAGIC2 = 0x5A
 BRIDGE_HELLO_CODE = 0xF0
 BRIDGE_HELLO_ACK_CODE = 0xF1
 BRIDGE_HELLO_VALUE = 0xBEEF
+PROBE_INITIAL_DELAY_S = 1.0
+PROBE_RETRIES = 3
+PROBE_RETRY_DELAY_S = 2.0
 
 def crc8_msb(data: bytes, poly: int = 0x31, init: int = 0xFF) -> int:
     """CRC-8 MSB-first, poly 0x31, init 0xFF (matches Arduino crc8)."""
@@ -86,18 +89,23 @@ def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
 def probe_nano_port(port: str, timeout_s: float = 0.5) -> bool:
     try:
         with serial.Serial(port, BAUD, timeout=0.1) as probe:
-            probe.write(wrap_frame(build_frame(BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)))
-            buf = bytearray()
-            deadline = time.monotonic() + timeout_s
-            while time.monotonic() < deadline:
-                chunk = probe.read(64)
-                if chunk:
-                    buf.extend(chunk)
-                    for frame in extract_wrapped_frames(buf):
-                        code = frame[0]
-                        value = frame[1] | (frame[2] << 8)
-                        if code == BRIDGE_HELLO_ACK_CODE and value == BRIDGE_HELLO_VALUE:
-                            return True
+            time.sleep(PROBE_INITIAL_DELAY_S)
+            for attempt in range(PROBE_RETRIES):
+                probe.reset_input_buffer()
+                probe.write(wrap_frame(build_frame(BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)))
+                buf = bytearray()
+                deadline = time.monotonic() + timeout_s
+                while time.monotonic() < deadline:
+                    chunk = probe.read(64)
+                    if chunk:
+                        buf.extend(chunk)
+                        for frame in extract_wrapped_frames(buf):
+                            code = frame[0]
+                            value = frame[1] | (frame[2] << 8)
+                            if code == BRIDGE_HELLO_ACK_CODE and value == BRIDGE_HELLO_VALUE:
+                                return True
+                if attempt < (PROBE_RETRIES - 1):
+                    time.sleep(PROBE_RETRY_DELAY_S)
             return False
     except Exception:
         return False
