@@ -134,6 +134,8 @@ OneWire oneWire(PIN_DS18B20);
 DallasTemperature tempSensors(&oneWire);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 bool oled_ok = false;
+unsigned long oled_last_init_ms = 0;
+const unsigned long OLED_INIT_RETRY_MS = 1000UL;
 
 // ---- Rudder calibration (from motor_limit_test) ----
 // Raw ADC counts (0..1023)
@@ -179,6 +181,7 @@ uint16_t read_rudder_scaled();
 int read_rudder_adc();
 bool port_limit_switch_hit();
 bool stbd_limit_switch_hit();
+bool oled_try_init(bool allow_blocking_splash);
 
 // ---- Result codes ----
 enum results {
@@ -640,6 +643,34 @@ void oled_draw() {
   display.display();
 }
 
+bool oled_try_init(bool allow_blocking_splash) {
+  oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  if (!oled_ok) {
+    return false;
+  }
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // Splash: big Inno-Pilot
+  display.setTextSize(2);
+  display.setCursor(0, 10);
+  display.println(F("Inno-Pilot"));
+
+  display.setTextSize(1);
+  display.setCursor(30, 36);
+  display.print(F("Version "));
+  display.println(INNOPILOT_VERSION);
+
+  display.display();
+  // Only block for the full splash if the Pi doesn't appear online yet
+  if (allow_blocking_splash && !pi_online_at_boot) {
+    delay(3000);   // Pi booting: OK to block
+  }
+
+  return true;
+}
+
 // Read rudder pot and scale to 0..65535 for telemetry
 uint16_t read_rudder_scaled() {
   int a = read_rudder_adc();   // 0..1023 (inverted so higher = starboard)
@@ -1058,27 +1089,8 @@ void setup() {
   temp_cycle_ms = 0;
 
   Wire.begin();
-  oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  if (oled_ok) {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-
-    // Splash: big Inno-Pilot
-    display.setTextSize(2);
-    display.setCursor(0, 10);
-    display.println(F("Inno-Pilot"));
-
-    display.setTextSize(1);
-    display.setCursor(30, 36);
-    display.print(F("Version "));
-    display.println(INNOPILOT_VERSION);
-
-    display.display();
-    // Only block for the full splash if the Pi doesn't appear online yet
-    if (!pi_online_at_boot) {
-      delay(3000);   // Pi booting: OK to block
-    }
-}
+  oled_last_init_ms = millis();
+  oled_try_init(true);
 
   // after splash, start boot timer reference
   boot_start_ms = millis();
@@ -1100,6 +1112,10 @@ void loop() {
   unsigned long now = millis();
 
   temp_service(now);
+  if (!oled_ok && (now - oled_last_init_ms >= OLED_INIT_RETRY_MS)) {
+    oled_last_init_ms = now;
+    oled_try_init(false);
+  }
   // Expire optimistic AP display override if remote didn't confirm in time
   if (ap_display_override_until_ms && now > ap_display_override_until_ms) {
     ap_display_override_until_ms = 0;
