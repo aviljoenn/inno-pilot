@@ -19,6 +19,8 @@
 #include <DallasTemperature.h>
 #include "crc.h"    // your existing CRC-8 table + crc8()
 
+enum ButtonID : uint8_t;
+
 // ---- Inno-Pilot version ----
 const char INNOPILOT_VERSION[] = "V2d";
 
@@ -221,7 +223,7 @@ enum {
 };
 
 // Button IDs from the A6 resistor ladder
-enum ButtonID {
+enum ButtonID : uint8_t {
   BTN_NONE = 0,
   BTN_B1,  // -10 deg
   BTN_B2,  // -1  deg
@@ -406,6 +408,7 @@ float read_current_a() {
     uint16_t a1 = curr_adc_at(i + 1);
 
     if (adc <= a0 && adc >= a1) {
+      
       float x0 = (float)a0;
       float x1 = (float)a1;
       float y0 = curr_a_at(i);
@@ -1379,6 +1382,7 @@ if (!ap_engaged) {
     oled_draw();
   }
 }
+
 
 
 
