@@ -26,6 +26,9 @@ Audience: automated coding agents (Codex, etc.) working in this repository.
 - Prefer constants, enums, and clear pin naming.
 - If touching IO pins, power, ADC scaling, or interrupts: **explain assumptions** in the PR.
 
+### Testing of code
+- Testing for code is considered done if the code compiles without errors.
+
 ---
 
 ## Repo hygiene rules
