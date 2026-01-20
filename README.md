@@ -20,17 +20,6 @@ wraps it into a more opinionated hardware + software product.
 
 This repository is structured around the Inno-Pilot product, not just pypilot.
 
-### `hardware/`
-
-Documentation and artefacts about the physical system:
-
-- Modules and components (IMU, motor driver, clutch relay, Nano board, etc.)
-- Wiring diagrams and connection notes
-- Enclosure / mounting guidance
-- Datasheets and application notes, e.g. IBT-2 H-Bridge
-
-_Example:_ `hardware/HKD Dual 43A H-Bridge Motor Driver (IBT-2) – Overview & Arduino Control.docx`
-
 ### `servo_motor_control/`
 
 Everything related to the **servo/motor controller** firmware – i.e. the electronics
@@ -41,6 +30,11 @@ Current structure:
 - `servo_motor_control/arduino/`  
   Arduino Nano implementation (e.g. `motor_simple.ino`) for the IBT-2 driver + clutch +
   rudder sensor.
+- `servo_motor_control/docs/`  
+  Documentation and artefacts about the physical system (modules, wiring, enclosure,
+  datasheets).
+
+_Example:_ `servo_motor_control/docs/HKD Dual 43A H-Bridge Motor Driver (IBT-2) – Overview & Arduino Control.docx`
 
 Future expansions might include:
 
@@ -118,6 +112,12 @@ Contents:
 
 ---
 
+### `inno-remote/`
+
+ESP32-C3 handheld wireless remote for the autopilot (hardware + firmware).
+
+---
+
 ## High-level architecture (Inno-Pilot V2)
 
 At a high level, an Inno-Pilot installation looks like this:
@@ -178,7 +178,7 @@ This repository adds:
 If you want to:
 
 - **Build the hardware:**
-  Look under `hardware/` for modules, wiring and BOM information.
+  Look under `servo_motor_control/docs/` for modules, wiring and BOM information.
 - **Work on the servo motor controller:**
   Start in `servo_motor_control/arduino/`.
 - **Work on the compute module (Pi Zero) side:**
