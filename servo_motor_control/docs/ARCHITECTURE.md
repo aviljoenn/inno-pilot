@@ -14,7 +14,7 @@ The autopilot logic is based on **Sean D’Epagnier’s pypilot** (used as an in
 - a “glue” layer to integrate buttons + telemetry without hacking upstream pypilot
 
 Repository layout (high level):
-- `hardware/` – physical build, wiring, modules, power, mounting
+- `servo_motor_control/docs/` – physical build, wiring, modules, power, mounting
 - `servo_motor_control/` – Arduino sketches & servo controller logic
 - `compute_module/` – Pi Zero (or other SBC) setup, pypilot component, glue layer
   - `compute_module/pypilot/` – pypilot component (upstream-derived)
@@ -105,4 +105,3 @@ Secondary safety (Nano): absolute “never exceed” protection:
 - GitHub is the single source of truth
 - On the Pi Zero: `git pull` + deploy script(s) + restart services
 - Avoid hand-editing system files on the Pi (systemd units and scripts live in repo and are installed by deploy scripts)
-
