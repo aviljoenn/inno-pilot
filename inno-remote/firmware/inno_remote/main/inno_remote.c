@@ -684,37 +684,6 @@ void app_main(void)
         bool pressed_event = (stable_btn != prev_stable_btn) && (stable_btn != BTN_NONE);
         if (stable_btn != prev_stable_btn) prev_stable_btn = stable_btn;
 
-        // If STOP is active: freeze everything, ignore inputs and motion
-        if (!stop_on) {
-            if (pressed_event) {
-                if (in_auto) {
-                    if (stable_btn == BTN_3) {
-                        ap_on = !ap_on;
-                    } else {
-                        switch (stable_btn) {
-                            case BTN_1: command_deg = wrap360(command_deg - 10); break;
-                            case BTN_2: command_deg = wrap360(command_deg - 1);  break;
-                            case BTN_4: command_deg = wrap360(command_deg + 1);  break;
-                            case BTN_5: command_deg = wrap360(command_deg + 10); break;
-                            default: break;
-                        }
-                    }
-                } else if (in_manual) {
-                    manual_using_jog = true;
-                    switch (stable_btn) {
-                        case BTN_1: manual_rudder_deg -= 10.0f; break; // <<
-                        case BTN_2: manual_rudder_deg -= 1.0f;  break; // <
-                        case BTN_3: manual_rudder_deg  = 0.0f;  break; // |
-                        case BTN_4: manual_rudder_deg += 1.0f;  break; // >
-                        case BTN_5: manual_rudder_deg += 10.0f; break; // >>
-                        default: break;
-                    }
-                    if (manual_rudder_deg >  MAX_RUDDER_DEG) manual_rudder_deg =  MAX_RUDDER_DEG;
-                    if (manual_rudder_deg < -MAX_RUDDER_DEG) manual_rudder_deg = -MAX_RUDDER_DEG;
-                }
-            }
-        }
-
         // ===== STOP press edge detect =====
         uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         bool stop_edge_press = (stop_on && !prev_stop_on);
@@ -769,12 +738,6 @@ void app_main(void)
 
         // ===== Log View Mode =====
         if (log_view) {
-
-            // arm STOP-to-exit only after user releases STOP
-            if (log_ignore_stop_until_release && stop_edge_release) {
-                log_ignore_stop_until_release = false;
-            }
-
             if (!log_ignore_stop_until_release && stop_edge_press) {
                 log_view = false;
 
@@ -782,106 +745,137 @@ void app_main(void)
                 stop_tap_count = 0;
                 stop_window_start_ms = 0;
                 last_stop_press_ms = 0;
-                log_ignore_stop_until_release = true;
 
                 // Require a clean STOP release before we allow tap-to-enter again
                 log_ignore_stop_until_release = true;
 
                 // Also reset horizontal scroll
                 log_horiz = 0;
-                continue;
             }
 
-            // Update cached lengths when logs change; auto-follow bottom if pinned
-            uint32_t g = log_gen();
-            if (g != log_last_gen) {
-                log_last_gen = g;
-                log_cached_maxlen = log_max_len();
+            if (log_view) {
+                // Update cached lengths when logs change; auto-follow bottom if pinned
+                uint32_t g = log_gen();
+                if (g != log_last_gen) {
+                    log_last_gen = g;
+                    log_cached_maxlen = log_max_len();
 
-                int lines_per_screen = 10;
-                int total = (int)log_count();
-                int bottom_top = total - lines_per_screen;
-                if (bottom_top < 0) bottom_top = 0;
+                    int lines_per_screen = 10;
+                    int total = (int)log_count();
+                    int bottom_top = total - lines_per_screen;
+                    if (bottom_top < 0) bottom_top = 0;
 
-                if (log_pinned_bottom) {
-                    log_top = bottom_top;
-                } else {
-                    // clamp if buffer rolled
+                    if (log_pinned_bottom) {
+                        log_top = bottom_top;
+                    } else {
+                        // clamp if buffer rolled
+                        if (log_top > bottom_top) log_top = bottom_top;
+                    }
+                }
+
+                // POT horizontal scroll (0..max_offset chars)
+                int cols = 32; // ~128px / 4px per char with 4x6 font
+                int max_off = log_cached_maxlen - cols;
+                if (max_off < 0) max_off = 0;
+
+                int potv = raw_pot;
+                if (potv < 0) potv = 0;
+                if (potv > 4095) potv = 4095;
+                log_horiz = (max_off == 0) ? 0 : (int)((potv * (long)max_off + 2047) / 4095);
+
+                // Button controls (ladder buttons)
+                // BTN_1: page up, BTN_2: line up, BTN_3: bottom, BTN_4: line down, BTN_5: page down
+                if (pressed_event) {
+                    int lines_per_screen = 10;
+                    int total = (int)log_count();
+                    int bottom_top = total - lines_per_screen;
+                    if (bottom_top < 0) bottom_top = 0;
+
+                    if (stable_btn == BTN_1) {
+                        log_top -= lines_per_screen;
+                    } else if (stable_btn == BTN_2) {
+                        log_top -= 1;
+                    } else if (stable_btn == BTN_3) {
+                        log_top = bottom_top;
+                        log_pinned_bottom = true;
+                    } else if (stable_btn == BTN_4) {
+                        log_top += 1;
+                    } else if (stable_btn == BTN_5) {
+                        log_top += lines_per_screen;
+                    }
+
+                    if (log_top < 0) log_top = 0;
                     if (log_top > bottom_top) log_top = bottom_top;
+
+                    // pinned if at bottom
+                    log_pinned_bottom = (log_top == bottom_top);
                 }
+
+                // ===== Render Log View =====
+                u8g2_ClearBuffer(&u8g2);
+                u8g2_SetFont(&u8g2, u8g2_font_4x6_tf);
+
+                int ascent = u8g2_GetAscent(&u8g2);
+                int descent = u8g2_GetDescent(&u8g2);   // negative
+                int line_h = ascent - descent;
+                if (line_h <= 0) line_h = 6;
+
+                int lines_per_screen = SCREEN_H / line_h;
+                if (lines_per_screen < 1) lines_per_screen = 1;
+
+                char linebuf[LOG_LINE_MAX];
+
+                for (int i = 0; i < lines_per_screen; i++) {
+                    int idx = log_top + i;
+                    if (idx >= (int)log_count()) break;
+
+                    log_copy_line((uint16_t)idx, linebuf, sizeof(linebuf));
+
+                    // Apply horizontal scroll in characters
+                    int len = (int)strlen(linebuf);
+                    const char *p = linebuf;
+                    if (log_horiz < len) p = linebuf + log_horiz;
+                    else p = "";
+
+                    int y = i * line_h + ascent;
+                    u8g2_DrawStr(&u8g2, 0, y, p);
+                }
+
+                u8g2_SendBuffer(&u8g2);
+                vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+                continue; // skip normal UI while in log view
             }
+        }
 
-            // POT horizontal scroll (0..max_offset chars)
-            int cols = 32; // ~128px / 4px per char with 4x6 font
-            int max_off = log_cached_maxlen - cols;
-            if (max_off < 0) max_off = 0;
-
-            int potv = raw_pot;
-            if (potv < 0) potv = 0;
-            if (potv > 4095) potv = 4095;
-            log_horiz = (max_off == 0) ? 0 : (int)((potv * (long)max_off + 2047) / 4095);
-
-            // Button controls (ladder buttons)
-            // BTN_1: page up, BTN_2: line up, BTN_3: bottom, BTN_4: line down, BTN_5: page down
+        // If STOP is active: freeze everything, ignore inputs and motion
+        if (!stop_on) {
             if (pressed_event) {
-                int lines_per_screen = 10;
-                int total = (int)log_count();
-                int bottom_top = total - lines_per_screen;
-                if (bottom_top < 0) bottom_top = 0;
-
-                if (stable_btn == BTN_1) {
-                    log_top -= lines_per_screen;
-                } else if (stable_btn == BTN_2) {
-                    log_top -= 1;
-                } else if (stable_btn == BTN_3) {
-                    log_top = bottom_top;
-                    log_pinned_bottom = true;
-                } else if (stable_btn == BTN_4) {
-                    log_top += 1;
-                } else if (stable_btn == BTN_5) {
-                    log_top += lines_per_screen;
+                if (in_auto) {
+                    if (stable_btn == BTN_3) {
+                        ap_on = !ap_on;
+                    } else {
+                        switch (stable_btn) {
+                            case BTN_1: command_deg = wrap360(command_deg - 10); break;
+                            case BTN_2: command_deg = wrap360(command_deg - 1);  break;
+                            case BTN_4: command_deg = wrap360(command_deg + 1);  break;
+                            case BTN_5: command_deg = wrap360(command_deg + 10); break;
+                            default: break;
+                        }
+                    }
+                } else if (in_manual) {
+                    manual_using_jog = true;
+                    switch (stable_btn) {
+                        case BTN_1: manual_rudder_deg -= 10.0f; break; // <<
+                        case BTN_2: manual_rudder_deg -= 1.0f;  break; // <
+                        case BTN_3: manual_rudder_deg  = 0.0f;  break; // |
+                        case BTN_4: manual_rudder_deg += 1.0f;  break; // >
+                        case BTN_5: manual_rudder_deg += 10.0f; break; // >>
+                        default: break;
+                    }
+                    if (manual_rudder_deg >  MAX_RUDDER_DEG) manual_rudder_deg =  MAX_RUDDER_DEG;
+                    if (manual_rudder_deg < -MAX_RUDDER_DEG) manual_rudder_deg = -MAX_RUDDER_DEG;
                 }
-
-                if (log_top < 0) log_top = 0;
-                if (log_top > bottom_top) log_top = bottom_top;
-
-                // pinned if at bottom
-                log_pinned_bottom = (log_top == bottom_top);
             }
-
-            // ===== Render Log View =====
-            u8g2_ClearBuffer(&u8g2);
-            u8g2_SetFont(&u8g2, u8g2_font_4x6_tf);
-
-            int ascent = u8g2_GetAscent(&u8g2);
-            int descent = u8g2_GetDescent(&u8g2);   // negative
-            int line_h = ascent - descent;
-            if (line_h <= 0) line_h = 6;
-
-            int lines_per_screen = SCREEN_H / line_h;
-            if (lines_per_screen < 1) lines_per_screen = 1;
-
-            char linebuf[LOG_LINE_MAX];
-
-            for (int i = 0; i < lines_per_screen; i++) {
-                int idx = log_top + i;
-                if (idx >= (int)log_count()) break;
-
-                log_copy_line((uint16_t)idx, linebuf, sizeof(linebuf));
-
-                // Apply horizontal scroll in characters
-                int len = (int)strlen(linebuf);
-                const char *p = linebuf;
-                if (log_horiz < len) p = linebuf + log_horiz;
-                else p = "";
-
-                int y = i * line_h + ascent;
-                u8g2_DrawStr(&u8g2, 0, y, p);
-            }
-
-            u8g2_SendBuffer(&u8g2);
-            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
-            continue; // skip normal UI while in log view
         }
 
 
