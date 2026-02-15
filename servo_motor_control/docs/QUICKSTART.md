@@ -16,6 +16,7 @@ Assumptions:
 Download and burn Pi OS (Bookworm) Lite and burn to SD card from here
 https://downloads.raspberrypi.com/raspios_oldstable_lite_arm64/images/raspios_oldstable_lite_arm64-2025-11-24/2025-11-24-raspios-bookworm-arm64-lite.img.xz
 
+Then on the Pi Zero after booting:
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
