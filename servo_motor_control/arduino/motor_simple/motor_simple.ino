@@ -627,14 +627,22 @@ void oled_draw() {
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // Heading / Command
-  display.setCursor(0, LINE2_Y + 20);
-  display.print(F("Head: "));
-  if (pilot_heading_valid) display.print((pilot_heading_deg10 + 5) / 10);
-  else display.print(F("--.-"));
-  display.print(F(" Cmd: "));
-  if (pilot_command_valid) display.print((pilot_command_deg10 + 5) / 10);
-  else display.print(F("--.-"));
+  // Heading / Command: "Cmd: 045" left, "Head: 359" right-justified
+  {
+    char cmd_buf[9];   // "Cmd: 000" + NUL
+    char head_buf[10]; // "Head: 000" + NUL
+    if (pilot_command_valid)
+      snprintf(cmd_buf,  sizeof(cmd_buf),  "Cmd: %03d", (pilot_command_deg10  + 5) / 10);
+    else
+      snprintf(cmd_buf,  sizeof(cmd_buf),  "Cmd: ---");
+    if (pilot_heading_valid)
+      snprintf(head_buf, sizeof(head_buf), "Head: %03d", (pilot_heading_deg10 + 5) / 10);
+    else
+      snprintf(head_buf, sizeof(head_buf), "Head: ---");
+    display.setCursor(0, LINE2_Y + 20);
+    display.print(cmd_buf);
+    oled_print_right(LINE2_Y + 20, head_buf);
+  }
 
   display.setCursor(0, LINE2_Y + 30);
   display.print(F("Rud:"));
