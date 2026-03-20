@@ -80,6 +80,11 @@ Before adding new tooling, check what the repo already uses:
 
 **Rule:** If you can't build firmware due to missing toolchain/board config, state that clearly in the PR and keep changes conservative.
 
+> **Pi Zero (192.168.6.13):** `arduino-cli` (v1.4.0) is installed at `/usr/local/bin/arduino-cli`
+> with the `arduino:avr` core. The Nano is on `/dev/ttyUSB0`.
+> Flash command: `arduino-cli compile --fqbn arduino:avr:nano . && arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
+> Stop `inno-pilot-bridge`, `inno-pilot-socat`, `pypilot` services before flashing; restart after.
+
 ---
 
 ## Change strategy
