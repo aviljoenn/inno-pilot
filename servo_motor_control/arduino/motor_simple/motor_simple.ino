@@ -141,9 +141,26 @@ const unsigned long TEMP_CONV_MS = 200;
 #define OLED_RESET -1
 #define OLED_ADDR  0x3C
 
+// Adafruit_SSD1306::begin() calls malloc(1024) at runtime to allocate its pixel
+// buffer.  On a Nano with 804 bytes of static globals already allocated, the
+// avr-libc allocator refuses if the gap between the heap and the stack is less
+// than its 32-byte safety margin — so begin() returns false and the display
+// stays blank.  Fix: pre-supply a static buffer as a protected member via a thin
+// subclass so begin() sees buffer != NULL and skips malloc entirely.  The
+// runtime memory footprint is identical (1024 bytes either way) but is now
+// deterministic and never races with stack depth.
+class Adafruit_SSD1306_Static : public Adafruit_SSD1306 {
+  uint8_t _buf[SCREEN_WIDTH * ((SCREEN_HEIGHT + 7) / 8)];
+public:
+  Adafruit_SSD1306_Static(uint8_t w, uint8_t h, TwoWire *twi, int8_t rst)
+    : Adafruit_SSD1306(w, h, twi, rst) {
+    buffer = _buf;  // base ctor sets buffer=NULL; we override before begin() runs
+  }
+};
+
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature tempSensors(&oneWire);
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306_Static display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 bool oled_ok = false;
 unsigned long oled_last_init_ms = 0;
 const unsigned long OLED_INIT_RETRY_MS = 1000UL;
