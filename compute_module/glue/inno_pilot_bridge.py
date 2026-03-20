@@ -211,9 +211,16 @@ def main():
     last_ap_sent_ts = 0.0
     last_telem_ts = 0.0
     last_heading_cmd_sent = None
+    last_hello_ts = 0.0
+    HELLO_PERIOD_S = 5.0  # send BRIDGE_HELLO to Nano every 5s so it shows Online
 
     while True:
         now = time.monotonic()
+
+        # ---- Periodic BRIDGE_HELLO so Nano shows Online regardless of pypilot state ----
+        if (now - last_hello_ts) >= HELLO_PERIOD_S:
+            nano.write(wrap_frame(build_frame(BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)))
+            last_hello_ts = now
 
         # ---- Pump pypilot client + update cached values ----
         msgs = client.receive(0)  # non-blocking
