@@ -212,7 +212,9 @@ def main():
     last_telem_ts = 0.0
     last_heading_cmd_sent = None
     last_hello_ts = 0.0
-    HELLO_PERIOD_S = 5.0  # send BRIDGE_HELLO to Nano every 5s so it shows Online
+    HELLO_PERIOD_S = 1.0  # send BRIDGE_HELLO to Nano every 1s so it shows Online
+    # Note: Nano requires 3 consecutive valid frames before processing (in_sync_count guard),
+    # and has a 5s offline timeout. 1s period ensures online within ~3s and stays alive.
 
     while True:
         now = time.monotonic()
