@@ -840,18 +840,6 @@ void update_motor_from_command() {
 
   digitalWrite(CLUTCH_PIN, clutch_should ? HIGH : LOW);
 
-  // Edge-detect clutch state change and trigger buzzer sequence
-  if (clutch_should != clutch_engaged) {
-    clutch_engaged = clutch_should;
-    bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT);
-    if (!alarm_active) {
-      buzz_seq     = clutch_engaged ? BUZZ_CLUTCH_ON : BUZZ_CLUTCH_OFF;
-      buzz_step    = 0;
-      buzz_step_ms = millis();
-      digitalWrite(BUZZER_PIN, HIGH);  // start first beep immediately
-    }
-  }
-
   // If in a fault state, don't drive the motor at all
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
@@ -1340,6 +1328,17 @@ if (!ap_engaged) {
     flags &= ~OVERTEMP_FAULT;
   }
 
+  // Clutch buzzer: watch pin 11 directly — no dependency on internal logic
+  {
+    bool clutch_now = (digitalRead(CLUTCH_PIN) == HIGH);
+    if (clutch_now != clutch_engaged) {
+      clutch_engaged = clutch_now;
+      buzz_seq     = clutch_engaged ? BUZZ_CLUTCH_ON : BUZZ_CLUTCH_OFF;
+      buzz_step    = 0;
+      buzz_step_ms = now;
+      digitalWrite(BUZZER_PIN, HIGH);  // start first beep immediately
+    }
+  }
   buzzer_service(now);
 
   if (pi_fault) {
