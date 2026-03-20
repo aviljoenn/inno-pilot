@@ -1062,6 +1062,10 @@ void process_packet() {
 }
 
 void setup() {
+  // OLED first — mirrors Hello World pattern so display reinits correctly after any prior sketch
+  oled_last_init_ms = millis();
+  oled_try_init(true);
+
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
@@ -1108,10 +1112,6 @@ void setup() {
   tempSensors.setWaitForConversion(false);
   temp_cycle_ms = 0;
 
-  Wire.begin();
-  oled_last_init_ms = millis();
-  oled_try_init(true);
-
   // after splash, start boot timer reference
   boot_start_ms = millis();
 
@@ -1134,6 +1134,8 @@ void loop() {
   temp_service(now);
   if (!oled_ok && (now - oled_last_init_ms >= OLED_INIT_RETRY_MS)) {
     oled_last_init_ms = now;
+    Wire.end();   // reset stuck I2C bus before retry
+    delay(10);
     oled_try_init(false);
   }
   // Expire optimistic AP display override if remote didn't confirm in time
