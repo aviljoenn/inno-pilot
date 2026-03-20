@@ -165,6 +165,16 @@ bool oled_ok = false;
 unsigned long oled_last_init_ms = 0;
 const unsigned long OLED_INIT_RETRY_MS = 1000UL;
 
+// ---- Clutch buzzer feedback ----
+// Clutch engage → 3 quick beeps (100 ms on / 100 ms off × 3)
+// Clutch disengage → 1 long beep (500 ms on)
+// Alarm always pre-empts the clutch sequence.
+enum BuzzSeq : uint8_t { BUZZ_NONE, BUZZ_CLUTCH_ON, BUZZ_CLUTCH_OFF };
+BuzzSeq       buzz_seq      = BUZZ_NONE;
+uint8_t       buzz_step     = 0;
+unsigned long buzz_step_ms  = 0;
+bool          clutch_engaged = false;  // tracks last driven state for edge detection
+
 // ---- Rudder calibration (from motor_limit_test) ----
 // Raw ADC counts (0..1023)
 // Hard safety endpoints for the rudder pot. These should be near the ADC rails so
@@ -210,6 +220,7 @@ int read_rudder_adc();
 bool port_limit_switch_hit();
 bool stbd_limit_switch_hit();
 bool oled_try_init(bool allow_blocking_splash);
+void buzzer_service(unsigned long now);
 
 // ---- Result codes ----
 enum results {
@@ -738,6 +749,51 @@ bool stbd_limit_switch_hit() {
   return digitalRead(STBD_LIMIT_PIN) == HIGH;
 }
 
+// ---- Buzzer service ----
+// Call from loop() every iteration.  Alarm pre-empts clutch sequences.
+// Clutch-on  sequence: 3 × (100 ms ON / 100 ms OFF)
+// Clutch-off sequence: 1 × 500 ms ON
+// State machine: even steps = buzzer ON, odd steps = buzzer OFF.
+// The first beep is started immediately in the trigger site; service advances steps.
+void buzzer_service(unsigned long now) {
+  bool alarm_active   = pi_fault || (flags & OVERTEMP_FAULT);
+  bool alarm_silenced = pi_fault_alarm_silenced && !(flags & OVERTEMP_FAULT);
+
+  if (alarm_active && !alarm_silenced) {
+    buzz_seq = BUZZ_NONE;  // cancel any clutch sequence; alarm takes over
+    static unsigned long alarm_last = 0;
+    static bool alarm_on = false;
+    unsigned long period = alarm_on ? 500UL : 250UL;
+    if (now - alarm_last >= period) {
+      alarm_last = now;
+      alarm_on = !alarm_on;
+      digitalWrite(BUZZER_PIN, alarm_on ? HIGH : LOW);
+    }
+    return;
+  }
+
+  if (buzz_seq == BUZZ_NONE) {
+    digitalWrite(BUZZER_PIN, LOW);
+    return;
+  }
+
+  // Advance the sequence on each step timeout
+  unsigned long step_dur = (buzz_seq == BUZZ_CLUTCH_ON) ? 100UL : 500UL;
+  uint8_t       max_steps = (buzz_seq == BUZZ_CLUTCH_ON) ? 6 : 1;
+  // max_steps: CLUTCH_ON = 6 (ON OFF ON OFF ON OFF), CLUTCH_OFF = 1 (ON only; OFF is cleanup)
+
+  if (now - buzz_step_ms >= step_dur) {
+    buzz_step++;
+    buzz_step_ms = now;
+    if (buzz_step >= max_steps) {
+      buzz_seq = BUZZ_NONE;
+      digitalWrite(BUZZER_PIN, LOW);
+    } else {
+      digitalWrite(BUZZER_PIN, (buzz_step % 2 == 0) ? HIGH : LOW);
+    }
+  }
+}
+
 // ---- Motor + clutch drive based on last_command_val & flags ----
 void update_motor_from_command() {
   // Always update rudder ADC for limit logic
@@ -783,6 +839,18 @@ void update_motor_from_command() {
                        !(flags & OVERTEMP_FAULT);
 
   digitalWrite(CLUTCH_PIN, clutch_should ? HIGH : LOW);
+
+  // Edge-detect clutch state change and trigger buzzer sequence
+  if (clutch_should != clutch_engaged) {
+    clutch_engaged = clutch_should;
+    bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT);
+    if (!alarm_active) {
+      buzz_seq     = clutch_engaged ? BUZZ_CLUTCH_ON : BUZZ_CLUTCH_OFF;
+      buzz_step    = 0;
+      buzz_step_ms = millis();
+      digitalWrite(BUZZER_PIN, HIGH);  // start first beep immediately
+    }
+  }
 
   // If in a fault state, don't drive the motor at all
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
@@ -1272,20 +1340,7 @@ if (!ap_engaged) {
     flags &= ~OVERTEMP_FAULT;
   }
 
-  bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT);
-  bool alarm_silenced = pi_fault_alarm_silenced && !(flags & OVERTEMP_FAULT);
-  if (alarm_active && !alarm_silenced) {
-    static unsigned long buzz_last = 0;
-    static bool buzz_on = false;
-    unsigned long period = buzz_on ? 500UL : 250UL;
-    if (now - buzz_last >= period) {
-      buzz_last = now;
-      buzz_on = !buzz_on;
-      digitalWrite(BUZZER_PIN, buzz_on ? HIGH : LOW);
-    }
-  } else {
-    digitalWrite(BUZZER_PIN, LOW);
-  }
+  buzzer_service(now);
 
   if (pi_fault) {
     flags |= BADVOLTAGE_FAULT;
