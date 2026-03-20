@@ -107,7 +107,7 @@ Contents:
   - Ensures `~/.pypilot/servodevice` uses the USB by-id name
   - Adds a systemd drop-in so `pypilot.service` starts **after** the glue services
 
-- `README.md`, `AGENTS.md`  
+- `README.md`, `CLAUDE.md`
   Documentation for how this glue works and how to maintain it.
 
 ---

@@ -51,8 +51,8 @@ transparent bridge in the middle that adds Inno-Pilot control head features.
   `/usr/local/sbin`, installs/updates the systemd units, and ensures
   `pypilot.service` starts after the glue.
 
-- `AGENTS.md`  
-  Guidance for future humans/agents on how to maintain this glue layer.
+- `CLAUDE.md`
+  Guidance for Claude Code (and future humans) on how to maintain this glue layer.
 
 ## Deployment (on the Pi Zero)
 

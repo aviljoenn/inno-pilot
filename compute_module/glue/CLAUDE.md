@@ -1,6 +1,6 @@
-# Inno-Pilot Glue – Agent Guide
+# Inno-Pilot Glue – Claude Code Guide
 
-This file is for **future maintainers** (humans or AI) working on the
+This file is for **Claude Code** (and future human maintainers) working on the
 Inno-Pilot glue on the Pi Zero.
 
 ## Principles
@@ -20,10 +20,10 @@ Inno-Pilot glue on the Pi Zero.
 
 When changing the glue (bridge logic, units, etc.):
 
-1. **Edit in the repo**  
+1. **Edit in the repo**
    Make changes under `compute_module/glue/` (this directory).
 
-2. **Commit and push**  
+2. **Commit and push**
    From your dev machine or the Pi:
 
    ```bash
@@ -32,7 +32,7 @@ When changing the glue (bridge logic, units, etc.):
    git push origin master
    ```
 
-3. **To deploy on the Compute Module**  
+3. **To deploy on the Compute Module**
    Run the following on the Pi:
 
    ```bash

@@ -1,10 +1,10 @@
-# AGENTS.md
-Audience: automated coding agents (Codex, etc.) working in this repository.
+# CLAUDE.md
+Audience: Claude Code (and other AI coding agents) working in this repository.
 
 ## Prime directive
 1) **Do not break working systems.** Keep changes minimal, focused, and testable.
 2) **GitHub is the source of truth.** Modify repo files, open a PR, and describe what changed.
-3) **Preserve human intent.** This repo likely runs on real hardware; avoid sweeping refactors.
+3) **Preserve human intent.** This repo runs on real hardware; avoid sweeping refactors.
 
 ---
 
@@ -39,15 +39,15 @@ Audience: automated coding agents (Codex, etc.) working in this repository.
 
 ---
 
-## What “done” looks like
-A PR is “done” when it includes:
+## What "done" looks like
+A PR is "done" when it includes:
 - A clear summary + rationale
 - Tests/build steps run (or why not)
 - Any new/changed docs needed (README/docs)
 
 ---
 
-## How to run / verify (use what exists; don’t invent tooling)
+## How to run / verify (use what exists; don't invent tooling)
 Before adding new tooling, check what the repo already uses:
 - Look for: `pyproject.toml`, `requirements.txt`, `setup.cfg`, `tox.ini`, `.pre-commit-config.yaml`,
   `platformio.ini`, `arduino-cli.yaml`, `Makefile`, GitHub Actions workflows.
@@ -65,7 +65,7 @@ Before adding new tooling, check what the repo already uses:
 - Lint: `ruff check .` or `flake8`
 - Types: `mypy .`
 
-**Rule:** If the repo already uses a tool, use it. If not, don’t add one unless asked.
+**Rule:** If the repo already uses a tool, use it. If not, don't add one unless asked.
 
 ---
 
@@ -78,7 +78,7 @@ Before adding new tooling, check what the repo already uses:
 - Compile (example): `arduino-cli compile --fqbn <FQBN> <sketch_dir>`
 - Do not guess FQBNs. Look for existing CI scripts/docs.
 
-**Rule:** If you can’t build firmware due to missing toolchain/board config, state that clearly in the PR and keep changes conservative.
+**Rule:** If you can't build firmware due to missing toolchain/board config, state that clearly in the PR and keep changes conservative.
 
 ---
 
@@ -112,7 +112,7 @@ When asked to implement something:
 ---
 
 ## Hardware-safety flags (call these out explicitly)
-If changes touch any of the following, add a dedicated “Hardware impact” section in the PR:
+If changes touch any of the following, add a dedicated "Hardware impact" section in the PR:
 - Pin mappings / GPIO modes
 - PWM frequency/duty behavior
 - ADC scaling, voltage dividers, calibration constants
