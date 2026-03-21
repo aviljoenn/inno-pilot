@@ -141,39 +141,12 @@ const unsigned long TEMP_CONV_MS = 200;
 #define OLED_RESET -1
 #define OLED_ADDR  0x3C
 
-// Adafruit_SSD1306::begin() calls malloc(1024) at runtime to allocate its pixel
-// buffer.  On a Nano with 804 bytes of static globals already allocated, the
-// avr-libc allocator refuses if the gap between the heap and the stack is less
-// than its 32-byte safety margin — so begin() returns false and the display
-// stays blank.  Fix: pre-supply a static buffer as a protected member via a thin
-// subclass so begin() sees buffer != NULL and skips malloc entirely.  The
-// runtime memory footprint is identical (1024 bytes either way) but is now
-// deterministic and never races with stack depth.
-class Adafruit_SSD1306_Static : public Adafruit_SSD1306 {
-  uint8_t _buf[SCREEN_WIDTH * ((SCREEN_HEIGHT + 7) / 8)];
-public:
-  Adafruit_SSD1306_Static(uint8_t w, uint8_t h, TwoWire *twi, int8_t rst)
-    : Adafruit_SSD1306(w, h, twi, rst) {
-    buffer = _buf;  // base ctor sets buffer=NULL; we override before begin() runs
-  }
-};
-
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature tempSensors(&oneWire);
-Adafruit_SSD1306_Static display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 bool oled_ok = false;
 unsigned long oled_last_init_ms = 0;
 const unsigned long OLED_INIT_RETRY_MS = 1000UL;
-
-// ---- Clutch buzzer feedback ----
-// Clutch engage → 3 quick beeps (100 ms on / 100 ms off × 3)
-// Clutch disengage → 1 long beep (500 ms on)
-// Alarm always pre-empts the clutch sequence.
-enum BuzzSeq : uint8_t { BUZZ_NONE, BUZZ_CLUTCH_ON, BUZZ_CLUTCH_OFF };
-BuzzSeq       buzz_seq      = BUZZ_NONE;
-uint8_t       buzz_step     = 0;
-unsigned long buzz_step_ms  = 0;
-bool          clutch_engaged = false;  // tracks last driven state for edge detection
 
 // ---- Rudder calibration (from motor_limit_test) ----
 // Raw ADC counts (0..1023)
@@ -220,7 +193,6 @@ int read_rudder_adc();
 bool port_limit_switch_hit();
 bool stbd_limit_switch_hit();
 bool oled_try_init(bool allow_blocking_splash);
-void buzzer_service(unsigned long now);
 
 // ---- Result codes ----
 enum results {
@@ -655,22 +627,14 @@ void oled_draw() {
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
 
-  // Heading / Command: "Cmd: 045" left, "Head: 359" right-justified
-  {
-    char cmd_buf[9];   // "Cmd: 000" + NUL
-    char head_buf[10]; // "Head: 000" + NUL
-    if (pilot_command_valid)
-      snprintf(cmd_buf,  sizeof(cmd_buf),  "Cmd: %03d", (pilot_command_deg10  + 5) / 10);
-    else
-      snprintf(cmd_buf,  sizeof(cmd_buf),  "Cmd: ---");
-    if (pilot_heading_valid)
-      snprintf(head_buf, sizeof(head_buf), "Head: %03d", (pilot_heading_deg10 + 5) / 10);
-    else
-      snprintf(head_buf, sizeof(head_buf), "Head: ---");
-    display.setCursor(0, LINE2_Y + 20);
-    display.print(cmd_buf);
-    oled_print_right(LINE2_Y + 20, head_buf);
-  }
+  // Heading / Command
+  display.setCursor(0, LINE2_Y + 20);
+  display.print(F("Head: "));
+  if (pilot_heading_valid) display.print((pilot_heading_deg10 + 5) / 10);
+  else display.print(F("--.-"));
+  display.print(F(" Cmd: "));
+  if (pilot_command_valid) display.print((pilot_command_deg10 + 5) / 10);
+  else display.print(F("--.-"));
 
   display.setCursor(0, LINE2_Y + 30);
   display.print(F("Rud:"));
@@ -747,51 +711,6 @@ bool stbd_limit_switch_hit() {
     return false;
   }
   return digitalRead(STBD_LIMIT_PIN) == HIGH;
-}
-
-// ---- Buzzer service ----
-// Call from loop() every iteration.  Alarm pre-empts clutch sequences.
-// Clutch-on  sequence: 3 × (100 ms ON / 100 ms OFF)
-// Clutch-off sequence: 1 × 500 ms ON
-// State machine: even steps = buzzer ON, odd steps = buzzer OFF.
-// The first beep is started immediately in the trigger site; service advances steps.
-void buzzer_service(unsigned long now) {
-  bool alarm_active   = pi_fault || (flags & OVERTEMP_FAULT);
-  bool alarm_silenced = pi_fault_alarm_silenced && !(flags & OVERTEMP_FAULT);
-
-  if (alarm_active && !alarm_silenced) {
-    buzz_seq = BUZZ_NONE;  // cancel any clutch sequence; alarm takes over
-    static unsigned long alarm_last = 0;
-    static bool alarm_on = false;
-    unsigned long period = alarm_on ? 500UL : 250UL;
-    if (now - alarm_last >= period) {
-      alarm_last = now;
-      alarm_on = !alarm_on;
-      digitalWrite(BUZZER_PIN, alarm_on ? HIGH : LOW);
-    }
-    return;
-  }
-
-  if (buzz_seq == BUZZ_NONE) {
-    digitalWrite(BUZZER_PIN, LOW);
-    return;
-  }
-
-  // Advance the sequence on each step timeout
-  unsigned long step_dur = (buzz_seq == BUZZ_CLUTCH_ON) ? 100UL : 500UL;
-  uint8_t       max_steps = (buzz_seq == BUZZ_CLUTCH_ON) ? 6 : 1;
-  // max_steps: CLUTCH_ON = 6 (ON OFF ON OFF ON OFF), CLUTCH_OFF = 1 (ON only; OFF is cleanup)
-
-  if (now - buzz_step_ms >= step_dur) {
-    buzz_step++;
-    buzz_step_ms = now;
-    if (buzz_step >= max_steps) {
-      buzz_seq = BUZZ_NONE;
-      digitalWrite(BUZZER_PIN, LOW);
-    } else {
-      digitalWrite(BUZZER_PIN, (buzz_step % 2 == 0) ? HIGH : LOW);
-    }
-  }
 }
 
 // ---- Motor + clutch drive based on last_command_val & flags ----
@@ -1135,10 +1054,6 @@ void process_packet() {
 }
 
 void setup() {
-  // OLED first — mirrors Hello World pattern so display reinits correctly after any prior sketch
-  oled_last_init_ms = millis();
-  oled_try_init(true);
-
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
@@ -1185,6 +1100,10 @@ void setup() {
   tempSensors.setWaitForConversion(false);
   temp_cycle_ms = 0;
 
+  Wire.begin();
+  oled_last_init_ms = millis();
+  oled_try_init(true);
+
   // after splash, start boot timer reference
   boot_start_ms = millis();
 
@@ -1207,8 +1126,6 @@ void loop() {
   temp_service(now);
   if (!oled_ok && (now - oled_last_init_ms >= OLED_INIT_RETRY_MS)) {
     oled_last_init_ms = now;
-    Wire.end();   // reset stuck I2C bus before retry
-    delay(10);
     oled_try_init(false);
   }
   // Expire optimistic AP display override if remote didn't confirm in time
@@ -1328,18 +1245,20 @@ if (!ap_engaged) {
     flags &= ~OVERTEMP_FAULT;
   }
 
-  // Clutch buzzer: watch pin 11 directly — no dependency on internal logic
-  {
-    bool clutch_now = (digitalRead(CLUTCH_PIN) == HIGH);
-    if (clutch_now != clutch_engaged) {
-      clutch_engaged = clutch_now;
-      buzz_seq     = clutch_engaged ? BUZZ_CLUTCH_ON : BUZZ_CLUTCH_OFF;
-      buzz_step    = 0;
-      buzz_step_ms = now;
-      digitalWrite(BUZZER_PIN, HIGH);  // start first beep immediately
+  bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT);
+  bool alarm_silenced = pi_fault_alarm_silenced && !(flags & OVERTEMP_FAULT);
+  if (alarm_active && !alarm_silenced) {
+    static unsigned long buzz_last = 0;
+    static bool buzz_on = false;
+    unsigned long period = buzz_on ? 500UL : 250UL;
+    if (now - buzz_last >= period) {
+      buzz_last = now;
+      buzz_on = !buzz_on;
+      digitalWrite(BUZZER_PIN, buzz_on ? HIGH : LOW);
     }
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);
   }
-  buzzer_service(now);
 
   if (pi_fault) {
     flags |= BADVOLTAGE_FAULT;
