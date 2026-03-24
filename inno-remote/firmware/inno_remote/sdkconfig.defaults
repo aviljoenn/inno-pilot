@@ -1,0 +1,12 @@
+# Target: ESP32-C3
+CONFIG_IDF_TARGET="esp32c3"
+
+# 4 MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Use custom dual-OTA partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+
+# Allow plain HTTP for OTA (trusted local network only)
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y

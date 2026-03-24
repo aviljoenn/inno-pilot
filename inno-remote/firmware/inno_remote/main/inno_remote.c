@@ -16,9 +16,13 @@
 #include "u8g2_esp32_hal.h"
 
 #include "wifi_status.h"
+#include "tcp_client.h"
 #include <stdarg.h>
 
 static const char *TAG = "INNO_REMOTE";
+
+// ---- Inno-Pilot version (must match bridge + Nano firmware) ----
+#define INNOPILOT_VERSION "v0.2.0_B"
 
 // ========================
 // OLED PINS (as built)
@@ -564,6 +568,11 @@ void app_main(void)
 
     wifi_sta_start();
 
+    // Start TCP client (connects to bridge when Wi-Fi is up)
+    if (!demo_mode) {
+        tcp_client_start();
+    }
+
     // ===== Log View state =====
     bool log_view = false;
     bool log_ignore_stop_until_release = false;
@@ -622,6 +631,7 @@ void app_main(void)
     // Mode transition tracking
     bool prev_manual = false;
 
+    ESP_LOGI(TAG, "Inno-Pilot Remote %s", INNOPILOT_VERSION);
     ESP_LOGI(TAG, "UI start (debounce=%dms, loop=%dms)", BUTTON_DEBOUNCE_MS, LOOP_MS);
 
     const float dt = (float)LOOP_MS / 1000.0f;
@@ -959,7 +969,9 @@ void app_main(void)
         u8g2_ClearBuffer(&u8g2);
 
         // Line 1
-        draw_title_centered(demo_mode ? "DEMO-Mode" : "Inno-Remote", Y_TITLE_BASE);
+        {
+            draw_title_centered(demo_mode ? "DEMO" : "Inno-Remote", Y_TITLE_BASE);
+        }
 
         // Line 2 (rudder graph)
         float rudder_norm_ui = rudder_deg / MAX_RUDDER_DEG;
@@ -1019,6 +1031,10 @@ void app_main(void)
 
         // Line 6 (STOP snug)
         draw_stop_snug(Y_STOP_TOP, stop_on);
+
+        // Version label bottom-left
+        u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+        u8g2_DrawStr(&u8g2, 0, 64, INNOPILOT_VERSION);
 
         draw_wifi_icon_top_right();
         u8g2_SendBuffer(&u8g2);
