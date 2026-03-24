@@ -23,7 +23,8 @@ from pypilot.client import pypilotClient
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION = "v0.2.0_B"
+INNOPILOT_VERSION = "v0.2.0_B4"
+INNOPILOT_BUILD_NUM = 4  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -60,6 +61,7 @@ BRIDGE_MAGIC2         = 0x5A
 BRIDGE_HELLO_CODE     = 0xF0
 BRIDGE_HELLO_ACK_CODE = 0xF1
 BRIDGE_HELLO_VALUE    = 0xBEEF
+BRIDGE_VERSION_CODE   = 0xF2  # Bridge -> Nano: build number (uint16)
 
 # ---------------------------------------------------------------------------
 # Timing
@@ -372,6 +374,7 @@ def main() -> None:
         # ================================================================
         if (now - last_hello_ts) >= HELLO_PERIOD_S:
             send_nano_frame(nano, BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)
+            send_nano_frame(nano, BRIDGE_VERSION_CODE, INNOPILOT_BUILD_NUM)
             last_hello_ts = now
 
         # ================================================================

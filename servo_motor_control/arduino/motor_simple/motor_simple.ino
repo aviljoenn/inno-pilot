@@ -21,8 +21,9 @@
 
 enum ButtonID : uint8_t;
 
-// ---- Inno-Pilot version ----
-const char INNOPILOT_VERSION[] = "V2d";
+// ---- Inno-Pilot version (must match bridge + remote) ----
+const char INNOPILOT_VERSION[] = "v0.2.0_B4";
+const uint16_t INNOPILOT_BUILD_NUM = 4;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)
@@ -42,6 +43,7 @@ const uint8_t BRIDGE_MAGIC1 = 0xA5;
 const uint8_t BRIDGE_MAGIC2 = 0x5A;
 const uint8_t BRIDGE_HELLO_CODE = 0xF0;
 const uint8_t BRIDGE_HELLO_ACK_CODE = 0xF1;
+const uint8_t BRIDGE_VERSION_CODE = 0xF2;  // Bridge -> Nano: build number
 // Bridge->Nano: pypilot rudder limits (tenths of degrees)
 const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit * 10 (int16)
 const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit * 10 (int16)
@@ -72,6 +74,8 @@ unsigned long pi_online_time_ms = 0; // when we first saw Pi online
 bool pi_ever_online       = false;
 unsigned long last_pi_frame_ms = 0;
 const unsigned long PI_OFFLINE_TIMEOUT_MS = 5000UL;  // 5s no frames => offline
+uint16_t bridge_build_num = 0;     // received from bridge via BRIDGE_VERSION_CODE
+bool     bridge_build_valid = false;
 
 // ---- Pins ----
 const uint8_t LED_PIN          = 13;
@@ -553,6 +557,28 @@ void oled_draw() {
     display.print(F("Inno-Cntl:Boot "));
     display.print(pct);
     display.print(F("%"));
+
+    // Show versions centred on screen during boot
+    // Line 3 (y=24): Nano version
+    {
+      char buf[22];
+      snprintf(buf, sizeof(buf), "Nano: %s", INNOPILOT_VERSION);
+      int16_t tw = strlen(buf) * 6;  // 6px per char at textSize 1
+      display.setCursor((SCREEN_WIDTH - tw) / 2, 24);
+      display.print(buf);
+    }
+    // Line 4 (y=34): Bridge version (if received)
+    {
+      char buf[22];
+      if (bridge_build_valid) {
+        snprintf(buf, sizeof(buf), "Bridge: v0.2.0_B%u", bridge_build_num);
+      } else {
+        snprintf(buf, sizeof(buf), "Bridge: waiting...");
+      }
+      int16_t tw = strlen(buf) * 6;
+      display.setCursor((SCREEN_WIDTH - tw) / 2, 34);
+      display.print(buf);
+    }
   } else if (boot_offline || pi_timed_out) {
     display.print(F("Inno-Cntl: Offline"));
   } else {
@@ -1044,6 +1070,11 @@ void process_packet() {
 
     case BRIDGE_HELLO_CODE:
       send_frame(BRIDGE_HELLO_ACK_CODE, 0xBEEF);
+      break;
+
+    case BRIDGE_VERSION_CODE:
+      bridge_build_num = value;
+      bridge_build_valid = true;
       break;
 
     
