@@ -22,7 +22,7 @@
 static const char *TAG = "INNO_REMOTE";
 
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v0.2.0_B4"
+#define INNOPILOT_VERSION "v0.2.0_B5"
 
 // ========================
 // OLED PINS (as built)

@@ -23,8 +23,8 @@ from pypilot.client import pypilotClient
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION = "v0.2.0_B4"
-INNOPILOT_BUILD_NUM = 4  # increment with each push during development
+INNOPILOT_VERSION = "v0.2.0_B5"
+INNOPILOT_BUILD_NUM = 5  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices

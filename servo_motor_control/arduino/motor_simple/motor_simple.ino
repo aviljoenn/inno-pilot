@@ -12,8 +12,8 @@
 #include <string.h>
 #include <avr/pgmspace.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <SSD1306Ascii.h>
+#include <SSD1306AsciiWire.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include "crc.h"    // your existing CRC-8 table + crc8()
@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B4";
-const uint16_t INNOPILOT_BUILD_NUM = 4;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B5";
+const uint16_t INNOPILOT_BUILD_NUM = 5;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)
@@ -141,12 +141,11 @@ const unsigned long TEMP_CONV_MS = 200;
 // ---- OLED ----
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET -1
 #define OLED_ADDR  0x3C
 
 OneWire oneWire(PIN_DS18B20);
 DallasTemperature tempSensors(&oneWire);
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+SSD1306AsciiWire display;
 bool oled_ok = false;
 unsigned long oled_last_init_ms = 0;
 const unsigned long OLED_INIT_RETRY_MS = 1000UL;
@@ -272,6 +271,13 @@ bool  pi_overvolt_fault = false;
 bool  pi_undervolt_fault = false;
 bool  pi_fault = false;
 bool  pi_fault_alarm_silenced = false;
+
+// Main supply (Vin) voltage faults
+const float VIN_LOW_FAULT_V  = 10.9f;   // below this: undercharge / brown-out
+const float VIN_HIGH_FAULT_V = 15.1f;   // above this: overcharge risk
+float vin_v = 0.0f;
+bool  vin_low_fault  = false;
+bool  vin_high_fault = false;
 
 float temp_c = NAN;
 bool temp_pending = false;
@@ -531,34 +537,135 @@ void oled_draw() {
   bool within_boot_window = pi_never_seen && (elapsed_boot < PI_BOOT_EST_MS);
   bool boot_offline       = pi_never_seen && (elapsed_boot >= PI_BOOT_EST_MS);
 
+  // Full clear only on display state transition (avoids per-frame flicker)
+  // States: 0=boot, 1=offline, 2=online, 3=overlay
+  static uint8_t prev_state = 0xFF;
+  uint8_t cur_state;
+  if (overlay_active && (now - overlay_start_ms < OVERLAY_DURATION_MS)) {
+    cur_state = 3;
+  } else if (within_boot_window) {
+    cur_state = 0;
+  } else if (boot_offline || pi_timed_out) {
+    cur_state = 1;
+  } else {
+    cur_state = 2;
+  }
+  if (cur_state != prev_state) {
+    display.clear();
+    prev_state = cur_state;
+  }
+
   // ----------------------------
   // Draw
   // ----------------------------
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
+  display.setFont(System5x7);
+  display.set1X();
 
-  // Line 1: permanent controller status
+  // --- Row 0: heading (always name + version; boot shows progress instead) ---
   display.setCursor(0, 0);
-
   if (within_boot_window) {
     uint8_t pct = (uint8_t)((elapsed_boot * 100UL) / PI_BOOT_EST_MS);
     if (pct > 100) pct = 100;
-    // tight formatting so it fits: "Inno-Cntl:Boot 100%"
     display.print(F("Inno-Cntl:Boot "));
     display.print(pct);
     display.print(F("%"));
+  } else {
+    display.print(F("Inno-Ctrl "));
+    display.print(INNOPILOT_VERSION);
+  }
+  display.clearToEOL();
 
-    // Show versions centred on screen during boot
-    // Line 3 (y=24): Nano version
+  // --- Row 1: Pi online/offline + bridge version ---
+  display.setCursor(0, 1);
+  if (!within_boot_window) {
+    bool pi_alive_now = pi_ever_online && !pi_timed_out;
+    if (pi_alive_now) {
+      if (bridge_build_valid) {
+        char buf[22];
+        snprintf(buf, sizeof(buf), "Pi: Online v0.2.0_B%u", bridge_build_num);
+        display.print(buf);
+      } else {
+        display.print(F("Pi: Online"));
+      }
+    } else {
+      display.print(F("Pi: Offline"));
+    }
+  }
+  display.clearToEOL();
+
+  // --- Rows 2-3: fault display (2X flashing) or overlay or empty ---
+  {
+    bool any_fault = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
+    bool fault_shown = any_fault && !pi_fault_alarm_silenced;
+
+    if (fault_shown) {
+      // Flash the fault message: show/hide alternating every 400ms
+      static bool fault_vis = true;
+      static unsigned long fault_flash_ms = 0;
+      if (now - fault_flash_ms >= 400UL) {
+        fault_flash_ms = now;
+        fault_vis = !fault_vis;
+      }
+      if (fault_vis) {
+        // Priority: OVERTEMP > PiV > Vin
+        const char *msg;
+        if      (flags & OVERTEMP_FAULT) msg = "!OVERTEMP!";
+        else if (pi_overvolt_fault)      msg = "!PiV HIGH!";
+        else if (pi_undervolt_fault)     msg = "!PiV LOW!";
+        else if (vin_high_fault)         msg = "!Vin HIGH!";
+        else                             msg = "!Vin LOW!";
+        display.set2X();
+        int16_t x = (SCREEN_WIDTH - (int16_t)strlen(msg) * 12) / 2;
+        if (x < 0) x = 0;
+        display.setCursor(x, 2);
+        display.print(msg);
+        display.clearToEOL();
+        display.set1X();
+      } else {
+        // Blank both rows during the "off" phase of the flash
+        display.setCursor(0, 2); display.clearToEOL();
+        display.setCursor(0, 3); display.clearToEOL();
+      }
+    } else if (overlay_active && (now - overlay_start_ms < OVERLAY_DURATION_MS)) {
+      // Overlay (big transient button feedback) on rows 2-3
+      display.set2X();
+      uint8_t len = strlen(overlay_text);
+      int16_t x = (SCREEN_WIDTH - (int16_t)len * 12) / 2;
+      if (x < 0) x = 0;
+      display.setCursor(x, 2);
+      display.print(overlay_text);
+      display.clearToEOL();
+      display.set1X();
+    } else {
+      if (!overlay_active || (now - overlay_start_ms >= OVERLAY_DURATION_MS)) {
+        overlay_active = false;
+        display.setCursor(0, 2); display.clearToEOL();
+        display.setCursor(0, 3); display.clearToEOL();
+      }
+    }
+  }
+
+  // --- Row 7: V/A/T (always shown) ---
+  display.setCursor(0, 7);
+  display.print(vbuf);
+  display.print(F("  "));
+  display.print(ibuf);
+  display.print(F("  "));
+  display.print(tbuf);
+  display.clearToEOL();
+
+  // --- Boot window: show Nano + Bridge versions in the middle rows, then done ---
+  if (within_boot_window) {
+    // Row 4: Nano version centred
     {
       char buf[22];
       snprintf(buf, sizeof(buf), "Nano: %s", INNOPILOT_VERSION);
-      int16_t tw = strlen(buf) * 6;  // 6px per char at textSize 1
-      display.setCursor((SCREEN_WIDTH - tw) / 2, 24);
+      int16_t tw = strlen(buf) * 6;
+      display.setCursor((SCREEN_WIDTH - tw) / 2, 4);
       display.print(buf);
+      display.clearToEOL();
     }
-    // Line 4 (y=34): Bridge version (if received)
+    // Row 5: Bridge version centred
     {
       char buf[22];
       if (bridge_build_valid) {
@@ -567,131 +674,79 @@ void oled_draw() {
         snprintf(buf, sizeof(buf), "Bridge: waiting...");
       }
       int16_t tw = strlen(buf) * 6;
-      display.setCursor((SCREEN_WIDTH - tw) / 2, 34);
+      display.setCursor((SCREEN_WIDTH - tw) / 2, 5);
       display.print(buf);
+      display.clearToEOL();
     }
-  } else if (boot_offline || pi_timed_out) {
-    display.print(F("Inno-Cntl: Offline"));
-  } else {
-    display.print(F("Inno-Cntl: Online "));
-    display.print(INNOPILOT_VERSION);
-  }
-
-  // Overlay (big transient button feedback) – leave bottom line off during overlay
-  if (overlay_active) {
-    if (now - overlay_start_ms < OVERLAY_DURATION_MS) {
-      display.setTextSize(3);
-
-      uint8_t len = strlen(overlay_text);
-      int16_t char_w = 6 * 3;
-      int16_t text_w = len * char_w;
-      int16_t x = (SCREEN_WIDTH - text_w) / 2;
-      if (x < 0) x = 0;
-
-      // below the status line
-      int16_t y = 20;
-      display.setCursor(x, y);
-      display.println(overlay_text);
-
-      display.display();
-      return;
-    } else {
-      overlay_active = false;
-    }
-  }
-
-  // Always keep V/A/C pinned to the bottom (even during boot/offline)
-  display.setCursor(0, 52);
-  display.print(vbuf);
-  display.print(F("  "));
-  display.print(ibuf);
-  display.print(F("  "));
-  display.print(tbuf);
-
-  // If booting/offline, don’t shuffle other lines around—just show bottom line.
-  if (within_boot_window || boot_offline || pi_timed_out) {
-    display.display();
     return;
   }
 
-  // Online-only info at fixed positions (no jumping)
-  // y=12: faults (optional)
-  const uint8_t LINE2_Y = 12;
-  if (pi_fault || (flags & OVERTEMP_FAULT)) {
-    display.setCursor(0, 12);
-    display.print(F("FAULT: "));
-    if (pi_overvolt_fault) {
-      display.print(F("PiV HIGH"));
-    } else if (pi_undervolt_fault) {
-      display.print(F("PiV LOW"));
-    } else if (flags & OVERTEMP_FAULT) {
-      display.print(F("TEMP"));
-    }
+  // Offline: clear middle rows and return
+  if (boot_offline || pi_timed_out) {
+    display.setCursor(0, 4); display.clearToEOL();
+    display.setCursor(0, 5); display.clearToEOL();
+    display.setCursor(0, 6); display.clearToEOL();
+    return;
   }
-  
-  // Online-only info at fixed positions (no jumping)
-  // DEBUG: show Nano rudder ADC on line 2 (y=12) for diagnostics.
-  // TODO(undo-debug): remove this block to restore the FAULT line here when asked.
-  //const uint8_t LINE2_Y = 12;
-  //display.setCursor(0, LINE2_Y);
-  //display.print(F("RudADC: "));
-  //display.print(rudder_adc_last);
 
-  // y=24: AP + clutch
-  display.setCursor(0, 24);
+  // --- Online-only rows ---
+
+  // Row 4: AP + clutch
+  display.setCursor(0, 4);
   display.print(F("AP: "));
-  display.print(ap_display ? F("ON") : F("Off"));
+  display.print(ap_display ? F("ON") : F("OFF"));
   display.print(F("  Clutch: "));
   display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+  display.clearToEOL();
 
-  // Heading / Command
-  display.setCursor(0, LINE2_Y + 20);
-  display.print(F("Head: "));
-  if (pilot_heading_valid) display.print((pilot_heading_deg10 + 5) / 10);
-  else display.print(F("--.-"));
-  display.print(F(" Cmd: "));
+  // Row 5: Cmd / Heading
+  display.setCursor(0, 5);
+  display.print(F("Cmd: "));
   if (pilot_command_valid) display.print((pilot_command_deg10 + 5) / 10);
   else display.print(F("--.-"));
+  display.print(F(" Head: "));
+  if (pilot_heading_valid) display.print((pilot_heading_deg10 + 5) / 10);
+  else display.print(F("--.-"));
+  display.clearToEOL();
 
-  display.setCursor(0, LINE2_Y + 30);
+  // Row 6: Rudder (port limit / current / stbd limit)
+  display.setCursor(0, 6);
   display.print(F("Rud:"));
-
   if (pilot_port_lim_valid) display.print(pilot_port_lim_deg10 / 10.0f, 1);
   else display.print(F("--.-"));
-
   display.print(F(" "));
-
   if (pilot_rudder_valid) display.print(pilot_rudder_deg10 / 10.0f, 1);
   else display.print(F("--.-"));
-
   display.print(F(" "));
-
   if (pilot_stbd_lim_valid) display.print(pilot_stbd_lim_deg10 / 10.0f, 1);
   else display.print(F("--.-"));
-
-  display.display();
+  display.clearToEOL();
 }
 
 bool oled_try_init(bool allow_blocking_splash) {
-  oled_ok = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-  if (!oled_ok) {
+  // Probe I2C to check if OLED is present
+  Wire.beginTransmission(OLED_ADDR);
+  if (Wire.endTransmission() != 0) {
+    oled_ok = false;
     return false;
   }
 
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
+  display.begin(&Adafruit128x64, OLED_ADDR);
+  display.setFont(System5x7);
+  oled_ok = true;
+
+  display.clear();
 
   // Splash: big Inno-Pilot
-  display.setTextSize(2);
-  display.setCursor(0, 10);
+  display.set2X();
+  display.setCursor(0, 1);  // row 1 (y=8)
   display.println(F("Inno-Pilot"));
 
-  display.setTextSize(1);
-  display.setCursor(30, 36);
+  display.set1X();
+  display.setCursor(6, 4);  // row 4 (y=32), shifted left to fit on screen
   display.print(F("Version "));
   display.println(INNOPILOT_VERSION);
 
-  display.display();
   // Only block for the full splash if the Pi doesn't appear online yet
   if (allow_blocking_splash && !pi_online_at_boot) {
     delay(3000);   // Pi booting: OK to block
@@ -1163,7 +1218,11 @@ void loop() {
     pi_overvolt_fault = (pi_voltage_v > PI_VOLT_HIGH_FAULT);
     pi_undervolt_fault = (pi_voltage_v < PI_VOLT_LOW_FAULT);
     pi_fault = pi_overvolt_fault || pi_undervolt_fault;
-    if (!pi_fault) {
+    vin_v = read_voltage_v();
+    vin_low_fault  = (vin_v < VIN_LOW_FAULT_V);
+    vin_high_fault = (vin_v > VIN_HIGH_FAULT_V);
+    // Reset silence once all faults clear so next occurrence re-triggers alarm
+    if (!pi_fault && !(flags & OVERTEMP_FAULT) && !vin_low_fault && !vin_high_fault) {
       pi_fault_alarm_silenced = false;
     }
   }
@@ -1183,7 +1242,7 @@ void loop() {
   bool ptm_edge = ptm_stable_pressed && !ptm_prev;
   ptm_prev = ptm_stable_pressed;
 
-  if (ptm_edge && pi_fault) {
+  if (ptm_edge && (pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault)) {
     pi_fault_alarm_silenced = true;
   }
 
@@ -1267,12 +1326,12 @@ if (!ap_engaged) {
     flags &= ~OVERTEMP_FAULT;
   }
 
-  bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT);
-  bool alarm_silenced = pi_fault_alarm_silenced && !(flags & OVERTEMP_FAULT);
+  bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
+  bool alarm_silenced = pi_fault_alarm_silenced;
   if (alarm_active && !alarm_silenced) {
     static unsigned long buzz_last = 0;
     static bool buzz_on = false;
-    unsigned long period = buzz_on ? 500UL : 250UL;
+    unsigned long period = 100UL;  // short rapid beeps: 100ms on / 100ms off
     if (now - buzz_last >= period) {
       buzz_last = now;
       buzz_on = !buzz_on;
@@ -1282,13 +1341,13 @@ if (!ap_engaged) {
     digitalWrite(BUZZER_PIN, LOW);
   }
 
-  if (pi_fault) {
+  if (pi_fault || vin_low_fault || vin_high_fault) {
     flags |= BADVOLTAGE_FAULT;
   } else {
     flags &= ~BADVOLTAGE_FAULT;
   }
 
-  if ((flags & OVERTEMP_FAULT) || pi_fault) {
+  if ((flags & OVERTEMP_FAULT) || pi_fault || vin_low_fault || vin_high_fault) {
     flags &= ~ENGAGED;
     last_command_val = 1000;
   }
