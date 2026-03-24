@@ -377,16 +377,7 @@ def main() -> None:
         # ================================================================
         # 2. Receive pypilot values
         # ================================================================
-        # Ensure pypilot socket can't block our loop (flush() can hang)
-        try:
-            if client.connection and hasattr(client.connection, 'socket'):
-                client.connection.socket.settimeout(0.1)
-        except Exception:
-            pass
-        try:
-            msgs = client.receive(0)  # non-blocking
-        except Exception:
-            msgs = {}
+        msgs = client.receive(0)  # non-blocking
 
         if "ap.enabled" in msgs:
             try:
