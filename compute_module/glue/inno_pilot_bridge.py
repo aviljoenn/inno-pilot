@@ -154,8 +154,12 @@ def pypilot_worker(
                     except queue.Empty:
                         break
 
-                # receive() may block until pypilot sends a frame — safe in a thread
+                # receive(0) on pypilotClient may return immediately (non-blocking)
+                # when pypilot is sending data at high rate, causing a tight spin
+                # that starves the main thread on a single-core Pi Zero.
+                # Sleep 10 ms here so the main loop (HELLO, serial, TCP) gets CPU.
                 msgs = client.receive(0)
+                time.sleep(0.01)
 
                 with lock:
                     state.connected = True
