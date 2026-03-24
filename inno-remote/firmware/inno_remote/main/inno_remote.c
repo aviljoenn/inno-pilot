@@ -21,8 +21,20 @@
 
 static const char *TAG = "INNO_REMOTE";
 
+// ---- Bridge telemetry (written from TCP rx callback, read in main loop) ----
+static volatile bool     g_bridge_ap          = false;
+static volatile int      g_bridge_hdg         = 0;     // degrees 0-359
+static volatile int      g_bridge_cmd         = 0;     // degrees 0-359
+static volatile float    g_bridge_rdr         = 0.0f;  // signed degrees
+static volatile int      g_bridge_rdr_pct     = 50;    // 0-100 (50 = centre)
+static volatile uint32_t g_bridge_flags       = 0;
+static volatile bool     g_warn_ap_pressed    = false;
+static volatile uint32_t g_warn_ap_pressed_ms = 0;
+static char              g_bridge_mode[16]    = "IDLE";
+static portMUX_TYPE      g_bridge_mux         = portMUX_INITIALIZER_UNLOCKED;
+
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v0.2.0_B6"
+#define INNOPILOT_VERSION "v0.2.0_B7"
 
 // ========================
 // OLED PINS (as built)
@@ -555,6 +567,34 @@ static int log_max_len(void)
     return maxlen;
 }
 
+// ------------------------------ Bridge RX callback -------------------------
+
+static void on_bridge_rx(const char *line)
+{
+    if      (strncmp(line, "AP ", 3) == 0) {
+        g_bridge_ap = (line[3] == '1');
+    } else if (strncmp(line, "HDG ", 4) == 0) {
+        g_bridge_hdg = (int)strtol(line + 4, NULL, 10);
+    } else if (strncmp(line, "CMD ", 4) == 0) {
+        g_bridge_cmd = (int)strtol(line + 4, NULL, 10);
+    } else if (strncmp(line, "RDR_PCT ", 8) == 0) {
+        g_bridge_rdr_pct = (int)strtol(line + 8, NULL, 10);
+    } else if (strncmp(line, "RDR ", 4) == 0) {
+        g_bridge_rdr = strtof(line + 4, NULL);
+    } else if (strncmp(line, "FLAGS ", 6) == 0) {
+        g_bridge_flags = (uint32_t)strtoul(line + 6, NULL, 10);
+    } else if (strncmp(line, "MODE ", 5) == 0) {
+        portENTER_CRITICAL(&g_bridge_mux);
+        strncpy(g_bridge_mode, line + 5, sizeof(g_bridge_mode) - 1);
+        g_bridge_mode[sizeof(g_bridge_mode) - 1] = '\0';
+        portEXIT_CRITICAL(&g_bridge_mux);
+    } else if (strcmp(line, "WARN AP_PRESSED") == 0) {
+        g_warn_ap_pressed    = true;
+        g_warn_ap_pressed_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    }
+    // PONG is silently accepted (keepalive ack)
+}
+
 // ------------------------------ Main ---------------------------------------
 
 void app_main(void)
@@ -570,6 +610,7 @@ void app_main(void)
 
     // Start TCP client (connects to bridge when Wi-Fi is up)
     if (!demo_mode) {
+        tcp_client_set_rx_callback(on_bridge_rx);
         tcp_client_start();
     }
 
@@ -630,6 +671,11 @@ void app_main(void)
 
     // Mode transition tracking
     bool prev_manual = false;
+    bool prev_auto   = false;
+
+    // Rudder TCP send throttle (MANUAL mode only)
+    float    last_rud_pct_sent = 50.0f;
+    uint32_t last_rud_send_ms  = 0;
 
     ESP_LOGI(TAG, "Inno-Pilot Remote %s", INNOPILOT_VERSION);
     ESP_LOGI(TAG, "UI start (debounce=%dms, loop=%dms)", BUTTON_DEBOUNCE_MS, LOOP_MS);
@@ -652,12 +698,19 @@ void app_main(void)
             pot_filt = pot_filt + 0.35f * ((float)raw_pot - pot_filt);
         }
 
-        // Mode transition into manual: seed jog from current rudder
+        // Mode transition into manual: seed jog from current rudder; notify bridge
         if (in_manual && !prev_manual) {
             manual_rudder_deg = rudder_deg;
             manual_using_jog = false;
+            last_rud_send_ms  = 0;  // force immediate rudder send on entry
+            if (!demo_mode) tcp_client_send("MODE MANUAL");
+        }
+        // Mode transition out of manual (back to auto or neither): notify bridge
+        if (!in_manual && prev_manual) {
+            if (!demo_mode) tcp_client_send("MODE AUTO");
         }
         prev_manual = in_manual;
+        prev_auto   = in_auto;
 
         // Safety/state rules
         if (in_manual || (!in_auto && !in_manual) || stop_on) {
@@ -701,6 +754,11 @@ void app_main(void)
         prev_stop_on = stop_on;
         if (log_ignore_stop_until_release && stop_edge_release) {
             log_ignore_stop_until_release = false;
+        }
+
+        // ESTOP: send to bridge on every STOP press (safety — always, even for log view entry)
+        if (stop_edge_press && !demo_mode) {
+            tcp_client_send("ESTOP");
         }
 
         // ===== Enter Log View: STOP tapped 5x within 4s window =====
@@ -863,12 +921,13 @@ void app_main(void)
                 if (in_auto) {
                     if (stable_btn == BTN_3) {
                         ap_on = !ap_on;
+                        if (!demo_mode) tcp_client_send("BTN TOGGLE");
                     } else {
                         switch (stable_btn) {
-                            case BTN_1: command_deg = wrap360(command_deg - 10); break;
-                            case BTN_2: command_deg = wrap360(command_deg - 1);  break;
-                            case BTN_4: command_deg = wrap360(command_deg + 1);  break;
-                            case BTN_5: command_deg = wrap360(command_deg + 10); break;
+                            case BTN_1: command_deg = wrap360(command_deg - 10); if (!demo_mode) tcp_client_send("BTN -10"); break;
+                            case BTN_2: command_deg = wrap360(command_deg - 1);  if (!demo_mode) tcp_client_send("BTN -1");  break;
+                            case BTN_4: command_deg = wrap360(command_deg + 1);  if (!demo_mode) tcp_client_send("BTN +1");  break;
+                            case BTN_5: command_deg = wrap360(command_deg + 10); if (!demo_mode) tcp_client_send("BTN +10"); break;
                             default: break;
                         }
                     }
@@ -925,6 +984,24 @@ void app_main(void)
                 if (manual_rudder_deg < -MAX_RUDDER_DEG) manual_rudder_deg = -MAX_RUDDER_DEG;
 
                 rudder_target_deg = manual_rudder_deg;
+
+                // Send rudder target to bridge (throttled: change > 1% or every 200ms)
+                if (!demo_mode && pot_init) {
+                    float rud_pct = (pot_filt / 4095.0f) * 100.0f;
+                    if (rud_pct < 0.0f) rud_pct = 0.0f;
+                    if (rud_pct > 100.0f) rud_pct = 100.0f;
+
+                    float rud_change = fabsf(rud_pct - last_rud_pct_sent);
+                    bool time_ok = (now_ms - last_rud_send_ms) >= 200 || last_rud_send_ms == 0;
+
+                    if (rud_change >= 1.0f || time_ok) {
+                        char rud_line[24];
+                        snprintf(rud_line, sizeof(rud_line), "RUD %.1f", (double)rud_pct);
+                        tcp_client_send(rud_line);
+                        last_rud_pct_sent = rud_pct;
+                        last_rud_send_ms  = now_ms;
+                    }
+                }
             } else {
                 rudder_target_deg = 0.0f;
             }
@@ -949,6 +1026,22 @@ void app_main(void)
                 if ((eb * ea) < 0.0f && fabsf(ea) < 2.0f) {
                     head_deg = (float)command_deg;
                 }
+            }
+        }
+
+        // When connected to bridge, override local sim values with real telemetry
+        if (!demo_mode && tcp_client_is_connected()) {
+            head_deg    = wrap360f((float)g_bridge_hdg);
+            command_deg = wrap360(g_bridge_cmd);
+            ap_on       = g_bridge_ap;
+            rudder_deg  = g_bridge_rdr;
+        }
+
+        // Expire AP_PRESSED warning after 5s
+        {
+            uint32_t now_warn = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            if (g_warn_ap_pressed && (now_warn - g_warn_ap_pressed_ms) >= 5000) {
+                g_warn_ap_pressed = false;
             }
         }
 
@@ -977,10 +1070,14 @@ void app_main(void)
         float rudder_norm_ui = rudder_deg / MAX_RUDDER_DEG;
         draw_rudder_bar(0, Y_BAR_TOP, SCREEN_W, H_BAR, rudder_norm_ui);
 
-        // Line 3 (MODE centered)
+        // Line 3 (MODE centered; AP-rejected warning overlaid when active)
         char mode_line[24];
         snprintf(mode_line, sizeof(mode_line), "MODE: %s", mode_str(auto_low, manual_low));
-        draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        if (g_warn_ap_pressed) {
+            draw_centered_line_6x10("?AP Rejected?", Y_MODE_BASE);
+        } else {
+            draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        }
 
         // Line 4 (Head/Cmnd or Head/POT)
         int head_disp = wrap360((int)lroundf(head_deg));

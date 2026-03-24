@@ -7,18 +7,22 @@ Architecture:
   pypilot (port 23322) <-> bridge <-> PTY pair <-> Nano USB serial
   inno-remote (Wi-Fi)  <-> bridge (TCP port 8555)
 
-The bridge:
-  - Transparently relays pypilot servo frames to/from the Nano.
-  - Intercepts Nano button events and translates them to pypilot API calls.
-  - Accepts a single TCP connection from the inno-remote at a time.
-  - Pushes pypilot telemetry to the remote and accepts commands from it.
-
 Threading model:
   - pypilot_worker (daemon thread): owns all pypilotClient interaction.
     Calls client.receive() (which may block on pselect) without stalling
     the main loop.  Outbound set() calls are posted via set_queue.
   - Main thread: Nano serial, TCP remote, HELLO keepalive.
     Reads pypilot state from PypilotState under state_lock.
+
+Mode state machine (BridgeState.mode):
+  IDLE   — AP disengaged, no remote manual control
+  AP     — autopilot engaged via pypilot
+  MANUAL — remote has manual steering authority; AP locked out
+  Transitions:
+    BTN_TOGGLE / ESTOP       -> IDLE<->AP (rejected in MANUAL with WARN_AP_PRESSED)
+    MODE MANUAL (TCP)        -> any -> MANUAL  (disengages AP)
+    MODE AUTO   (TCP)        -> MANUAL -> IDLE
+    TCP disconnect in MANUAL -> MANUAL -> IDLE + WARN_STEER_LOSS to Nano
 """
 import os
 import queue
@@ -27,15 +31,15 @@ import socket
 import threading
 import time
 import serial
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from pypilot.client import pypilotClient
 
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION = "v0.2.0_B6"
-INNOPILOT_BUILD_NUM = 6  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B7"
+INNOPILOT_BUILD_NUM = 7  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -55,8 +59,15 @@ PILOT_COMMAND_CODE         = 0xE3  # ap.heading_command * 10 (uint16)
 PILOT_RUDDER_CODE          = 0xE4  # rudder.angle * 10 (int16 as two's-complement uint16)
 PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # +rudder.range * 10 (int16)
 PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # -rudder.range * 10 (int16)
-MANUAL_MODE_CODE           = 0xE7  # manual-from-remote active: 0/1
-MANUAL_RUD_TARGET_CODE     = 0xE8  # manual rudder target: 0-1000 (tenths of a percent)
+# NOTE: 0xE7 is RESET_CODE in pypilot servo protocol — do NOT use for bridge commands
+MANUAL_RUD_TARGET_CODE     = 0xE8  # manual rudder target: 0-1000 (0=full port, 1000=full stbd)
+MANUAL_MODE_CODE           = 0xE9  # remote manual mode active: 0/1  (was 0xE7, changed to avoid RESET_CODE conflict)
+WARNING_CODE               = 0xEA  # warning type to display/beep on Nano
+
+# Warning subtypes sent with WARNING_CODE
+WARN_NONE        = 0
+WARN_AP_PRESSED  = 1   # AP toggle rejected during MANUAL: 1-beep + 5s OLED flash
+WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
 
 # Nano -> Bridge telemetry / events
 BUTTON_EVENT_CODE = 0xE0
@@ -65,6 +76,13 @@ BTN_EVT_MINUS1    = 2
 BTN_EVT_TOGGLE    = 3
 BTN_EVT_PLUS10    = 4
 BTN_EVT_PLUS1     = 5
+BTN_EVT_STOP      = 6
+
+# Nano -> Bridge new telemetry
+BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
+
+# Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
+FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
 
 # Bridge <-> Nano keepalive framing
 BRIDGE_MAGIC1         = 0xA5
@@ -73,6 +91,13 @@ BRIDGE_HELLO_CODE     = 0xF0
 BRIDGE_HELLO_ACK_CODE = 0xF1
 BRIDGE_HELLO_VALUE    = 0xBEEF
 BRIDGE_VERSION_CODE   = 0xF2  # Bridge -> Nano: build number (uint16)
+
+# ---------------------------------------------------------------------------
+# Bridge mode identifiers
+# ---------------------------------------------------------------------------
+MODE_IDLE   = "IDLE"
+MODE_AP     = "AP"
+MODE_MANUAL = "MANUAL"
 
 # ---------------------------------------------------------------------------
 # Timing
@@ -98,7 +123,7 @@ PROBE_RETRY_DELAY_S   = 3.0
 # ---------------------------------------------------------------------------
 # pypilot reconnect constants
 # ---------------------------------------------------------------------------
-PYPILOT_RECONNECT_DELAY_S = 3.0  # wait before retrying after connection loss
+PYPILOT_RECONNECT_DELAY_S = 3.0
 
 
 # ===========================================================================
@@ -113,7 +138,19 @@ class PypilotState:
     heading_cmd:  Optional[float] = None
     rudder_angle: Optional[float] = None
     rudder_range: Optional[float] = None
-    connected:    bool            = False  # True while pypilotClient is receiving data
+    connected:    bool            = False
+
+
+# ===========================================================================
+# Bridge-local state (main thread only, no locking needed)
+# ===========================================================================
+
+@dataclass
+class BridgeState:
+    """Mode state machine and bridge-local bookkeeping."""
+    mode:              str  = MODE_IDLE  # IDLE / AP / MANUAL
+    manual_rud_target: int  = 500        # 0-1000, sent as MANUAL_RUD_TARGET_CODE
+    nano_buzzer_on:    bool = False      # last known Nano buzzer state
 
 
 # ===========================================================================
@@ -126,14 +163,9 @@ def pypilot_worker(
     set_q: "queue.Queue[tuple]",
 ) -> None:
     """
-    Daemon thread that owns all pypilotClient interaction.
-
-    Responsibilities:
-      - Maintain the pypilotClient connection (auto-reconnect on failure).
-      - Call client.receive() — which may block on pselect — without affecting
-        the main loop.
-      - Drain set_q and call client.set() for each (key, value) pair.
-      - Write received pypilot values into PypilotState under state_lock.
+    Daemon thread: owns all pypilotClient interaction.
+    receive() may block on pselect; the 10ms sleep prevents spinning
+    which would starve the main loop on the single-core Pi Zero.
     """
     while True:
         try:
@@ -142,7 +174,7 @@ def pypilot_worker(
             client.watch('imu.heading', True)
             client.watch('ap.heading_command', True)
             client.watch('rudder.angle', True)
-            client.watch('rudder.range', 1.0)   # periodic so calibration changes propagate
+            client.watch('rudder.range', 1.0)
             print("[pypilot] Connected to pypilot", flush=True)
 
             while True:
@@ -154,11 +186,8 @@ def pypilot_worker(
                     except queue.Empty:
                         break
 
-                # receive(0) on pypilotClient may return immediately (non-blocking)
-                # when pypilot is sending data at high rate, causing a tight spin
-                # that starves the main thread on a single-core Pi Zero.
-                # Sleep 10 ms here so the main loop (HELLO, serial, TCP) gets CPU.
                 msgs = client.receive(0)
+                # Sleep to yield CPU back to main thread on single-core Pi Zero
                 time.sleep(0.01)
 
                 with lock:
@@ -342,7 +371,6 @@ def enc_deg10_i16(deg: float) -> int:
 # ===========================================================================
 
 def setup_tcp_server() -> socket.socket:
-    """Create and return the non-blocking TCP listening socket."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("", REMOTE_TCP_PORT))
@@ -368,24 +396,56 @@ def close_remote(sock: socket.socket) -> None:
         pass
 
 
+# ===========================================================================
+# Remote disconnect handler
+# ===========================================================================
+
+def handle_remote_disconnect(
+    nano: serial.Serial,
+    bstate: BridgeState,
+    set_q: "queue.Queue[tuple]",
+    pstate: PypilotState,
+    plock: threading.Lock,
+) -> None:
+    """
+    Called whenever the remote TCP connection drops (timeout, peer-closed, error).
+    If the remote was in MANUAL mode this is a steering-loss event: force the
+    Nano out of manual mode, trigger the Nano steer-loss alarm, disengage AP.
+    """
+    if bstate.mode == MODE_MANUAL:
+        send_nano_frame(nano, MANUAL_MODE_CODE, 0)          # exit manual on Nano
+        send_nano_frame(nano, WARNING_CODE, WARN_STEER_LOSS) # trigger Nano alarm
+        set_q.put(("ap.enabled", False))
+        with plock:
+            pstate.ap_enabled = False
+        print("[bridge] Remote disconnected in MANUAL mode — STEER LOSS triggered", flush=True)
+        bstate.mode = MODE_IDLE
+
+
+# ===========================================================================
+# Remote command parser
+# ===========================================================================
+
 def process_remote_line(
     line: str,
     set_q: "queue.Queue[tuple]",
     remote_sock: socket.socket,
-    state: PypilotState,
-    lock: threading.Lock,
+    pstate: PypilotState,
+    plock: threading.Lock,
+    bstate: BridgeState,
+    nano: serial.Serial,
 ) -> None:
     """
     Parse and execute one newline-stripped command from the inno-remote.
 
     Commands handled:
-      PING            -> reply PONG
-      ESTOP           -> ap.enabled = False  (highest priority)
-      BTN TOGGLE      -> toggle ap.enabled
-      BTN -10|-1|+1|+10 -> adjust ap.heading_command
-
-    Outbound pypilot calls are posted to set_q (never calls client directly).
-    State is read/written under lock.
+      PING              -> reply PONG
+      ESTOP             -> ap.enabled=False, exit MANUAL if active
+      BTN TOGGLE        -> toggle AP (rejected with WARN_AP_PRESSED in MANUAL mode)
+      BTN -10|-1|+1|+10 -> adjust ap.heading_command (ignored in MANUAL)
+      MODE MANUAL       -> enter remote manual steering
+      MODE AUTO         -> exit remote manual steering
+      RUD <pct>         -> rudder target 0-100% (only in MANUAL mode)
     """
     parts = line.strip().split()
     if not parts:
@@ -398,48 +458,97 @@ def process_remote_line(
 
     elif cmd == "ESTOP":
         set_q.put(("ap.enabled", False))
-        with lock:
-            state.ap_enabled = False  # optimistic cache
+        with plock:
+            pstate.ap_enabled = False
+        if bstate.mode == MODE_MANUAL:
+            send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+            bstate.mode = MODE_IDLE
+        elif bstate.mode == MODE_AP:
+            bstate.mode = MODE_IDLE
         print("[bridge] Remote -> ESTOP: ap.enabled=False", flush=True)
 
     elif cmd == "BTN":
         if len(parts) < 2:
-            print("[bridge] Remote BTN: missing argument, ignored", flush=True)
             return
-
         arg = parts[1].upper()
 
         if arg == "TOGGLE":
-            with lock:
-                current = state.ap_enabled
-            target = True if current is None else (not current)
-            set_q.put(("ap.enabled", target))
-            with lock:
-                state.ap_enabled = target  # optimistic cache
-            print(f"[bridge] Remote BTN TOGGLE -> ap.enabled={target}", flush=True)
+            if bstate.mode == MODE_MANUAL:
+                # AP engage rejected while remote has manual authority
+                send_nano_frame(nano, WARNING_CODE, WARN_AP_PRESSED)
+                remote_send(remote_sock, "WARN AP_PRESSED")
+                print("[bridge] Remote BTN TOGGLE rejected in MANUAL mode", flush=True)
+            else:
+                with plock:
+                    current = pstate.ap_enabled
+                target = True if current is None else (not current)
+                set_q.put(("ap.enabled", target))
+                with plock:
+                    pstate.ap_enabled = target  # optimistic cache
+                if target:
+                    bstate.mode = MODE_AP
+                else:
+                    bstate.mode = MODE_IDLE
+                print(f"[bridge] Remote BTN TOGGLE -> ap.enabled={target}", flush=True)
 
         else:
+            if bstate.mode == MODE_MANUAL:
+                # Heading adjustments have no meaning in manual mode
+                return
             try:
                 delta = float(arg)
             except ValueError:
                 print(f"[bridge] Remote BTN: unrecognised arg '{arg}', ignored", flush=True)
                 return
-
-            with lock:
-                current_cmd = state.heading_cmd
-
+            with plock:
+                current_cmd = pstate.heading_cmd
             if current_cmd is None:
                 print("[bridge] Remote BTN: heading_cmd unknown, ignored", flush=True)
                 return
-
             new_cmd = clamp_heading(current_cmd + delta)
             set_q.put(("ap.heading_command", new_cmd))
-            with lock:
-                state.heading_cmd = new_cmd  # optimistic cache
+            with plock:
+                pstate.heading_cmd = new_cmd
             print(f"[bridge] Remote BTN {delta:+.0f} -> heading_command={new_cmd:.1f}", flush=True)
 
+    elif cmd == "MODE":
+        if len(parts) < 2:
+            return
+        arg = parts[1].upper()
+
+        if arg == "MANUAL":
+            # Disable AP, grant manual authority to remote
+            set_q.put(("ap.enabled", False))
+            with plock:
+                pstate.ap_enabled = False
+            send_nano_frame(nano, MANUAL_MODE_CODE, 1)
+            bstate.mode = MODE_MANUAL
+            bstate.manual_rud_target = 500  # reset to centre
+            print("[bridge] Remote -> MODE MANUAL: manual steering active", flush=True)
+
+        elif arg == "AUTO":
+            if bstate.mode == MODE_MANUAL:
+                send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+                bstate.mode = MODE_IDLE
+                print("[bridge] Remote -> MODE AUTO: manual steering released", flush=True)
+
+    elif cmd == "RUD":
+        # Rudder target percentage: 0.0 = full port, 100.0 = full stbd
+        if bstate.mode != MODE_MANUAL:
+            return  # only honoured in MANUAL mode
+        if len(parts) < 2:
+            return
+        try:
+            pct = float(parts[1])
+        except ValueError:
+            print(f"[bridge] Remote RUD: invalid value '{parts[1]}', ignored", flush=True)
+            return
+        pct = max(0.0, min(100.0, pct))
+        target_0_1000 = int(round(pct * 10.0))  # 0-1000
+        bstate.manual_rud_target = target_0_1000
+        send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
+
     else:
-        # Unknown command — log and ignore; future steps will add MODE, RUD, DB
         print(f"[bridge] Remote: unknown command '{cmd}', ignored", flush=True)
 
 
@@ -449,14 +558,14 @@ def process_remote_line(
 
 def main() -> None:
     # ---- shared pypilot state + inter-thread communication ----
-    state      = PypilotState()
-    state_lock = threading.Lock()
+    pstate     = PypilotState()
+    plock      = threading.Lock()
     set_q: "queue.Queue[tuple]" = queue.Queue()
 
     # ---- start pypilot daemon thread ----
     t = threading.Thread(
         target=pypilot_worker,
-        args=(state, state_lock, set_q),
+        args=(pstate, plock, set_q),
         daemon=True,
         name="pypilot-worker",
     )
@@ -471,6 +580,9 @@ def main() -> None:
     nano_buf  = bytearray()
     pilot_buf = bytearray()
 
+    # ---- bridge state (mode state machine) ----
+    bstate = BridgeState()
+
     # ---- telemetry / keepalive timestamps ----
     last_hello_ts    = 0.0
     last_ap_sent     = None
@@ -479,9 +591,12 @@ def main() -> None:
 
     # ---- TCP remote state ----
     tcp_server  = setup_tcp_server()
-    remote_sock = None          # the one connected client socket (or None)
-    remote_buf  = bytearray()   # line-assembly buffer for incoming TCP data
-    remote_last_rx_ts = 0.0     # monotonic time of last data received from remote
+    remote_sock = None
+    remote_buf  = bytearray()
+    remote_last_rx_ts = 0.0
+
+    # ---- snapshot of previous ap_enabled to detect external changes ----
+    prev_ap_enabled = None
 
     print(f"[bridge] Inno-Pilot Bridge {INNOPILOT_VERSION}", flush=True)
     print("[bridge] Starting main loop", flush=True)
@@ -500,12 +615,20 @@ def main() -> None:
         # ================================================================
         # 2. Snapshot shared pypilot state for this iteration
         # ================================================================
-        with state_lock:
-            ap_enabled   = state.ap_enabled
-            heading_cmd  = state.heading_cmd
-            heading      = state.heading
-            rudder_angle = state.rudder_angle
-            rudder_range = state.rudder_range
+        with plock:
+            ap_enabled   = pstate.ap_enabled
+            heading_cmd  = pstate.heading_cmd
+            heading      = pstate.heading
+            rudder_angle = pstate.rudder_angle
+            rudder_range = pstate.rudder_range
+
+        # Track pypilot-external AP changes to keep mode in sync
+        if prev_ap_enabled != ap_enabled:
+            if ap_enabled and bstate.mode == MODE_IDLE:
+                bstate.mode = MODE_AP
+            elif not ap_enabled and bstate.mode == MODE_AP:
+                bstate.mode = MODE_IDLE
+            prev_ap_enabled = ap_enabled
 
         # ================================================================
         # 3. Push AP-enabled state to Nano (on change + periodic keepalive)
@@ -524,7 +647,7 @@ def main() -> None:
                 last_ap_sent_ts = now
 
         # ================================================================
-        # 4. Push telemetry to Nano at 5 Hz
+        # 4. Push telemetry to Nano and Remote at 5 Hz
         # ================================================================
         if (now - last_telem_ts) >= TELEM_PERIOD_S:
             last_telem_ts = now
@@ -532,13 +655,10 @@ def main() -> None:
             # ---- Nano telemetry (binary frames) ----
             if heading is not None:
                 send_nano_frame(nano, PILOT_HEADING_CODE, enc_deg10_u16(heading))
-
             if heading_cmd is not None:
                 send_nano_frame(nano, PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd))
-
             if rudder_angle is not None:
                 send_nano_frame(nano, PILOT_RUDDER_CODE, enc_deg10_i16(rudder_angle))
-
             if rudder_range is not None:
                 port_lim =  abs(rudder_range)
                 stbd_lim = -abs(rudder_range)
@@ -550,14 +670,21 @@ def main() -> None:
                 ok = True
                 if ap_enabled is not None:
                     ok = ok and remote_send(remote_sock, f"AP {1 if ap_enabled else 0}")
+                ok = ok and remote_send(remote_sock, f"MODE {bstate.mode}")
                 if heading is not None:
                     ok = ok and remote_send(remote_sock, f"HDG {heading:.1f}")
                 if heading_cmd is not None:
                     ok = ok and remote_send(remote_sock, f"CMD {heading_cmd:.1f}")
                 if rudder_angle is not None:
                     ok = ok and remote_send(remote_sock, f"RDR {rudder_angle:.1f}")
+                # Rudder percentage (useful in MANUAL mode for remote display)
+                if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
+                    rudder_pct = (rudder_angle + rudder_range) / (2.0 * rudder_range) * 100.0
+                    rudder_pct = max(0.0, min(100.0, rudder_pct))
+                    ok = ok and remote_send(remote_sock, f"RDR_PCT {rudder_pct:.1f}")
                 if not ok:
                     print("[bridge] TCP remote: send failed during telemetry, disconnecting", flush=True)
+                    handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                     close_remote(remote_sock)
                     remote_sock = None
                     remote_buf  = bytearray()
@@ -574,7 +701,7 @@ def main() -> None:
                 nano.write(wrap_frame(raw_frame))
 
         # ================================================================
-        # 6. Relay: Nano -> pypilot  (intercept button events)
+        # 6. Relay: Nano -> pypilot  (intercept events; parse telemetry)
         # ================================================================
         try:
             data_from_nano = nano.read(256)
@@ -592,37 +719,68 @@ def main() -> None:
                 # Forward raw frame to pypilot unchanged
                 pilot.write(f)
 
-                # Intercept button events and translate to pypilot API calls
                 if code == BUTTON_EVENT_CODE:
                     print(f"[bridge] Nano -> API: BUTTON_EVENT value={value}", flush=True)
                     try:
                         if value == BTN_EVT_TOGGLE:
-                            with state_lock:
-                                current = state.ap_enabled
-                            target = True if current is None else (not current)
-                            set_q.put(("ap.enabled", target))
-                            with state_lock:
-                                state.ap_enabled = target  # optimistic cache
+                            if bstate.mode == MODE_MANUAL:
+                                # AP toggle rejected while remote has manual authority
+                                send_nano_frame(nano, WARNING_CODE, WARN_AP_PRESSED)
+                                if remote_sock is not None:
+                                    remote_send(remote_sock, "WARN AP_PRESSED")
+                                print("[bridge] Nano BTN TOGGLE rejected in MANUAL mode", flush=True)
+                            else:
+                                with plock:
+                                    current = pstate.ap_enabled
+                                target = True if current is None else (not current)
+                                set_q.put(("ap.enabled", target))
+                                with plock:
+                                    pstate.ap_enabled = target
+                                if target:
+                                    bstate.mode = MODE_AP
+                                else:
+                                    bstate.mode = MODE_IDLE
 
                         elif value in (BTN_EVT_MINUS10, BTN_EVT_MINUS1,
                                        BTN_EVT_PLUS10,  BTN_EVT_PLUS1):
-                            with state_lock:
-                                current_cmd = state.heading_cmd
-                            if current_cmd is None:
-                                continue
-                            delta = {
-                                BTN_EVT_MINUS10: -10.0,
-                                BTN_EVT_MINUS1:  -1.0,
-                                BTN_EVT_PLUS1:    1.0,
-                                BTN_EVT_PLUS10:  10.0,
-                            }[value]
-                            new_cmd = clamp_heading(current_cmd + delta)
-                            set_q.put(("ap.heading_command", new_cmd))
-                            with state_lock:
-                                state.heading_cmd = new_cmd  # optimistic cache
+                            if bstate.mode == MODE_MANUAL:
+                                pass  # heading adjustments ignored in manual mode
+                            else:
+                                with plock:
+                                    current_cmd = pstate.heading_cmd
+                                if current_cmd is None:
+                                    continue
+                                delta = {
+                                    BTN_EVT_MINUS10: -10.0,
+                                    BTN_EVT_MINUS1:  -1.0,
+                                    BTN_EVT_PLUS1:    1.0,
+                                    BTN_EVT_PLUS10:  10.0,
+                                }[value]
+                                new_cmd = clamp_heading(current_cmd + delta)
+                                set_q.put(("ap.heading_command", new_cmd))
+                                with plock:
+                                    pstate.heading_cmd = new_cmd
+
+                        elif value == BTN_EVT_STOP:
+                            # STOP pressed on Nano: disengage AP and exit any manual mode
+                            set_q.put(("ap.enabled", False))
+                            with plock:
+                                pstate.ap_enabled = False
+                            if bstate.mode == MODE_MANUAL:
+                                send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+                            bstate.mode = MODE_IDLE
+                            print("[bridge] Nano STOP -> ap.enabled=False, mode=IDLE", flush=True)
 
                     except Exception as e:
                         print(f"[bridge] Button event error: {e}", flush=True)
+
+                elif code == FLAGS_CODE:
+                    # Relay Nano fault flags to remote (remote can display fault indicators)
+                    if remote_sock is not None:
+                        remote_send(remote_sock, f"FLAGS {value}")
+
+                elif code == BUZZER_STATE_CODE:
+                    bstate.nano_buzzer_on = (value != 0)
 
         # ================================================================
         # 7. TCP remote: accept new connections / handle existing client
@@ -635,7 +793,6 @@ def main() -> None:
 
         for s in readable:
             if s is tcp_server:
-                # New inbound connection
                 conn, addr = tcp_server.accept()
                 if remote_sock is not None:
                     print(f"[bridge] TCP remote: rejected {addr} (already connected)", flush=True)
@@ -653,29 +810,31 @@ def main() -> None:
                     if data:
                         remote_buf.extend(data)
                         remote_last_rx_ts = now
-                        # Parse all complete newline-terminated lines
                         while b"\n" in remote_buf:
                             nl = remote_buf.index(b"\n")
                             line = remote_buf[:nl].decode("ascii", errors="replace")
                             del remote_buf[:nl + 1]
                             process_remote_line(
-                                line, set_q, remote_sock, state, state_lock
+                                line, set_q, remote_sock,
+                                pstate, plock, bstate, nano
                             )
                     else:
-                        # Peer closed connection cleanly
                         print("[bridge] TCP remote: disconnected (peer closed)", flush=True)
+                        handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                         close_remote(remote_sock)
                         remote_sock = None
                         remote_buf  = bytearray()
                 except OSError as exc:
                     print(f"[bridge] TCP remote: socket error ({exc}), disconnecting", flush=True)
+                    handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                     close_remote(remote_sock)
                     remote_sock = None
                     remote_buf  = bytearray()
 
-        # Check for remote connection timeout (no data within REMOTE_TIMEOUT_S)
+        # Check for remote connection timeout
         if remote_sock is not None and (now - remote_last_rx_ts) >= REMOTE_TIMEOUT_S:
             print("[bridge] TCP remote: timeout — no data received, disconnecting", flush=True)
+            handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
             close_remote(remote_sock)
             remote_sock = None
             remote_buf  = bytearray()

@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B6";
-const uint16_t INNOPILOT_BUILD_NUM = 6;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B7";
+const uint16_t INNOPILOT_BUILD_NUM = 7;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)
@@ -46,6 +46,16 @@ const uint8_t BRIDGE_VERSION_CODE = 0xF2;  // Bridge -> Nano: build number
 // Bridge->Nano: pypilot rudder limits (tenths of degrees)
 const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit * 10 (int16)
 const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit * 10 (int16)
+// Remote manual control (Bridge->Nano)
+const uint8_t MANUAL_RUD_TARGET_CODE = 0xE8; // remote rudder target 0..1000
+const uint8_t MANUAL_MODE_CODE       = 0xE9; // 1=enter MANUAL, 0=exit MANUAL
+// Warnings from bridge (Bridge->Nano)
+const uint8_t WARNING_CODE           = 0xEA; // warning subtype
+const uint8_t WARN_NONE              = 0;
+const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote not in MANUAL
+const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
+// Nano->Bridge: buzzer state reporting
+const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -120,6 +130,20 @@ const float MAX_CONTROLLER_TEMP_C = 50.0f;
 // Manual jog state (used when AP is disengaged)
 bool  manual_override = false;  // true while a manual jog is active
 int8_t manual_dir     = 0;      // -1 = port, +1 = starboard, 0 = none
+
+// Remote manual mode state (from Bridge via TCP)
+bool     remote_manual_active     = false;  // true when Bridge is in MANUAL mode
+uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full port, 1000=full stbd
+// AP-pressed warning (Bridge rejected AP toggle in MANUAL mode)
+bool          ap_pressed_warn_active = false;
+unsigned long ap_pressed_warn_ms     = 0;
+const unsigned long AP_PRESSED_WARN_MS = 5000UL; // 5s OLED flash duration
+unsigned long ap_warn_beep_end_ms    = 0;         // when single beep ends
+// Steer-loss warning (remote TCP dropped while in MANUAL mode)
+bool steer_loss_active   = false;
+bool steer_loss_silenced = false;
+// Buzzer state tracking for change reporting to bridge
+bool last_buzzer_state = false;
 
 // Current calibration points: ADC reading vs measured amps
 const uint8_t  CURR_N = 8;
@@ -593,13 +617,39 @@ void oled_draw() {
   }
   display.clearToEOL();
 
-  // --- Rows 2-3: fault display (2X flashing) or overlay or empty ---
+  // --- Rows 2-3: fault/warning display (priority: steer_loss > hw_fault > ap_warn > overlay) ---
   {
-    bool any_fault = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
-    bool fault_shown = any_fault && !pi_fault_alarm_silenced;
+    bool any_hw_fault = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
+    bool hw_fault_shown = any_hw_fault && !pi_fault_alarm_silenced;
 
-    if (fault_shown) {
-      // Flash the fault message: show/hide alternating every 400ms
+    // Expire ap_pressed_warn after 5s
+    if (ap_pressed_warn_active && (now - ap_pressed_warn_ms >= AP_PRESSED_WARN_MS)) {
+      ap_pressed_warn_active = false;
+    }
+
+    if (steer_loss_active && !steer_loss_silenced) {
+      // STEER LOSS: flash 2X "!STEER LOSS" every 400ms
+      static bool sl_vis = true;
+      static unsigned long sl_flash_ms = 0;
+      if (now - sl_flash_ms >= 400UL) {
+        sl_flash_ms = now;
+        sl_vis = !sl_vis;
+      }
+      if (sl_vis) {
+        display.set2X();
+        const char *msg = "!STEER LOSS";
+        int16_t x = (SCREEN_WIDTH - (int16_t)strlen(msg) * 12) / 2;
+        if (x < 0) x = 0;
+        display.setCursor(x, 2);
+        display.print(msg);
+        display.clearToEOL();
+        display.set1X();
+      } else {
+        display.setCursor(0, 2); display.clearToEOL();
+        display.setCursor(0, 3); display.clearToEOL();
+      }
+    } else if (hw_fault_shown) {
+      // Hardware fault: flash 2X message every 400ms
       static bool fault_vis = true;
       static unsigned long fault_flash_ms = 0;
       if (now - fault_flash_ms >= 400UL) {
@@ -622,10 +672,15 @@ void oled_draw() {
         display.clearToEOL();
         display.set1X();
       } else {
-        // Blank both rows during the "off" phase of the flash
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
       }
+    } else if (ap_pressed_warn_active) {
+      // AP-pressed warning: 1X "?AP Pressed?" (no flashing)
+      display.setCursor(0, 2);
+      display.print(F("?AP Pressed?"));
+      display.clearToEOL();
+      display.setCursor(0, 3); display.clearToEOL();
     } else if (overlay_active && (now - overlay_start_ms < OVERLAY_DURATION_MS)) {
       // Overlay (big transient button feedback) on rows 2-3
       display.set2X();
@@ -691,12 +746,17 @@ void oled_draw() {
 
   // --- Online-only rows ---
 
-  // Row 4: AP + clutch
+  // Row 4: AP + clutch (or MAN: ON when remote manual mode active)
   display.setCursor(0, 4);
-  display.print(F("AP: "));
-  display.print(ap_display ? F("ON") : F("OFF"));
-  display.print(F("  Clutch: "));
-  display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+  if (remote_manual_active) {
+    display.print(F("MAN: ON  Clutch: "));
+    display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+  } else {
+    display.print(F("AP: "));
+    display.print(ap_display ? F("ON") : F("OFF"));
+    display.print(F("  Clutch: "));
+    display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+  }
   display.clearToEOL();
 
   // Row 5: Cmd / Heading
@@ -813,7 +873,7 @@ void update_motor_from_command() {
 
   bool manual_jog_active = manual_override;
   int8_t manual_jog_dir = manual_dir;
-  if (!manual_override && !ap_active && pi_alive && command_recent) {
+  if (!manual_override && !ap_active && !remote_manual_active && pi_alive && command_recent) {
     if (delta > DEADBAND) {
       manual_jog_active = true;
       manual_jog_dir = +1;
@@ -823,9 +883,9 @@ void update_motor_from_command() {
     }
   }
 
-  // Clutch engages when AP is enabled remotely OR manual jog is active.
+  // Clutch engages when AP is enabled remotely OR manual jog is active OR remote MANUAL mode.
   // Safety: clutch forced OFF during pi_fault or overtemp.
-  bool clutch_should = (manual_jog_active || ap_active) &&
+  bool clutch_should = (manual_jog_active || ap_active || remote_manual_active) &&
                        !pi_fault &&
                        !(flags & OVERTEMP_FAULT);
 
@@ -928,6 +988,36 @@ void update_motor_from_command() {
     flags |= MIN_RUDDER_FAULT;
   } else {
     flags &= ~MIN_RUDDER_FAULT;
+  }
+
+  // ---- Remote MANUAL mode: bang-bang to ADC target from remote pot ----
+  if (remote_manual_active) {
+    // Map 0..1000 target to port-end..stbd-end ADC range
+    int target_adc = RUDDER_ADC_PORT_END +
+      (int)((long)(RUDDER_ADC_STBD_END - RUDDER_ADC_PORT_END) * manual_rud_target_0_1000 / 1000);
+    const int REMOTE_DEADBAND = 15;  // ADC counts
+
+    int8_t dir = 0;
+    if      (a < target_adc - REMOTE_DEADBAND) dir = +1;   // need stbd
+    else if (a > target_adc + REMOTE_DEADBAND) dir = -1;   // need port
+
+    if (dir > 0 && (at_stbd_end || at_stbd_pilot)) dir = 0;
+    if (dir < 0 && (at_port_end || at_port_pilot)) dir = 0;
+
+    if (dir > 0) {
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+      analogWrite(HBRIDGE_PWM_PIN, 255);
+    } else if (dir < 0) {
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+      analogWrite(HBRIDGE_PWM_PIN, 255);
+    } else {
+      analogWrite(HBRIDGE_PWM_PIN, 0);
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    }
+    return;
   }
 
   // ---- Manual override branch (AP disengaged) ----
@@ -1114,6 +1204,34 @@ void process_packet() {
       pilot_stbd_lim_valid = true;
       break;
 
+    case MANUAL_MODE_CODE:
+      remote_manual_active = (value != 0);
+      if (!remote_manual_active) {
+        // Exiting MANUAL: clear steer-loss state
+        steer_loss_active   = false;
+        steer_loss_silenced = false;
+      }
+      break;
+
+    case MANUAL_RUD_TARGET_CODE:
+      manual_rud_target_0_1000 = value;
+      break;
+
+    case WARNING_CODE:
+      if ((uint8_t)value == WARN_AP_PRESSED) {
+        ap_pressed_warn_active = true;
+        ap_pressed_warn_ms     = millis();
+        ap_warn_beep_end_ms    = millis() + 200UL;  // single 200ms beep
+      } else if ((uint8_t)value == WARN_STEER_LOSS) {
+        steer_loss_active   = true;
+        steer_loss_silenced = false;
+      } else if ((uint8_t)value == WARN_NONE) {
+        steer_loss_active      = false;
+        steer_loss_silenced    = false;
+        ap_pressed_warn_active = false;
+      }
+      break;
+
     case BRIDGE_HELLO_CODE:
       send_frame(BRIDGE_HELLO_ACK_CODE, 0xBEEF);
       break;
@@ -1247,19 +1365,33 @@ void loop() {
   }
 
   if (ptm_edge) {
-    // Emergency stop: force AP off
-    flags &= ~ENGAGED;
-    last_command_val = 1000;
+    // Two-press STOP: first press silences active alarm if any; second (or first if no alarm) is full stop
+    bool alarm_was_active = (steer_loss_active && !steer_loss_silenced) || ap_pressed_warn_active;
 
-    // Make OLED show OFF immediately (remote truth will follow)
-    ap_display = false;
-    ap_display_override_until_ms = millis() + 2000UL;
+    if (alarm_was_active) {
+      // First press: silence alarm only, AP stays engaged
+      steer_loss_silenced    = true;
+      ap_pressed_warn_active = false;
+      show_overlay("SIL");
+    } else {
+      // Full emergency stop
+      flags &= ~ENGAGED;
+      last_command_val       = 1000;
+      remote_manual_active   = false;
+      steer_loss_active      = false;
+      steer_loss_silenced    = false;
+      ap_pressed_warn_active = false;
 
-    // Tell the bridge/pypilot to disable ap.enabled
-    send_button_event(BTN_EVT_STOP);
+      // Make OLED show OFF immediately (remote truth will follow)
+      ap_display = false;
+      ap_display_override_until_ms = millis() + 2000UL;
 
-    // Show big STOP overlay
-    show_overlay("STOP");
+      // Tell the bridge/pypilot to disable ap.enabled
+      send_button_event(BTN_EVT_STOP);
+
+      // Show big STOP overlay
+      show_overlay("STOP");
+    }
   }
 
 // ----- Button ladder on A6 (B1..B5) -----
@@ -1306,8 +1438,8 @@ if (stable_b != last_stable_button) {
   last_stable_button = stable_b;
 }
 
-// If AP is disengaged, use buttons as manual jog
-if (!ap_engaged) {
+// If AP is disengaged and not in remote MANUAL mode, use buttons as manual jog
+if (!ap_engaged && !remote_manual_active) {
   if (stable_b == BTN_B1 || stable_b == BTN_B2) {
     // Define B1/B2 as starboard jog (positive direction)
     manual_override = true;
@@ -1326,19 +1458,40 @@ if (!ap_engaged) {
     flags &= ~OVERTEMP_FAULT;
   }
 
-  bool alarm_active = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
-  bool alarm_silenced = pi_fault_alarm_silenced;
-  if (alarm_active && !alarm_silenced) {
-    static unsigned long buzz_last = 0;
-    static bool buzz_on = false;
-    unsigned long period = 100UL;  // short rapid beeps: 100ms on / 100ms off
-    if (now - buzz_last >= period) {
-      buzz_last = now;
-      buzz_on = !buzz_on;
-      digitalWrite(BUZZER_PIN, buzz_on ? HIGH : LOW);
+  // Buzzer logic (priority: steer_loss > hw_fault > ap_warn > silent)
+  bool hw_alarm_active   = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
+  bool hw_alarm_silenced = pi_fault_alarm_silenced;
+  bool buzzer_on = false;
+
+  if (steer_loss_active && !steer_loss_silenced) {
+    // Continuous rapid 100ms beeping for steer loss (life-safety)
+    static unsigned long sl_buzz_last = 0;
+    static bool sl_buzz_on = false;
+    if (now - sl_buzz_last >= 100UL) {
+      sl_buzz_last = now;
+      sl_buzz_on = !sl_buzz_on;
     }
-  } else {
-    digitalWrite(BUZZER_PIN, LOW);
+    buzzer_on = sl_buzz_on;
+  } else if (hw_alarm_active && !hw_alarm_silenced) {
+    // Rapid 100ms beeping for hardware faults
+    static unsigned long hw_buzz_last = 0;
+    static bool hw_buzz_on = false;
+    if (now - hw_buzz_last >= 100UL) {
+      hw_buzz_last = now;
+      hw_buzz_on = !hw_buzz_on;
+    }
+    buzzer_on = hw_buzz_on;
+  } else if (ap_pressed_warn_active && (now < ap_warn_beep_end_ms)) {
+    // Single 200ms beep for AP-pressed warning
+    buzzer_on = true;
+  }
+
+  digitalWrite(BUZZER_PIN, buzzer_on ? HIGH : LOW);
+
+  // Report buzzer state change to bridge
+  if (buzzer_on != last_buzzer_state) {
+    last_buzzer_state = buzzer_on;
+    send_frame(BUZZER_STATE_CODE, buzzer_on ? 1 : 0);
   }
 
   if (pi_fault || vin_low_fault || vin_high_fault) {
