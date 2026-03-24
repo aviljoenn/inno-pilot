@@ -12,12 +12,23 @@ The bridge:
   - Intercepts Nano button events and translates them to pypilot API calls.
   - Accepts a single TCP connection from the inno-remote at a time.
   - Pushes pypilot telemetry to the remote and accepts commands from it.
+
+Threading model:
+  - pypilot_worker (daemon thread): owns all pypilotClient interaction.
+    Calls client.receive() (which may block on pselect) without stalling
+    the main loop.  Outbound set() calls are posted via set_queue.
+  - Main thread: Nano serial, TCP remote, HELLO keepalive.
+    Reads pypilot state from PypilotState under state_lock.
 """
 import os
+import queue
 import select
 import socket
+import threading
 import time
 import serial
+from dataclasses import dataclass, field
+from typing import Optional
 from pypilot.client import pypilotClient
 
 # ---------------------------------------------------------------------------
@@ -83,6 +94,103 @@ REMOTE_PING_PERIOD_S   = 2.0   # send PONG keepalive to remote every N seconds
 PROBE_INITIAL_DELAY_S = 1.0
 PROBE_RETRIES         = 5
 PROBE_RETRY_DELAY_S   = 3.0
+
+# ---------------------------------------------------------------------------
+# pypilot reconnect constants
+# ---------------------------------------------------------------------------
+PYPILOT_RECONNECT_DELAY_S = 3.0  # wait before retrying after connection loss
+
+
+# ===========================================================================
+# Shared pypilot state (owned by pypilot_worker, read by main thread)
+# ===========================================================================
+
+@dataclass
+class PypilotState:
+    """Thread-safe container for pypilot values.  Always access under state_lock."""
+    ap_enabled:   Optional[bool]  = None
+    heading:      Optional[float] = None
+    heading_cmd:  Optional[float] = None
+    rudder_angle: Optional[float] = None
+    rudder_range: Optional[float] = None
+    connected:    bool            = False  # True while pypilotClient is receiving data
+
+
+# ===========================================================================
+# pypilot daemon thread
+# ===========================================================================
+
+def pypilot_worker(
+    state: PypilotState,
+    lock: threading.Lock,
+    set_q: "queue.Queue[tuple]",
+) -> None:
+    """
+    Daemon thread that owns all pypilotClient interaction.
+
+    Responsibilities:
+      - Maintain the pypilotClient connection (auto-reconnect on failure).
+      - Call client.receive() — which may block on pselect — without affecting
+        the main loop.
+      - Drain set_q and call client.set() for each (key, value) pair.
+      - Write received pypilot values into PypilotState under state_lock.
+    """
+    while True:
+        try:
+            client = pypilotClient()
+            client.watch('ap.enabled', True)
+            client.watch('imu.heading', True)
+            client.watch('ap.heading_command', True)
+            client.watch('rudder.angle', True)
+            client.watch('rudder.range', 1.0)   # periodic so calibration changes propagate
+            print("[pypilot] Connected to pypilot", flush=True)
+
+            while True:
+                # Drain outbound set() queue before blocking on receive()
+                while True:
+                    try:
+                        key, val = set_q.get_nowait()
+                        client.set(key, val)
+                    except queue.Empty:
+                        break
+
+                # receive() may block until pypilot sends a frame — safe in a thread
+                msgs = client.receive(0)
+
+                with lock:
+                    state.connected = True
+                    if "ap.enabled" in msgs:
+                        try:
+                            state.ap_enabled = bool(msgs["ap.enabled"])
+                        except Exception:
+                            pass
+                    if "ap.heading_command" in msgs:
+                        try:
+                            state.heading_cmd = float(msgs["ap.heading_command"])
+                        except Exception:
+                            pass
+                    if "imu.heading" in msgs:
+                        try:
+                            state.heading = float(msgs["imu.heading"])
+                        except Exception:
+                            pass
+                    if "rudder.angle" in msgs:
+                        try:
+                            state.rudder_angle = float(msgs["rudder.angle"])
+                        except Exception:
+                            pass
+                    if "rudder.range" in msgs:
+                        try:
+                            state.rudder_range = float(msgs["rudder.range"])
+                        except Exception:
+                            pass
+
+        except Exception as exc:
+            print(f"[pypilot] Connection lost: {exc} — retrying in {PYPILOT_RECONNECT_DELAY_S:.0f}s",
+                  flush=True)
+            with lock:
+                state.connected = False
+            time.sleep(PYPILOT_RECONNECT_DELAY_S)
 
 
 # ===========================================================================
@@ -258,11 +366,11 @@ def close_remote(sock: socket.socket) -> None:
 
 def process_remote_line(
     line: str,
-    client: pypilotClient,
+    set_q: "queue.Queue[tuple]",
     remote_sock: socket.socket,
-    ap_enabled,
-    heading_cmd,
-) -> tuple:
+    state: PypilotState,
+    lock: threading.Lock,
+) -> None:
     """
     Parse and execute one newline-stripped command from the inno-remote.
 
@@ -272,11 +380,12 @@ def process_remote_line(
       BTN TOGGLE      -> toggle ap.enabled
       BTN -10|-1|+1|+10 -> adjust ap.heading_command
 
-    Returns updated (ap_enabled, heading_cmd).
+    Outbound pypilot calls are posted to set_q (never calls client directly).
+    State is read/written under lock.
     """
     parts = line.strip().split()
     if not parts:
-        return ap_enabled, heading_cmd
+        return
 
     cmd = parts[0].upper()
 
@@ -284,21 +393,25 @@ def process_remote_line(
         remote_send(remote_sock, "PONG")
 
     elif cmd == "ESTOP":
-        client.set("ap.enabled", False)
-        ap_enabled = False
+        set_q.put(("ap.enabled", False))
+        with lock:
+            state.ap_enabled = False  # optimistic cache
         print("[bridge] Remote -> ESTOP: ap.enabled=False", flush=True)
 
     elif cmd == "BTN":
         if len(parts) < 2:
             print("[bridge] Remote BTN: missing argument, ignored", flush=True)
-            return ap_enabled, heading_cmd
+            return
 
         arg = parts[1].upper()
 
         if arg == "TOGGLE":
-            target = True if ap_enabled is None else (not ap_enabled)
-            client.set("ap.enabled", target)
-            ap_enabled = target
+            with lock:
+                current = state.ap_enabled
+            target = True if current is None else (not current)
+            set_q.put(("ap.enabled", target))
+            with lock:
+                state.ap_enabled = target  # optimistic cache
             print(f"[bridge] Remote BTN TOGGLE -> ap.enabled={target}", flush=True)
 
         else:
@@ -306,22 +419,24 @@ def process_remote_line(
                 delta = float(arg)
             except ValueError:
                 print(f"[bridge] Remote BTN: unrecognised arg '{arg}', ignored", flush=True)
-                return ap_enabled, heading_cmd
+                return
 
-            if heading_cmd is None:
+            with lock:
+                current_cmd = state.heading_cmd
+
+            if current_cmd is None:
                 print("[bridge] Remote BTN: heading_cmd unknown, ignored", flush=True)
-                return ap_enabled, heading_cmd
+                return
 
-            new_cmd = clamp_heading(heading_cmd + delta)
-            client.set("ap.heading_command", new_cmd)
-            heading_cmd = new_cmd
+            new_cmd = clamp_heading(current_cmd + delta)
+            set_q.put(("ap.heading_command", new_cmd))
+            with lock:
+                state.heading_cmd = new_cmd  # optimistic cache
             print(f"[bridge] Remote BTN {delta:+.0f} -> heading_command={new_cmd:.1f}", flush=True)
 
     else:
         # Unknown command — log and ignore; future steps will add MODE, RUD, DB
         print(f"[bridge] Remote: unknown command '{cmd}', ignored", flush=True)
-
-    return ap_enabled, heading_cmd
 
 
 # ===========================================================================
@@ -329,19 +444,20 @@ def process_remote_line(
 # ===========================================================================
 
 def main() -> None:
-    # ---- pypilot client ----
-    client = pypilotClient()
-    client.watch('ap.enabled', True)
-    client.watch('imu.heading', True)
-    client.watch('ap.heading_command', True)
-    client.watch('rudder.angle', True)
-    client.watch('rudder.range', 1.0)   # periodic so calibration changes propagate
+    # ---- shared pypilot state + inter-thread communication ----
+    state      = PypilotState()
+    state_lock = threading.Lock()
+    set_q: "queue.Queue[tuple]" = queue.Queue()
 
-    ap_enabled   = None
-    heading_cmd  = None
-    heading      = None   # imu.heading
-    rudder_angle = None
-    rudder_range = None
+    # ---- start pypilot daemon thread ----
+    t = threading.Thread(
+        target=pypilot_worker,
+        args=(state, state_lock, set_q),
+        daemon=True,
+        name="pypilot-worker",
+    )
+    t.start()
+    print("[bridge] pypilot worker thread started", flush=True)
 
     # ---- serial ports ----
     nano_port = find_nano_port()
@@ -378,39 +494,14 @@ def main() -> None:
             last_hello_ts = now
 
         # ================================================================
-        # 2. Receive pypilot values
+        # 2. Snapshot shared pypilot state for this iteration
         # ================================================================
-        msgs = client.receive(0)  # non-blocking
-
-        if "ap.enabled" in msgs:
-            try:
-                ap_enabled = bool(msgs["ap.enabled"])
-            except Exception:
-                pass
-
-        if "ap.heading_command" in msgs:
-            try:
-                heading_cmd = float(msgs["ap.heading_command"])
-            except Exception:
-                pass
-
-        if "imu.heading" in msgs:
-            try:
-                heading = float(msgs["imu.heading"])
-            except Exception:
-                pass
-
-        if "rudder.angle" in msgs:
-            try:
-                rudder_angle = float(msgs["rudder.angle"])
-            except Exception:
-                pass
-
-        if "rudder.range" in msgs:
-            try:
-                rudder_range = float(msgs["rudder.range"])
-            except Exception:
-                pass
+        with state_lock:
+            ap_enabled   = state.ap_enabled
+            heading_cmd  = state.heading_cmd
+            heading      = state.heading
+            rudder_angle = state.rudder_angle
+            rudder_range = state.rudder_range
 
         # ================================================================
         # 3. Push AP-enabled state to Nano (on change + periodic keepalive)
@@ -502,13 +593,18 @@ def main() -> None:
                     print(f"[bridge] Nano -> API: BUTTON_EVENT value={value}", flush=True)
                     try:
                         if value == BTN_EVT_TOGGLE:
-                            target = True if ap_enabled is None else (not ap_enabled)
-                            client.set("ap.enabled", target)
-                            ap_enabled = target  # optimistic local cache
+                            with state_lock:
+                                current = state.ap_enabled
+                            target = True if current is None else (not current)
+                            set_q.put(("ap.enabled", target))
+                            with state_lock:
+                                state.ap_enabled = target  # optimistic cache
 
                         elif value in (BTN_EVT_MINUS10, BTN_EVT_MINUS1,
                                        BTN_EVT_PLUS10,  BTN_EVT_PLUS1):
-                            if heading_cmd is None:
+                            with state_lock:
+                                current_cmd = state.heading_cmd
+                            if current_cmd is None:
                                 continue
                             delta = {
                                 BTN_EVT_MINUS10: -10.0,
@@ -516,9 +612,10 @@ def main() -> None:
                                 BTN_EVT_PLUS1:    1.0,
                                 BTN_EVT_PLUS10:  10.0,
                             }[value]
-                            new_cmd = clamp_heading(heading_cmd + delta)
-                            client.set("ap.heading_command", new_cmd)
-                            heading_cmd = new_cmd  # optimistic cache
+                            new_cmd = clamp_heading(current_cmd + delta)
+                            set_q.put(("ap.heading_command", new_cmd))
+                            with state_lock:
+                                state.heading_cmd = new_cmd  # optimistic cache
 
                     except Exception as e:
                         print(f"[bridge] Button event error: {e}", flush=True)
@@ -557,8 +654,8 @@ def main() -> None:
                             nl = remote_buf.index(b"\n")
                             line = remote_buf[:nl].decode("ascii", errors="replace")
                             del remote_buf[:nl + 1]
-                            ap_enabled, heading_cmd = process_remote_line(
-                                line, client, remote_sock, ap_enabled, heading_cmd
+                            process_remote_line(
+                                line, set_q, remote_sock, state, state_lock
                             )
                     else:
                         # Peer closed connection cleanly
