@@ -9,7 +9,6 @@
 
 #include <Arduino.h>
 #include <stdint.h>
-#include <math.h>
 #include <string.h>
 #include <avr/pgmspace.h>
 #include <Wire.h>
@@ -467,15 +466,7 @@ void temp_service(unsigned long now) {
   }
 }
 
-void oled_print_right(uint8_t y, const char* text) {
-  uint8_t len = (uint8_t)strlen(text);
-  int16_t x = SCREEN_WIDTH - (int16_t)(len * 6);
-  if (x < 0) {
-    x = 0;
-  }
-  display.setCursor(x, y);
-  display.print(text);
-}
+
 
 void oled_draw() {
   if (!oled_ok) {
