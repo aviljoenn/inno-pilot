@@ -68,8 +68,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B7"
-INNOPILOT_BUILD_NUM = 7  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B8"
+INNOPILOT_BUILD_NUM = 8  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -618,6 +618,11 @@ def main() -> None:
     last_ap_sent_ts  = 0.0
     last_telem_ts    = 0.0
 
+    # ---- pypilot relay diagnostics ----
+    relay_good  = 0  # CRC-valid frames forwarded to Nano
+    relay_drop  = 0  # bytes dropped during realignment
+    relay_log_ts = 0.0
+
     # ---- TCP remote state ----
     tcp_server  = setup_tcp_server()
     remote_sock = None
@@ -723,15 +728,32 @@ def main() -> None:
                     remote_buf  = bytearray()
 
         # ================================================================
-        # 5. Relay: pypilot -> Nano
+        # 5. Relay: pypilot -> Nano (CRC-validated, self-aligning)
         # ================================================================
         data_from_pilot = pilot.read(256)
         if data_from_pilot:
             pilot_buf.extend(data_from_pilot)
             while len(pilot_buf) >= 4:
-                raw_frame = bytes(pilot_buf[:4])
-                del pilot_buf[:4]
-                nano.write(wrap_frame(raw_frame))
+                candidate = bytes(pilot_buf[:4])
+                crc_calc = crc8_msb(candidate[:3])
+                if crc_calc == candidate[3]:
+                    # Valid pypilot frame — wrap with magic header and forward
+                    nano.write(wrap_frame(candidate))
+                    del pilot_buf[:4]
+                    relay_good += 1
+                else:
+                    # Alignment error — drop one byte and rescan
+                    log.debug("pypilot relay: CRC mismatch, dropping 0x%02X "
+                              "(buf[0:4]=%s)", pilot_buf[0],
+                              bytes(pilot_buf[:4]).hex())
+                    del pilot_buf[0]
+                    relay_drop += 1
+
+            # Log relay stats every 30 s
+            if relay_good + relay_drop > 0 and (now - relay_log_ts) >= 30.0:
+                log.info("pypilot relay stats: %d forwarded, %d bytes dropped",
+                         relay_good, relay_drop)
+                relay_log_ts = now
 
         # ================================================================
         # 6. Relay: Nano -> pypilot  (intercept events; parse telemetry)
