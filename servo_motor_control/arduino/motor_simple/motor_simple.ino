@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B9";
-const uint16_t INNOPILOT_BUILD_NUM = 9;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B10";
+const uint16_t INNOPILOT_BUILD_NUM = 10;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)

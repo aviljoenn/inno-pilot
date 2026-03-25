@@ -68,8 +68,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B9"
-INNOPILOT_BUILD_NUM = 9  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B10"
+INNOPILOT_BUILD_NUM = 10  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -773,11 +773,16 @@ def main() -> None:
             raise SystemExit(1) from exc
 
         if data_from_nano:
+            log.debug("nano RX  %d bytes: %s", len(data_from_nano),
+                      data_from_nano.hex())
             nano_buf.extend(data_from_nano)
 
             for f in extract_wrapped_frames(nano_buf):
                 code  = f[0]
                 value = f[1] | (f[2] << 8)
+
+                log.debug("nano->pilot RELAY  code=0x%02X val=%d  hex=%s",
+                          code, value, f.hex())
 
                 # Forward raw frame to pypilot unchanged
                 pilot.write(f)
