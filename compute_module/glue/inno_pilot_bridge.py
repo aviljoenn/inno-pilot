@@ -68,8 +68,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B8"
-INNOPILOT_BUILD_NUM = 8  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B9"
+INNOPILOT_BUILD_NUM = 9  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -301,7 +301,9 @@ def wrap_frame(frame: bytes) -> bytes:
 
 
 def send_nano_frame(nano: serial.Serial, code: int, value_u16: int) -> None:
-    nano.write(wrap_frame(build_frame(code, value_u16)))
+    raw = wrap_frame(build_frame(code, value_u16))
+    log.debug("nano TX  code=0x%02X val=%d  hex=%s", code, value_u16, raw.hex())
+    nano.write(raw)
 
 
 def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
@@ -732,20 +734,26 @@ def main() -> None:
         # ================================================================
         data_from_pilot = pilot.read(256)
         if data_from_pilot:
+            log.debug("pilot RX  %d bytes: %s", len(data_from_pilot),
+                      data_from_pilot.hex())
             pilot_buf.extend(data_from_pilot)
             while len(pilot_buf) >= 4:
                 candidate = bytes(pilot_buf[:4])
                 crc_calc = crc8_msb(candidate[:3])
                 if crc_calc == candidate[3]:
                     # Valid pypilot frame — wrap with magic header and forward
-                    nano.write(wrap_frame(candidate))
+                    wrapped = wrap_frame(candidate)
+                    nano.write(wrapped)
+                    log.debug("pilot->nano RELAY  code=0x%02X  raw=%s  wrapped=%s",
+                              candidate[0], candidate.hex(), wrapped.hex())
                     del pilot_buf[:4]
                     relay_good += 1
                 else:
                     # Alignment error — drop one byte and rescan
-                    log.debug("pypilot relay: CRC mismatch, dropping 0x%02X "
-                              "(buf[0:4]=%s)", pilot_buf[0],
-                              bytes(pilot_buf[:4]).hex())
+                    log.debug("pilot relay DROP  byte=0x%02X  cand=%s"
+                              "  crc_got=0x%02X crc_exp=0x%02X",
+                              pilot_buf[0], candidate.hex(),
+                              candidate[3], crc_calc)
                     del pilot_buf[0]
                     relay_drop += 1
 
