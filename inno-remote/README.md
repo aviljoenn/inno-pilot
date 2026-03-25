@@ -107,14 +107,23 @@ Pole A (power):
 
 Pole B (mode sense):
 - GND → common
-- top throw → **GPIO8** (AP mode sense)
-- bottom throw → **GPIO9** (MANUAL mode sense)
+- top throw → **GPIO20** (AP mode sense)
+- bottom throw → **GPIO21** (MANUAL mode sense)
 - middle → open (OFF)
 
 Firmware reads:
-- GPIO8 low → AP mode selected
-- GPIO9 low → Manual mode selected
+- GPIO20 low → AP mode selected
+- GPIO21 low → Manual mode selected
 - Neither (because power off) → device off
+
+### Buzzer (piezo, via NPN transistor)
+- **GPIO8** → **1k resistor** → base (BC547 / 2N2222)
+- Collector → buzzer (+)
+- Emitter → GND
+- Buzzer (−) → 3V3 (or 5V if buzzer requires it)
+- Optional: **10k base-to-emitter resistor** to suppress brief boot chirp (or omit to use chirp as power-on indicator)
+
+> **Note:** GPIO8 also drives the onboard RGB LED on the ESP32‑C3 Super Mini V2. The LED may flicker when the buzzer is active — this is harmless and expected since the RGB LED is not used by this project.
 
 ---
 
@@ -181,19 +190,30 @@ If flashing fails to connect:
 
 ---
 
-## 8) Current status
+## 8) Current status (v0.2.0_B7)
 
 - Hardware assembled and powered
-- ESP-IDF toolchain verified
-- Board boot + monitor confirmed (ESP32‑C3, ESP-IDF v5.5.2)
+- ESP-IDF v5.5.2 toolchain verified
+- All hardware inputs working: OLED, button ladder, pot, mode switch, ESTOP, buzzer
+- Wi-Fi STA with auto-reconnect to boat network
+- TCP client connecting to bridge on port 8555
+- Full bidirectional integration with bridge:
+  - Receives and displays: AP state, heading, command, rudder, flags, mode, warnings
+  - Sends: BTN TOGGLE/±1/±10, ESTOP, MODE MANUAL/AUTO, RUD 0-100%
+- OLED display: heading, rudder bar, mode, AP state, warning overlays
+- Demo mode (no Wi-Fi) for bench testing with simulated data
+- Log view (5-tap STOP) for Wi-Fi diagnostics
 
-Next steps in code:
-1. OLED “Hello World”
-2. Button ladder decode
-3. Pot read + filtering + deadband
-4. Mode switch handling
-5. Wi‑Fi control channel to inno-pilot
-6. OTA update support
+### What works end-to-end
+- AUTO mode: buttons control AP via bridge → pypilot → Nano motor
+- MANUAL mode: pot drives rudder directly via bridge → Nano IBT-2 motor
+- ESTOP: immediate AP disengage and motor stop
+- Steer-loss detection: if TCP drops in MANUAL, Nano buzzer + OLED alarm
+- AP-rejected warning: if AP toggle pressed while in MANUAL, OLED shows `?AP Rejected?`
+
+### Not yet implemented
+- OTA firmware updates
+- Per-boat provisioning (SSID/IP config via menu)
 
 ---
 

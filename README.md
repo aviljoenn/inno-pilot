@@ -116,6 +116,17 @@ Contents:
 
 ESP32-C3 handheld wireless remote for the autopilot (hardware + firmware).
 
+- `inno-remote/firmware/inno_remote/` – ESP-IDF main application
+- `inno-remote/docs/` – wiring diagrams, troubleshooting
+- `inno-remote/README.md` – hardware design, pinout, build instructions
+
+The remote connects to the bridge via Wi-Fi TCP (port 8555) and provides:
+- AP engage/disengage, heading ±1°/±10° buttons
+- Physical 3-position mode switch (AP / OFF / MANUAL)
+- Manual rudder control via potentiometer in MANUAL mode
+- Emergency STOP button
+- OLED display with heading, rudder bar, mode, and warning overlays
+
 ---
 
 ## High-level architecture (Inno-Pilot V2)
@@ -123,21 +134,23 @@ ESP32-C3 handheld wireless remote for the autopilot (hardware + firmware).
 At a high level, an Inno-Pilot installation looks like this:
 
 ```text
-[ Rudder Sensor ]---+
-[ Limit Logic   ]   |       [ IMU / Sensors ]---+
-[ IBT-2 Driver  ]---+                +----------+-----------+
-[ Clutch Relay  ]------------------> |  Compute Module      |
-                                     |  (Pi Zero / SBC)     |
-                                     |                      |
-                     Nano / MCU      |  pypilot core        |
-                     (Servo Ctrl)    |  + Inno-Pilot Glue   |
-                     + OLED +        |      - bridge        |
-                     Buttons         |      - PTY + symlink |
-                                     +----------+-----------+
-                                                |
-                                                | Network (Signal K, NMEA)
-                                                |
-                                           [ Instruments, plotter, etc. ]
+                                     +---------------------------+
+[ Rudder Sensor ]---+                |  Compute Module           |
+[ Limit Logic   ]   |       IMU --->|  (Pi Zero / SBC)          |
+[ IBT-2 Driver  ]---+               |                           |
+[ Clutch Relay  ]-------USB-------->|  pypilot core             |
+                                     |  + Inno-Pilot Bridge     |
+     Nano / MCU                      |    - PTY + symlink       |
+     (Servo Ctrl)                    |    - TCP server :8555    |
+     + OLED + Buttons                +----------+------+--------+
+                                                |      |
+                                     SignalK/NMEA   Wi-Fi TCP
+                                                |      |
+                                    [ Instruments ] [ ESP32-C3 Remote ]
+                                                       + OLED
+                                                       + Buttons/Pot
+                                                       + Mode Switch
+                                                       + ESTOP
 ```
 
 ### Key ideas
@@ -154,6 +167,16 @@ The compute module (e.g. Pi Zero) runs:
 - pypilot (heading, track, wind modes, etc.)
 - The Inno-Pilot glue that connects the Nano’s control surface/buttons to pypilot’s
   `ap.*` interface
+- A TCP server (port 8555) for the wireless remote
+
+The wireless remote (ESP32-C3) provides:
+
+- Handheld cockpit control with OLED display
+- AP engage/disengage and heading adjustment buttons
+- Physical mode switch (AP / OFF / MANUAL)
+- Manual rudder potentiometer for direct steering
+- Emergency STOP button (software command over Wi-Fi)
+- Real-time telemetry display (heading, rudder, mode, warnings)
 
 ---
 
@@ -170,6 +193,47 @@ This repository adds:
 - Custom servo motor controller firmware
 - The Inno-Pilot glue layer that makes pypilot and the servo hardware work together
   cleanly
+
+---
+
+## Future enhancements
+
+Feature research based on Garmin GHP 12, Raymarine Evolution, Simrad AP44, B&G Triton2/H5000,
+and Furuno NAVpilot-300. Prioritised by sailing value and implementation feasibility on existing hardware.
+
+### Tier 1 — High value, low complexity
+
+| Feature | Description | Extra hardware? |
+|---------|-------------|-----------------|
+| **Wind Hold mode** | Steer to a fixed apparent/true wind angle instead of compass heading. When the wind shifts, the boat follows. Pypilot already implements this algorithm — just needs a wind sensor and a mode-select button on the remote. | Wind sensor |
+| **Auto-Tack / Auto-Gybe** | Single button press commands a controlled tack through a configurable angle (90–110°) at a configurable rate. The motor controller already accepts heading commands — auto-tack is a scripted heading delta. | None |
+| **Shadow Drive** | Detect unexpected rudder movement (helm turned by hand), auto-disengage the pilot, re-engage on new heading when helm is held steady. Uses the existing rudder pot — no new hardware. | None |
+| **Watch / Deadman alarm** | Periodic countdown timer requiring a button press to confirm the watch. If expired: buzzer + ESTOP. Pure ESP32 remote firmware change. | None |
+| **Sea State adaptive gain** | A 1–5 "sea state" slider on the remote that maps to pypilot PID gain presets. Calm-water settings won't hunt in chop; rough-water settings won't be sluggish in flat water. | None |
+
+### Tier 2 — High value, medium complexity
+
+| Feature | Description | Extra hardware? |
+|---------|-------------|-----------------|
+| **Multi-page OLED display** | Cycle through pages on the remote: Heading → Wind → Nav → Diagnostics. Exposes boat data (SOG, COG, wind angle, battery, motor temp) without needing a chartplotter. | None |
+| **Heading error bar graph** | Horizontal pixel bar showing ±15° heading error — instant analog read of pilot performance. Reveals PID hunting that a number alone hides. | None |
+| **No-Drift / GPS track mode** | Combine GPS cross-track error with heading hold so the boat maintains its actual GPS track, correcting for leeway and tidal set. Pypilot has the algorithm; needs a GPS dongle. | USB GPS |
+| **Gybe guard alarm** | When in wind hold mode running downwind: alarm if apparent wind angle exceeds a configurable threshold (risk of accidental gybe). | Wind sensor |
+| **MOB button mode** | Long-press STOP to mark GPS position, disengage AP, fire continuous buzzer, show return bearing on OLED. | None |
+| **Motor thermal duty limiting** | Instead of just alarming on overtemp, back off PWM duty cycle as temperature rises. Prevents nuisance shutdowns in heavy weather. | None |
+
+### Tier 3 — Medium value, higher complexity
+
+| Feature | Description | Extra hardware? |
+|---------|-------------|-----------------|
+| **Auto-Tune PID** | Guided sea-trial sequence: command step inputs, measure heading response, calculate optimal PID gains. Removes guesswork from manual tuning. | None |
+| **Speed-adaptive gain** | Automatically scale rudder gain with boat speed. At low speed more rudder is needed; at hull speed less. | GPS SOG |
+| **Configurable tack angle/rate** | Store tack parameters in EEPROM, adjust from remote. A fin-keel racer tacks in 5s through 90°; a full-keel cruiser needs 15s through 110°. | None |
+| **Route/waypoint following** | Receive waypoint data from OpenCPN and steer to each waypoint in sequence using cross-track error. | Chartplotter/OpenCPN |
+| **Motor run-time / rudder activity log** | Track cumulative motor run time and direction reversals in EEPROM. Predicts maintenance intervals for hydraulic drive. | None |
+| **Commissioning / self-test mode** | Structured startup test verifying rudder pot range, motor response, sensor readings, and link integrity. | None |
+| **OLED night dimming** | SSD1306 contrast control via long-press. Preserves night vision on passage. | None |
+| **NMEA/SignalK data logging** | Log all autopilot events (engage/disengage, heading errors, rudder, mode changes) with timestamps to SD card for post-passage analysis. | None |
 
 ---
 

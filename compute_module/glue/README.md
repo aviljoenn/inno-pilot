@@ -22,9 +22,16 @@ Inno-Pilot servo controller (Nano) to pypilot on the compute module (Pi Zero).
     them into pypilot API calls:
     - `ap.enabled` toggle
     - `ap.heading_command` ±1/±10 degrees
+  - Runs a TCP server on port **8555** for the ESP32-C3 wireless remote:
+    - Receives: `BTN TOGGLE/±1/±10`, `ESTOP`, `MODE MANUAL/AUTO`, `RUD 0-100%`
+    - Sends: `AP`, `HDG`, `CMD`, `RDR`, `RDR_PCT`, `FLAGS`, `MODE`, `WARN` at ~1Hz
+  - Manages a mode state machine (`IDLE / AP / MANUAL`):
+    - In MANUAL mode, translates pot-based RUD commands to Nano motor frames
+    - On TCP disconnect in MANUAL: triggers steer-loss warning on Nano (life-safety)
+  - Parses `FLAGS_CODE` and `BUZZER_STATE_CODE` from Nano for remote relay
 
 In short: pypilot still sees its normal servo device, but we have inserted a
-transparent bridge in the middle that adds Inno-Pilot control head features.
+transparent bridge in the middle that adds Inno-Pilot control head + wireless remote features.
 
 ## Files
 
