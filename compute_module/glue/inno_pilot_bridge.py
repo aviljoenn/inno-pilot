@@ -24,9 +24,11 @@ Mode state machine (BridgeState.mode):
     MODE AUTO   (TCP)        -> MANUAL -> IDLE
     TCP disconnect in MANUAL -> MANUAL -> IDLE + WARN_STEER_LOSS to Nano
 """
+import logging
 import os
 import queue
 import select
+import signal
 import socket
 import threading
 import time
@@ -34,6 +36,34 @@ import serial
 from dataclasses import dataclass
 from typing import Optional
 from pypilot.client import pypilotClient
+
+# ---------------------------------------------------------------------------
+# Logging — default INFO; toggle to DEBUG at runtime with:
+#   kill -USR1 $(pgrep -f inno_pilot_bridge)
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-5s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("bridge")
+log_pp = logging.getLogger("pypilot")      # pypilot-worker messages
+
+
+def _toggle_log_level(signum, frame):       # noqa: ARG001
+    """SIGUSR1 handler: flip between INFO and DEBUG for all bridge loggers."""
+    root = logging.getLogger()
+    if root.level <= logging.DEBUG:
+        root.setLevel(logging.INFO)
+        log.info("Log level toggled -> INFO")
+    else:
+        root.setLevel(logging.DEBUG)
+        log.info("Log level toggled -> DEBUG")
+
+
+# SIGUSR1 is only available on Unix (Pi), harmless to skip on Windows dev
+if hasattr(signal, "SIGUSR1"):
+    signal.signal(signal.SIGUSR1, _toggle_log_level)
 
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
@@ -175,7 +205,7 @@ def pypilot_worker(
             client.watch('ap.heading_command', True)
             client.watch('rudder.angle', True)
             client.watch('rudder.range', 1.0)
-            print("[pypilot] Connected to pypilot", flush=True)
+            log_pp.info("Connected to pypilot")
 
             while True:
                 # Drain outbound set() queue before blocking on receive()
@@ -219,8 +249,7 @@ def pypilot_worker(
                             pass
 
         except Exception as exc:
-            print(f"[pypilot] Connection lost: {exc} — retrying in {PYPILOT_RECONNECT_DELAY_S:.0f}s",
-                  flush=True)
+            log_pp.warning("Connection lost: %s — retrying in %ds", exc, PYPILOT_RECONNECT_DELAY_S)
             with lock:
                 state.connected = False
             time.sleep(PYPILOT_RECONNECT_DELAY_S)
@@ -376,7 +405,7 @@ def setup_tcp_server() -> socket.socket:
     srv.bind(("", REMOTE_TCP_PORT))
     srv.listen(1)
     srv.setblocking(False)
-    print(f"[bridge] TCP remote server listening on port {REMOTE_TCP_PORT}", flush=True)
+    log.info("TCP remote server listening on port %d", REMOTE_TCP_PORT)
     return srv
 
 
@@ -418,7 +447,7 @@ def handle_remote_disconnect(
         set_q.put(("ap.enabled", False))
         with plock:
             pstate.ap_enabled = False
-        print("[bridge] Remote disconnected in MANUAL mode — STEER LOSS triggered", flush=True)
+        log.warning("Remote disconnected in MANUAL mode — STEER LOSS triggered")
         bstate.mode = MODE_IDLE
 
 
@@ -465,7 +494,7 @@ def process_remote_line(
             bstate.mode = MODE_IDLE
         elif bstate.mode == MODE_AP:
             bstate.mode = MODE_IDLE
-        print("[bridge] Remote -> ESTOP: ap.enabled=False", flush=True)
+        log.info("Remote -> ESTOP: ap.enabled=False")
 
     elif cmd == "BTN":
         if len(parts) < 2:
@@ -477,7 +506,7 @@ def process_remote_line(
                 # AP engage rejected while remote has manual authority
                 send_nano_frame(nano, WARNING_CODE, WARN_AP_PRESSED)
                 remote_send(remote_sock, "WARN AP_PRESSED")
-                print("[bridge] Remote BTN TOGGLE rejected in MANUAL mode", flush=True)
+                log.warning("Remote BTN TOGGLE rejected in MANUAL mode")
             else:
                 with plock:
                     current = pstate.ap_enabled
@@ -489,7 +518,7 @@ def process_remote_line(
                     bstate.mode = MODE_AP
                 else:
                     bstate.mode = MODE_IDLE
-                print(f"[bridge] Remote BTN TOGGLE -> ap.enabled={target}", flush=True)
+                log.info("Remote BTN TOGGLE -> ap.enabled=%s", target)
 
         else:
             if bstate.mode == MODE_MANUAL:
@@ -498,18 +527,18 @@ def process_remote_line(
             try:
                 delta = float(arg)
             except ValueError:
-                print(f"[bridge] Remote BTN: unrecognised arg '{arg}', ignored", flush=True)
+                log.warning("Remote BTN: unrecognised arg '%s', ignored", arg)
                 return
             with plock:
                 current_cmd = pstate.heading_cmd
             if current_cmd is None:
-                print("[bridge] Remote BTN: heading_cmd unknown, ignored", flush=True)
+                log.warning("Remote BTN: heading_cmd unknown, ignored")
                 return
             new_cmd = clamp_heading(current_cmd + delta)
             set_q.put(("ap.heading_command", new_cmd))
             with plock:
                 pstate.heading_cmd = new_cmd
-            print(f"[bridge] Remote BTN {delta:+.0f} -> heading_command={new_cmd:.1f}", flush=True)
+            log.info("Remote BTN %+.0f -> heading_command=%.1f", delta, new_cmd)
 
     elif cmd == "MODE":
         if len(parts) < 2:
@@ -524,13 +553,13 @@ def process_remote_line(
             send_nano_frame(nano, MANUAL_MODE_CODE, 1)
             bstate.mode = MODE_MANUAL
             bstate.manual_rud_target = 500  # reset to centre
-            print("[bridge] Remote -> MODE MANUAL: manual steering active", flush=True)
+            log.info("Remote -> MODE MANUAL: manual steering active")
 
         elif arg == "AUTO":
             if bstate.mode == MODE_MANUAL:
                 send_nano_frame(nano, MANUAL_MODE_CODE, 0)
                 bstate.mode = MODE_IDLE
-                print("[bridge] Remote -> MODE AUTO: manual steering released", flush=True)
+                log.info("Remote -> MODE AUTO: manual steering released")
 
     elif cmd == "RUD":
         # Rudder target percentage: 0.0 = full port, 100.0 = full stbd
@@ -541,7 +570,7 @@ def process_remote_line(
         try:
             pct = float(parts[1])
         except ValueError:
-            print(f"[bridge] Remote RUD: invalid value '{parts[1]}', ignored", flush=True)
+            log.warning("Remote RUD: invalid value '%s', ignored", parts[1])
             return
         pct = max(0.0, min(100.0, pct))
         target_0_1000 = int(round(pct * 10.0))  # 0-1000
@@ -549,7 +578,7 @@ def process_remote_line(
         send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
 
     else:
-        print(f"[bridge] Remote: unknown command '{cmd}', ignored", flush=True)
+        log.warning("Remote: unknown command '%s', ignored", cmd)
 
 
 # ===========================================================================
@@ -570,7 +599,7 @@ def main() -> None:
         name="pypilot-worker",
     )
     t.start()
-    print("[bridge] pypilot worker thread started", flush=True)
+    log.info("pypilot worker thread started")
 
     # ---- serial ports ----
     nano_port = find_nano_port()
@@ -598,8 +627,8 @@ def main() -> None:
     # ---- snapshot of previous ap_enabled to detect external changes ----
     prev_ap_enabled = None
 
-    print(f"[bridge] Inno-Pilot Bridge {INNOPILOT_VERSION}", flush=True)
-    print("[bridge] Starting main loop", flush=True)
+    log.info("Inno-Pilot Bridge %s", INNOPILOT_VERSION)
+    log.info("Starting main loop")
 
     while True:
         now = time.monotonic()
@@ -642,7 +671,7 @@ def main() -> None:
             if need_send:
                 send_nano_frame(nano, AP_ENABLED_CODE, 1 if ap_enabled else 0)
                 if last_ap_sent is None or ap_enabled != last_ap_sent:
-                    print(f"[bridge] Pypilot -> Nano: ap.enabled={ap_enabled}", flush=True)
+                    log.info("Pypilot -> Nano: ap.enabled=%s", ap_enabled)
                 last_ap_sent    = ap_enabled
                 last_ap_sent_ts = now
 
@@ -683,7 +712,7 @@ def main() -> None:
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
                     ok = ok and remote_send(remote_sock, f"RDR_PCT {rudder_pct:.1f}")
                 if not ok:
-                    print("[bridge] TCP remote: send failed during telemetry, disconnecting", flush=True)
+                    log.warning("TCP remote: send failed during telemetry, disconnecting")
                     handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                     close_remote(remote_sock)
                     remote_sock = None
@@ -706,7 +735,7 @@ def main() -> None:
         try:
             data_from_nano = nano.read(256)
         except serial.serialutil.SerialException as exc:
-            print(f"[bridge] ERROR: Nano serial read failed: {exc}", flush=True)
+            log.error("Nano serial read failed: %s", exc)
             raise SystemExit(1) from exc
 
         if data_from_nano:
@@ -720,7 +749,7 @@ def main() -> None:
                 pilot.write(f)
 
                 if code == BUTTON_EVENT_CODE:
-                    print(f"[bridge] Nano -> API: BUTTON_EVENT value={value}", flush=True)
+                    log.debug("Nano -> API: BUTTON_EVENT value=%d", value)
                     try:
                         if value == BTN_EVT_TOGGLE:
                             if bstate.mode == MODE_MANUAL:
@@ -728,7 +757,7 @@ def main() -> None:
                                 send_nano_frame(nano, WARNING_CODE, WARN_AP_PRESSED)
                                 if remote_sock is not None:
                                     remote_send(remote_sock, "WARN AP_PRESSED")
-                                print("[bridge] Nano BTN TOGGLE rejected in MANUAL mode", flush=True)
+                                log.warning("Nano BTN TOGGLE rejected in MANUAL mode")
                             else:
                                 with plock:
                                     current = pstate.ap_enabled
@@ -769,10 +798,10 @@ def main() -> None:
                             if bstate.mode == MODE_MANUAL:
                                 send_nano_frame(nano, MANUAL_MODE_CODE, 0)
                             bstate.mode = MODE_IDLE
-                            print("[bridge] Nano STOP -> ap.enabled=False, mode=IDLE", flush=True)
+                            log.info("Nano STOP -> ap.enabled=False, mode=IDLE")
 
                     except Exception as e:
-                        print(f"[bridge] Button event error: {e}", flush=True)
+                        log.error("Button event error: %s", e)
 
                 elif code == FLAGS_CODE:
                     # Relay Nano fault flags to remote (remote can display fault indicators)
@@ -795,14 +824,14 @@ def main() -> None:
             if s is tcp_server:
                 conn, addr = tcp_server.accept()
                 if remote_sock is not None:
-                    print(f"[bridge] TCP remote: rejected {addr} (already connected)", flush=True)
+                    log.warning("TCP remote: rejected %s (already connected)", addr)
                     conn.close()
                 else:
                     conn.setblocking(False)
                     remote_sock = conn
                     remote_buf  = bytearray()
                     remote_last_rx_ts = now
-                    print(f"[bridge] TCP remote: connected from {addr}", flush=True)
+                    log.info("TCP remote: connected from %s", addr)
 
             elif s is remote_sock:
                 try:
@@ -819,13 +848,13 @@ def main() -> None:
                                 pstate, plock, bstate, nano
                             )
                     else:
-                        print("[bridge] TCP remote: disconnected (peer closed)", flush=True)
+                        log.info("TCP remote: disconnected (peer closed)")
                         handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                         close_remote(remote_sock)
                         remote_sock = None
                         remote_buf  = bytearray()
                 except OSError as exc:
-                    print(f"[bridge] TCP remote: socket error ({exc}), disconnecting", flush=True)
+                    log.warning("TCP remote: socket error (%s), disconnecting", exc)
                     handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                     close_remote(remote_sock)
                     remote_sock = None
@@ -833,7 +862,7 @@ def main() -> None:
 
         # Check for remote connection timeout
         if remote_sock is not None and (now - remote_last_rx_ts) >= REMOTE_TIMEOUT_S:
-            print("[bridge] TCP remote: timeout — no data received, disconnecting", flush=True)
+            log.warning("TCP remote: timeout — no data received, disconnecting")
             handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
             close_remote(remote_sock)
             remote_sock = None
