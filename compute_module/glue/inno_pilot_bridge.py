@@ -640,6 +640,7 @@ def main() -> None:
             send_nano_frame(nano, BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)
             send_nano_frame(nano, BRIDGE_VERSION_CODE, INNOPILOT_BUILD_NUM)
             last_hello_ts = now
+            log.debug("HELLO + VERSION sent to Nano")
 
         # ================================================================
         # 2. Snapshot shared pypilot state for this iteration
@@ -693,6 +694,9 @@ def main() -> None:
                 stbd_lim = -abs(rudder_range)
                 send_nano_frame(nano, PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim))
                 send_nano_frame(nano, PILOT_RUDDER_STBD_LIM_CODE, enc_deg10_i16(stbd_lim))
+
+            log.debug("Telemetry -> Nano: hdg=%s cmd=%s rud=%s",
+                      heading, heading_cmd, rudder_angle)
 
             # ---- Remote telemetry (text lines to TCP client) ----
             if remote_sock is not None:

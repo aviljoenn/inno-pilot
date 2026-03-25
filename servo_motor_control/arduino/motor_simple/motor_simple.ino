@@ -283,6 +283,11 @@ uint8_t  sync_b        = 0;
 uint8_t  in_sync_count = 0;
 uint8_t  bridge_magic_state = 0;
 
+// ---- Diagnostic counters (shown on OLED row 2) ----
+uint16_t rx_good_count   = 0;  // CRC-valid frames processed
+uint16_t rx_crc_err_count = 0;  // CRC mismatches
+uint16_t rx_sync_count   = 0;  // frames discarded during initial sync
+
 // ---- State / telemetry ----
 uint16_t flags            = REBOOTED;   // reported once then cleared
 uint16_t last_command_val = 1000;       // 0..2000, 1000 = neutral
@@ -695,7 +700,19 @@ void oled_draw() {
       if (!overlay_active || (now - overlay_start_ms >= OVERLAY_DURATION_MS)) {
         overlay_active = false;
         display.setCursor(0, 2); display.clearToEOL();
-        display.setCursor(0, 3); display.clearToEOL();
+        // Row 3: Rx diagnostics (Rx=good frames, Er=CRC errors, Age=seconds since last frame)
+        display.setCursor(0, 3);
+        {
+          char dbuf[22];
+          unsigned long age_ms = pi_ever_online ? (now - last_pi_frame_ms) : (now - boot_start_ms);
+          uint8_t age_s = (age_ms < 25500UL) ? (uint8_t)(age_ms / 100) : 255;
+          // age_s is tenths of seconds (0-255 => 0.0-25.5s)
+          snprintf(dbuf, sizeof(dbuf), "Rx:%u Er:%u A:%u.%u",
+                   rx_good_count, rx_crc_err_count,
+                   age_s / 10, age_s % 10);
+          display.print(dbuf);
+        }
+        display.clearToEOL();
       }
     }
   }
@@ -736,9 +753,20 @@ void oled_draw() {
     return;
   }
 
-  // Offline: clear middle rows and return
+  // Offline: show diagnostics in middle rows and return
   if (boot_offline || pi_timed_out) {
-    display.setCursor(0, 4); display.clearToEOL();
+    // Row 4: Rx diagnostics (same as row 3 when online, but more visible here)
+    display.setCursor(0, 4);
+    {
+      char dbuf[22];
+      unsigned long age_ms = pi_ever_online ? (now - last_pi_frame_ms) : (now - boot_start_ms);
+      uint8_t age_s = (age_ms < 25500UL) ? (uint8_t)(age_ms / 100) : 255;
+      snprintf(dbuf, sizeof(dbuf), "Rx:%u Er:%u A:%u.%u",
+               rx_good_count, rx_crc_err_count,
+               age_s / 10, age_s % 10);
+      display.print(dbuf);
+    }
+    display.clearToEOL();
     display.setCursor(0, 5); display.clearToEOL();
     display.setCursor(0, 6); display.clearToEOL();
     return;
@@ -1536,14 +1564,17 @@ if (!ap_engaged && !remote_manual_active) {
         // CRC-valid frame
         if (in_sync_count >= 2) {
           process_packet();
+          rx_good_count++;
         } else {
           in_sync_count++;
+          rx_sync_count++;
         }
         flags &= ~INVALID;
       } else {
         // CRC invalid: mark INVALID and resync to magic header
         flags |= INVALID;
         in_sync_count = 0;
+        rx_crc_err_count++;
       }
 
       sync_b = 0;
