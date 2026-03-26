@@ -127,6 +127,31 @@ If changes touch any of the following, add a dedicated "Hardware impact" section
 
 ---
 
+## Known hardware gotcha: Nano reset via HUPCL
+
+**The Arduino Nano resets whenever `/dev/ttyUSB0` is closed by any process.**
+
+The Nano's RESET pin is wired to DTR through a 100 nF RC differentiator (standard
+Arduino Uno/Nano design). Linux serial ports have the HUPCL flag set by default,
+which drops DTR whenever the file descriptor is closed — even if `dtr=False` was
+set while the port was open.
+
+**Symptoms:** Nano shows high CRC error counts, bridge receives zero bytes from Nano
+after any process closes the port (including a previous bridge instance, a flash
+tool, or `stty`). The Nano is stuck in its `setup()` splash delay (~3 s) and can't
+communicate.
+
+**Fix already in place:** `open_serial_no_reset()` in `inno_pilot_bridge.py` clears
+HUPCL via `termios.tcsetattr` immediately after opening the port.
+
+**If you ever add a new tool that opens `/dev/ttyUSB0`** (diagnostic scripts,
+sniffers, etc.), either:
+1. Run `stty -F /dev/ttyUSB0 -hupcl` before closing, **or**
+2. Open with `pyserial` and apply the same `termios` fix, **or**
+3. Accept that the Nano will reset and allow ≥ 5 s before expecting frames.
+
+---
+
 ## When uncertain
 - Prefer asking a clarifying question in the PR description or as a comment rather than guessing.
 - If you must assume: **state assumptions explicitly** and keep the change minimal.

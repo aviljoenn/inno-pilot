@@ -3,6 +3,19 @@
 This file is for **Claude Code** (and future human maintainers) working on the
 Inno-Pilot glue on the Pi Zero.
 
+## Critical: Nano reset on serial close (HUPCL)
+
+The Arduino Nano resets every time `/dev/ttyUSB0` is closed because Linux drops
+DTR on close by default (HUPCL flag).  The bridge neutralises this in
+`open_serial_no_reset()` via `termios.tcsetattr(..., ~termios.HUPCL)`.
+
+**Do not remove or bypass that call.**  If you open the port anywhere else
+(debug scripts, sniffers, `stty` probes), run `stty -F /dev/ttyUSB0 -hupcl`
+before closing, or the Nano will reset and be silent for ~5 s.  See the
+"Known hardware gotcha" section in the top-level CLAUDE.md for full details.
+
+---
+
 ## Principles
 
 - The **repository is the source of truth**.
