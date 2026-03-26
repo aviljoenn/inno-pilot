@@ -21,12 +21,11 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B10";
-const uint16_t INNOPILOT_BUILD_NUM = 10;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B12";
+const uint16_t INNOPILOT_BUILD_NUM = 12;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
-const uint8_t AP_ENABLED_CODE = 0xE1;  // Bridge->Nano: ap.enabled state (0/1)
-bool ap_enabled_remote = false;        // truth from Pi bridge
+bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
 bool ap_display        = false;        // what OLED shows (can be briefly “optimistic”)
 unsigned long ap_display_override_until_ms = 0;
 const unsigned long PI_BOOT_EST_MS    = 98000UL;  // 60s estimate, tweak later
@@ -1178,35 +1177,35 @@ void process_packet() {
       // 0..2000, 1000 = neutral
       last_command_val = value;
       last_command_ms = now;
+      // Receiving COMMAND_CODE implies AP is engaged
+      if (!ap_enabled_remote) {
+        ap_enabled_remote = true;
+        flags |= ENGAGED;
+        if (ap_display_override_until_ms == 0) {
+          ap_display = true;
+        } else if (ap_display == true) {
+          ap_display_override_until_ms = 0;
+        }
+      }
       break;
 
     case DISENGAGE_CODE:
       flags &= ~ENGAGED;
+      // DISENGAGE_CODE means AP is off
+      if (ap_enabled_remote) {
+        ap_enabled_remote = false;
+        if (ap_display_override_until_ms == 0) {
+          ap_display = false;
+        } else if (ap_display == false) {
+          ap_display_override_until_ms = 0;
+        }
+      }
       break;
 
     case RESET_CODE:
       flags &= ~OVERCURRENT_FAULT;
       break;
 
-    case AP_ENABLED_CODE: {
-      bool en = (value != 0);
-      ap_enabled_remote = en;
-      if (en) {
-        flags |= ENGAGED;
-      } else {
-        flags &= ~ENGAGED;
-      }
-      
-      // If we are not in an override window, follow remote immediately.
-      // If we ARE overriding (user just pressed B3), cancel override once remote matches.
-      if (ap_display_override_until_ms == 0) {
-        ap_display = en;
-      } else if (ap_display == en) {
-        ap_display_override_until_ms = 0;
-      }
-      break;
-    }
-    
     case PILOT_HEADING_CODE:
       pilot_heading_deg10 = value;
       pilot_heading_valid = true;

@@ -69,8 +69,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B11"
-INNOPILOT_BUILD_NUM = 11  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B14"
+INNOPILOT_BUILD_NUM = 14  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -84,13 +84,16 @@ BAUD       = 38400
 # ---------------------------------------------------------------------------
 
 # Bridge -> Nano commands
-AP_ENABLED_CODE            = 0xE1  # value: 0/1
 PILOT_HEADING_CODE         = 0xE2  # imu.heading * 10 (uint16, 0-3600)
 PILOT_COMMAND_CODE         = 0xE3  # ap.heading_command * 10 (uint16)
 PILOT_RUDDER_CODE          = 0xE4  # rudder.angle * 10 (int16 as two's-complement uint16)
 PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # +rudder.range * 10 (int16)
 PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # -rudder.range * 10 (int16)
 # NOTE: 0xE7 is RESET_CODE in pypilot servo protocol — do NOT use for bridge commands
+
+# pypilot servo protocol codes (relayed verbatim to Nano via PILOT_PORT)
+PYPILOT_COMMAND_CODE   = 0xC7  # motor position command — implies AP engaged
+PYPILOT_DISENGAGE_CODE = 0x68  # motor disengage — implies AP off
 MANUAL_RUD_TARGET_CODE     = 0xE8  # manual rudder target: 0-1000 (0=full port, 1000=full stbd)
 MANUAL_MODE_CODE           = 0xE9  # remote manual mode active: 0/1  (was 0xE7, changed to avoid RESET_CODE conflict)
 WARNING_CODE               = 0xEA  # warning type to display/beep on Nano
@@ -134,7 +137,6 @@ MODE_MANUAL = "MANUAL"
 # Timing
 # ---------------------------------------------------------------------------
 HELLO_PERIOD_S    = 1.0   # Nano keepalive — Nano requires 3 frames within 5 s
-AP_STATE_PERIOD_S = 0.5   # minimum resend interval for AP-enabled state
 TELEM_PERIOD_S    = 0.2   # 5 Hz telemetry to Nano and remote
 
 # ---------------------------------------------------------------------------
@@ -201,7 +203,6 @@ def pypilot_worker(
     while True:
         try:
             client = pypilotClient()
-            client.watch('ap.enabled', True)
             client.watch('imu.heading', True)
             client.watch('ap.heading_command', True)
             client.watch('rudder.angle', True)
@@ -223,11 +224,6 @@ def pypilot_worker(
 
                 with lock:
                     state.connected = True
-                    if "ap.enabled" in msgs:
-                        try:
-                            state.ap_enabled = bool(msgs["ap.enabled"])
-                        except Exception:
-                            pass
                     if "ap.heading_command" in msgs:
                         try:
                             state.heading_cmd = float(msgs["ap.heading_command"])
@@ -343,7 +339,7 @@ def probe_nano_port(port: str, timeout_s: float = 0.5) -> bool:
             time.sleep(PROBE_INITIAL_DELAY_S)
             for attempt in range(PROBE_RETRIES):
                 probe.reset_input_buffer()
-                probe.write(wrap_frame(build_frame(BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)))
+                send_nano_frame(probe, BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)
                 buf = bytearray()
                 deadline = time.monotonic() + timeout_s
                 while time.monotonic() < deadline:
@@ -628,8 +624,6 @@ def main() -> None:
 
     # ---- telemetry / keepalive timestamps ----
     last_hello_ts    = 0.0
-    last_ap_sent     = None
-    last_ap_sent_ts  = 0.0
     last_telem_ts    = 0.0
 
     # ---- pypilot relay diagnostics ----
@@ -642,9 +636,6 @@ def main() -> None:
     remote_sock = None
     remote_buf  = bytearray()
     remote_last_rx_ts = 0.0
-
-    # ---- snapshot of previous ap_enabled to detect external changes ----
-    prev_ap_enabled = None
 
     log.info("Inno-Pilot Bridge %s", INNOPILOT_VERSION)
     log.info("Starting main loop")
@@ -665,38 +656,13 @@ def main() -> None:
         # 2. Snapshot shared pypilot state for this iteration
         # ================================================================
         with plock:
-            ap_enabled   = pstate.ap_enabled
             heading_cmd  = pstate.heading_cmd
             heading      = pstate.heading
             rudder_angle = pstate.rudder_angle
             rudder_range = pstate.rudder_range
 
-        # Track pypilot-external AP changes to keep mode in sync
-        if prev_ap_enabled != ap_enabled:
-            if ap_enabled and bstate.mode == MODE_IDLE:
-                bstate.mode = MODE_AP
-            elif not ap_enabled and bstate.mode == MODE_AP:
-                bstate.mode = MODE_IDLE
-            prev_ap_enabled = ap_enabled
-
         # ================================================================
-        # 3. Push AP-enabled state to Nano (on change + periodic keepalive)
-        # ================================================================
-        if ap_enabled is not None:
-            need_send = (
-                last_ap_sent is None
-                or ap_enabled != last_ap_sent
-                or (now - last_ap_sent_ts) >= AP_STATE_PERIOD_S
-            )
-            if need_send:
-                send_nano_frame(nano, AP_ENABLED_CODE, 1 if ap_enabled else 0)
-                if last_ap_sent is None or ap_enabled != last_ap_sent:
-                    log.info("Pypilot -> Nano: ap.enabled=%s", ap_enabled)
-                last_ap_sent    = ap_enabled
-                last_ap_sent_ts = now
-
-        # ================================================================
-        # 4. Push telemetry to Nano and Remote at 5 Hz
+        # 3. Push telemetry to Nano and Remote at 5 Hz
         # ================================================================
         if (now - last_telem_ts) >= TELEM_PERIOD_S:
             last_telem_ts = now
@@ -720,8 +686,7 @@ def main() -> None:
             # ---- Remote telemetry (text lines to TCP client) ----
             if remote_sock is not None:
                 ok = True
-                if ap_enabled is not None:
-                    ok = ok and remote_send(remote_sock, f"AP {1 if ap_enabled else 0}")
+                ok = ok and remote_send(remote_sock, f"AP {1 if bstate.mode == MODE_AP else 0}")
                 ok = ok and remote_send(remote_sock, f"MODE {bstate.mode}")
                 if heading is not None:
                     ok = ok and remote_send(remote_sock, f"HDG {heading:.1f}")
@@ -742,7 +707,7 @@ def main() -> None:
                     remote_buf  = bytearray()
 
         # ================================================================
-        # 5. Relay: pypilot -> Nano (CRC-validated, self-aligning)
+        # 4. Relay: pypilot -> Nano (CRC-validated, self-aligning)
         # ================================================================
         data_from_pilot = pilot.read(256)
         if data_from_pilot:
@@ -760,6 +725,21 @@ def main() -> None:
                               candidate[0], candidate.hex(), wrapped.hex())
                     del pilot_buf[:4]
                     relay_good += 1
+
+                    # Sync bridge mode from pypilot's own engage/disengage signals.
+                    # This keeps bstate.mode correct when pypilot changes AP state
+                    # independently (fault, external client, etc.).
+                    relay_code = candidate[0]
+                    if relay_code == PYPILOT_DISENGAGE_CODE and bstate.mode == MODE_AP:
+                        bstate.mode = MODE_IDLE
+                        with plock:
+                            pstate.ap_enabled = False
+                        log.info("pypilot relay: DISENGAGE received — mode -> IDLE")
+                    elif relay_code == PYPILOT_COMMAND_CODE and bstate.mode == MODE_IDLE:
+                        bstate.mode = MODE_AP
+                        with plock:
+                            pstate.ap_enabled = True
+                        log.info("pypilot relay: COMMAND received — mode -> AP")
                 else:
                     # Alignment error — drop one byte and rescan
                     log.debug("pilot relay DROP  byte=0x%02X  cand=%s"
@@ -776,7 +756,7 @@ def main() -> None:
                 relay_log_ts = now
 
         # ================================================================
-        # 6. Relay: Nano -> pypilot  (intercept events; parse telemetry)
+        # 5. Relay: Nano -> pypilot  (intercept events; parse telemetry)
         # ================================================================
         try:
             data_from_nano = nano.read(256)
@@ -863,7 +843,7 @@ def main() -> None:
                     bstate.nano_buzzer_on = (value != 0)
 
         # ================================================================
-        # 7. TCP remote: accept new connections / handle existing client
+        # 6. TCP remote: accept new connections / handle existing client
         # ================================================================
         watch_socks = [tcp_server]
         if remote_sock is not None:
