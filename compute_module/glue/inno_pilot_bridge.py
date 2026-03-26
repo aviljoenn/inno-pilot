@@ -33,6 +33,7 @@ import socket
 import threading
 import time
 import serial
+import termios
 from dataclasses import dataclass
 from typing import Optional
 from pypilot.client import pypilotClient
@@ -68,8 +69,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B10"
-INNOPILOT_BUILD_NUM = 10  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B11"
+INNOPILOT_BUILD_NUM = 11  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -260,7 +261,12 @@ def pypilot_worker(
 # ===========================================================================
 
 def open_serial_no_reset(port: str, baud: int, timeout: float) -> serial.Serial:
-    """Open serial port while keeping DTR/RTS low to reduce Arduino resets."""
+    """Open serial port while keeping DTR/RTS low to avoid Arduino resets.
+
+    Also clears the HUPCL termios flag so that DTR is not dropped when the
+    port is later closed — otherwise the kernel drops DTR on close, which
+    triggers the Nano's reset circuit and causes it to restart.
+    """
     ser = serial.Serial()
     ser.port = port
     ser.baudrate = baud
@@ -273,6 +279,12 @@ def open_serial_no_reset(port: str, baud: int, timeout: float) -> serial.Serial:
         ser.rts = False
     except Exception:
         pass
+    # Disable HUPCL: prevents DTR from dropping when the fd is closed.
+    # Without this, every close() resets the Nano via its RC-differentiator
+    # on the RESET pin, even if dtr=False was set during open.
+    attrs = termios.tcgetattr(ser.fd)
+    attrs[2] &= ~termios.HUPCL  # cflag: clear hang-up-on-close
+    termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
     return ser
 
 
