@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B1";
-const uint16_t INNOPILOT_BUILD_NUM = 1;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B2";
+const uint16_t INNOPILOT_BUILD_NUM = 2;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -122,6 +122,11 @@ const float VOLTAGE_SCALE         = 5.156f;
 
 const uint8_t ADC_SAMPLES         = 16;
 
+// Rudder pot: accumulate this many settled samples per published reading.
+// At ~1–3 ms per loop iteration this gives ~16–48 ms latency — well within
+// the response time of any mechanical rudder system.
+const uint8_t RUDDER_ACC_SAMPLES  = 16;
+
 const float PI_VSENSE_SCALE = 5.25f;
 const float PI_VOLT_HIGH_FAULT = 5.40f;
 const float PI_VOLT_LOW_FAULT  = 4.80f;
@@ -216,6 +221,7 @@ enum commands {
 // ---- Forward declarations ----
 uint16_t read_rudder_scaled();
 int read_rudder_adc();
+void service_rudder_adc();
 bool port_limit_switch_hit();
 bool stbd_limit_switch_hit();
 bool oled_try_init(bool allow_blocking_splash);
@@ -321,7 +327,15 @@ uint16_t flags            = REBOOTED;   // reported once then cleared
 uint16_t last_command_val = 1000;       // 0..2000, 1000 = neutral
 unsigned long last_command_ms = 0;
 uint16_t rudder_raw       = 0;          // 0..65535 (scaled)
-int      rudder_adc_last  = 0;          // 0..1023
+int      rudder_adc_last  = 0;          // 0..1023, inverted (higher = stbd)
+
+// ---- Rudder ADC background accumulator ----
+// Updated by service_rudder_adc() once per main loop.  All other code reads
+// these instead of calling analogRead() directly on A2.
+uint32_t rdr_acc_sum          = 0;
+uint8_t  rdr_acc_count        = 0;
+int      rudder_adc_smoothed  = 511;   // published average, inverted (higher = stbd)
+int      rudder_adc_raw_disp  = 511;   // non-inverted average, for OLED debug row
 
 float pi_voltage_v = 0.0f;
 bool  pi_overvolt_fault = false;
@@ -976,9 +990,9 @@ void oled_draw() {
     display.print(rudbar);
     display.clearToEOL();
   }
-  // --- Row 6: raw A2 ADC value (rudder pot), centre-justified ---
+  // --- Row 6: averaged A2 ADC value (rudder pot), centre-justified ---
   {
-    int a2_raw = analogRead(RUDDER_PIN);
+    int a2_raw = rudder_adc_raw_disp;  // use pre-averaged value; no extra analogRead
     char buf[8];
     snprintf(buf, sizeof(buf), "A2:%d", a2_raw);
     int16_t tw = (int16_t)strlen(buf) * 6;
@@ -1028,9 +1042,28 @@ uint16_t read_rudder_scaled() {
 }
 
 int read_rudder_adc() {
-  // Invert ADC so higher counts always mean starboard movement.
-  int raw = analogRead(RUDDER_PIN);   // 0..1023 (hardware polarity)
-  return 1023 - raw;
+  // Return the pre-averaged, channel-settled value maintained by
+  // service_rudder_adc(). Already inverted: higher counts = starboard.
+  return rudder_adc_smoothed;
+}
+
+// Called once per main-loop iteration (at the end, after all other ADC work).
+// Takes one dummy read to settle the S/H capacitor after whatever channel was
+// last active (A6 button, A0 voltage, A1 current, or A3 pi-vsense), then one
+// real sample.  Accumulates RUDDER_ACC_SAMPLES real samples before publishing
+// a new average.  Two reads per loop ≈ 208 µs — same budget as before.
+void service_rudder_adc() {
+  (void)analogRead(RUDDER_PIN);                   // discard: settle S/H cap onto A2
+  uint16_t raw = (uint16_t)analogRead(RUDDER_PIN); // settled sample
+
+  rdr_acc_sum += raw;
+  if (++rdr_acc_count >= RUDDER_ACC_SAMPLES) {
+    int avg = (int)(rdr_acc_sum / RUDDER_ACC_SAMPLES);
+    rudder_adc_smoothed = 1023 - avg;  // invert: higher = starboard
+    rudder_adc_raw_disp = avg;         // non-inverted, for OLED debug display
+    rdr_acc_sum   = 0;
+    rdr_acc_count = 0;
+  }
 }
 
 // ---- Limit logic helpers ----
@@ -1879,6 +1912,12 @@ if (!ap_engaged && !remote_manual_active) {
 
   // --- Motor + clutch control with limit logic ---
   update_motor_from_command();
+
+  // Collect one settled A2 sample into the running average.  Placed here so
+  // update_motor_from_command() uses the previous iteration's published value
+  // (latency ≤ one loop iteration) and all other ADC channel work is already
+  // complete, guaranteeing a channel switch into A2 every call.
+  service_rudder_adc();
 
   static unsigned long last_draw = 0;
   if (oled_ok && (now - last_draw >= 1000)) {
