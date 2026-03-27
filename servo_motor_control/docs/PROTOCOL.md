@@ -99,6 +99,19 @@ Encoding note: For int16 values:
   - Sent on state change only (not polled)
   - Bridge relays to Remote via TCP text
 
+### 2.5 Nano → Bridge: Comms-fault diagnostics (v0.2.0_B15–B16)
+
+- `0xEC` COMMS_DIAG (added B15)
+  - value: lo byte = `err_window_sum` (errors in 10s window), hi byte = `crit_consec_s`
+  - Sent at 1 Hz (1000 ms period)
+
+- `0xED` COMMS_ERR_DETAIL (added B16)
+  - value: lo byte = CODE byte from the corrupt frame, hi byte = received CRC byte
+  - Sent when a CRC error is detected on the Nano RX parser
+  - Rate-limited to max 5 frames/second (200 ms minimum interval)
+  - Latest-wins: if multiple errors occur within one 200 ms window, only the last is sent
+  - Bridge logs these to `/tmp/inno_pilot_comms_diag.log` (volatile, does not survive reboot)
+
 ---
 
 ## 3) TCP protocol: Remote ↔ Bridge (v0.2.0_B7)

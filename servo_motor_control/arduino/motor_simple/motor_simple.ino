@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B15";
-const uint16_t INNOPILOT_BUILD_NUM = 15;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B16";
+const uint16_t INNOPILOT_BUILD_NUM = 16;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -290,7 +290,9 @@ uint16_t rx_crc_err_count = 0;  // CRC mismatches
 uint16_t rx_sync_count   = 0;  // frames discarded during initial sync
 
 // ---- Comms-fault rate detection (sliding 10-second window) ----
-const uint8_t  COMMS_DIAG_CODE      = 0xEC;    // Nano->Bridge: lo=err_window_sum, hi=crit_consec_s
+const uint8_t  COMMS_DIAG_CODE         = 0xEC;    // Nano->Bridge: lo=err_window_sum, hi=crit_consec_s
+const uint8_t  COMMS_ERR_DETAIL_CODE   = 0xED;    // Nano->Bridge: lo=corrupt_code, hi=rx_crc
+const unsigned long ERR_DETAIL_MIN_MS  = 200UL;   // rate limit: max 5 detail frames/second
 const uint8_t  COMMS_ERR_BUCKETS    = 10;      // 10 x 1-second buckets = 10-second window
 const uint8_t  COMMS_WARN_THRESH    = 5;       // errors in window to enter WARN state
 const uint8_t  COMMS_CRIT_THRESH    = 15;      // errors in window to enter CRITICAL state
@@ -307,6 +309,11 @@ bool          comms_warn_active      = false;
 bool          comms_crit_active      = false;
 bool          comms_fault_disengaged = false;  // true after autonomous AP disengage on CRIT
 bool          comms_fault_silenced   = false;  // true after user silences comms buzzer via PTM
+
+// ---- Error detail forwarding (1-slot, latest-wins, rate-limited to bridge) ----
+bool          err_detail_pending     = false;   // true when an unsent error detail is queued
+uint16_t      err_detail_value       = 0;       // packed: lo=code byte, hi=received CRC
+unsigned long err_detail_last_ms     = 0;       // last time an error detail frame was sent
 
 // ---- State / telemetry ----
 uint16_t flags            = REBOOTED;   // reported once then cleared
@@ -1705,6 +1712,9 @@ if (!ap_engaged && !remote_manual_active) {
         in_sync_count = 0;
         rx_crc_err_count++;
         comms_err_record();  // feed sliding-window rate detector
+        // Capture error detail for forwarding to bridge (latest-wins, 1-slot)
+        err_detail_value   = (uint16_t)in_bytes[0] | ((uint16_t)crc_rx << 8);
+        err_detail_pending = true;
       }
 
       sync_b = 0;
@@ -1774,6 +1784,13 @@ if (!ap_engaged && !remote_manual_active) {
     uint16_t diag = (uint16_t)err_window_sum | ((uint16_t)crit_consec_s << 8);
     send_frame(COMMS_DIAG_CODE, diag);
     last_comms_diag_ms = now;
+  }
+
+  // Send error detail frame to bridge (rate-limited to max 5/s)
+  if (err_detail_pending && (now - err_detail_last_ms >= ERR_DETAIL_MIN_MS)) {
+    send_frame(COMMS_ERR_DETAIL_CODE, err_detail_value);
+    err_detail_pending = false;
+    err_detail_last_ms = now;
   }
 
   // --- Motor + clutch control with limit logic ---

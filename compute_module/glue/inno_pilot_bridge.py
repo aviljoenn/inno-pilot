@@ -25,6 +25,7 @@ Mode state machine (BridgeState.mode):
     TCP disconnect in MANUAL -> MANUAL -> IDLE + WARN_STEER_LOSS to Nano
 """
 import logging
+import logging.handlers
 import os
 import queue
 import select
@@ -69,8 +70,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B15"
-INNOPILOT_BUILD_NUM = 15  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B16"
+INNOPILOT_BUILD_NUM = 16  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -114,7 +115,8 @@ BTN_EVT_STOP      = 6
 
 # Nano -> Bridge new telemetry
 BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
-COMMS_DIAG_CODE   = 0xEC  # Nano->Bridge: comms diagnostics (lo=err_window_sum, hi=crit_consec_s)
+COMMS_DIAG_CODE       = 0xEC  # Nano->Bridge: comms diagnostics (lo=err_window_sum, hi=crit_consec_s)
+COMMS_ERR_DETAIL_CODE = 0xED  # Nano->Bridge: error detail (lo=corrupt code, hi=rx_crc)
 
 # Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
 FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
@@ -640,6 +642,21 @@ def main() -> None:
     # ---- bridge state (mode state machine) ----
     bstate = BridgeState()
 
+    # ---- volatile diagnostic log (tmpfs — does not survive reboot) ----
+    diag_log = logging.getLogger("bridge.diag")
+    diag_log.setLevel(logging.DEBUG)
+    diag_handler = logging.handlers.RotatingFileHandler(
+        "/tmp/inno_pilot_comms_diag.log",
+        maxBytes=256 * 1024,   # 256 KB max per file
+        backupCount=1,         # keep 1 rotated backup (512 KB total)
+    )
+    diag_handler.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+    diag_log.addHandler(diag_handler)
+    diag_log.propagate = False  # do not echo to stdout/systemd journal
+
     # ---- telemetry / keepalive timestamps ----
     last_hello_ts    = 0.0
     last_telem_ts    = 0.0
@@ -805,6 +822,10 @@ def main() -> None:
                 if not crc_ok:
                     log.warning("Nano->bridge CRC error: frame=%s expected=0x%02X got=0x%02X",
                                 f.hex(), crc8_msb(f[:3]), f[3])
+                    diag_log.warning(
+                        "BRIDGE_CRC_ERR frame=%s code=0x%02X expected=0x%02X got=0x%02X",
+                        f.hex(), f[0], crc8_msb(f[:3]), f[3],
+                    )
                     continue  # drop corrupt frame — do not forward to pypilot
 
                 code  = f[0]
@@ -905,6 +926,15 @@ def main() -> None:
                                  bstate.nano_err_window, bstate.nano_crit_consec)
                     else:
                         log.debug("Nano comms diag: clean (0 errors/10s)")
+
+                elif code == COMMS_ERR_DETAIL_CODE:
+                    err_code_byte = value & 0xFF
+                    err_rx_crc    = (value >> 8) & 0xFF
+                    diag_log.warning(
+                        "ERR_DETAIL code=0x%02X rx_crc=0x%02X err_window=%d crit_s=%d",
+                        err_code_byte, err_rx_crc,
+                        bstate.nano_err_window, bstate.nano_crit_consec,
+                    )
 
         # ================================================================
         # 6. TCP remote: accept new connections / handle existing client

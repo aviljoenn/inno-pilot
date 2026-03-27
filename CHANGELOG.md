@@ -6,6 +6,14 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B16] — 2026-03-27 — Comms Error Diagnostic Logging
+
+### Added
+- **Nano**: `COMMS_ERR_DETAIL_CODE` (0xED) — sends corrupt frame CODE byte + received CRC to bridge on CRC error, rate-limited to 5/s (200 ms throttle, latest-wins 1-slot)
+- **Bridge**: Volatile diagnostic log at `/tmp/inno_pilot_comms_diag.log` — 256 KB rotating, ms-precision timestamps, does not survive reboot
+- **Bridge**: `COMMS_ERR_DETAIL_CODE` parser — extracts corrupt code + CRC, logs with err_window/crit_s context
+- **Bridge**: Bridge-side CRC errors (Nano→Bridge direction) also logged to the same diagnostic file
+
 ## [v0.2.0_B15] — 2026-03-26 — Comms-Fault Detection & Safety System
 
 ### Added
