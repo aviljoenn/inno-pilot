@@ -1799,7 +1799,7 @@ if (!ap_engaged && !remote_manual_active) {
   static unsigned long last_draw = 0;
   if (oled_ok && (now - last_draw >= 200)) {
     last_draw = now;
-    oled_draw();
+    // oled_draw();  // TEMP: disabled to test if OLED I2C blocking causes RX buffer overflow
   }
 }
 
