@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B19";
-const uint16_t INNOPILOT_BUILD_NUM = 19;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B20";
+const uint16_t INNOPILOT_BUILD_NUM = 20;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -701,6 +701,10 @@ void oled_draw() {
     }
   }
 
+  // row3_taken: set true whenever a fault/overlay actively occupies row 3, so the
+  // online Helm draw (row 3) is suppressed for that draw cycle.
+  bool row3_taken = false;
+
   // --- Rows 2-3: fault/warning display ---
   // Priority: steer_loss > hw_fault > ver_mismatch > comms_crit > comms_warn > rud_overshoot > ap_warn > overlay
   {
@@ -729,6 +733,7 @@ void oled_draw() {
         display.print(msg);
         display.clearToEOL();
         display.set1X();
+        row3_taken = true;
       } else {
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
@@ -756,6 +761,7 @@ void oled_draw() {
         display.print(msg);
         display.clearToEOL();
         display.set1X();
+        row3_taken = true;
       } else {
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
@@ -774,6 +780,7 @@ void oled_draw() {
         display.setCursor(0, 3);
         display.print(vmbuf);
         display.clearToEOL();
+        row3_taken = true;
       } else {
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
@@ -795,6 +802,7 @@ void oled_draw() {
         display.print(msg);
         display.clearToEOL();
         display.set1X();
+        row3_taken = true;
       } else {
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
@@ -829,23 +837,12 @@ void oled_draw() {
       display.print(overlay_text);
       display.clearToEOL();
       display.set1X();
+      row3_taken = true;
     } else {
       if (!overlay_active || (now - overlay_start_ms >= OVERLAY_DURATION_MS)) {
         overlay_active = false;
         display.setCursor(0, 2); display.clearToEOL();
-        // Row 3: Rx diagnostics (Rx=good frames, Er=CRC errors, Age=seconds since last frame)
-        display.setCursor(0, 3);
-        {
-          char dbuf[22];
-          unsigned long age_ms = pi_ever_online ? (now - last_pi_frame_ms) : (now - boot_start_ms);
-          uint8_t age_s = (age_ms < 25500UL) ? (uint8_t)(age_ms / 100) : 255;
-          // age_s is tenths of seconds (0-255 => 0.0-25.5s)
-          snprintf(dbuf, sizeof(dbuf), "Rx:%u Er:%u A:%u.%u",
-                   rx_good_count, rx_crc_err_count,
-                   age_s / 10, age_s % 10);
-          display.print(dbuf);
-        }
-        display.clearToEOL();
+        display.setCursor(0, 3); display.clearToEOL();
       }
     }
   }
@@ -886,20 +883,10 @@ void oled_draw() {
     return;
   }
 
-  // Offline: show diagnostics in middle rows and return
+  // Offline: clear middle rows and return
   if (boot_offline || pi_timed_out) {
-    // Row 4: Rx diagnostics (same as row 3 when online, but more visible here)
-    display.setCursor(0, 4);
-    {
-      char dbuf[22];
-      unsigned long age_ms = pi_ever_online ? (now - last_pi_frame_ms) : (now - boot_start_ms);
-      uint8_t age_s = (age_ms < 25500UL) ? (uint8_t)(age_ms / 100) : 255;
-      snprintf(dbuf, sizeof(dbuf), "Rx:%u Er:%u A:%u.%u",
-               rx_good_count, rx_crc_err_count,
-               age_s / 10, age_s % 10);
-      display.print(dbuf);
-    }
-    display.clearToEOL();
+    display.setCursor(0, 3); display.clearToEOL();
+    display.setCursor(0, 4); display.clearToEOL();
     display.setCursor(0, 5); display.clearToEOL();
     display.setCursor(0, 6); display.clearToEOL();
     return;
@@ -907,18 +894,21 @@ void oled_draw() {
 
   // --- Online-only rows ---
 
-  // Row 4: Helm mode — HAND (manual jog), AUTO (AP engaged), REMOTE (TCP remote manual)
-  display.setCursor(0, 4);
-  if (remote_manual_active) {
-    display.print(F("Helm: REMOTE"));
-  } else if (ap_display) {
-    display.print(F("Helm: AUTO"));
-  } else {
-    display.print(F("Helm: HAND"));
+  // Row 3: Helm mode — HAND (manual jog), AUTO (AP engaged), REMOTE (TCP remote manual)
+  // Guard: row3_taken means a 2X fault message is occupying rows 2-3 this frame.
+  if (!row3_taken) {
+    display.setCursor(0, 3);
+    if (remote_manual_active) {
+      display.print(F("Helm: REMOTE"));
+    } else if (ap_display) {
+      display.print(F("Helm: AUTO"));
+    } else {
+      display.print(F("Helm: HAND"));
+    }
+    display.clearToEOL();
   }
-  display.clearToEOL();
 
-  // Row 5: Cmd (left, 3-digit leading zeros) | HDG right-justified (3-digit leading zeros)
+  // Row 4: Cmd (left, 3-digit leading zeros) | HDG right-justified (3-digit leading zeros)
   {
     char row5[22];
     char tmp[8];
@@ -943,17 +933,17 @@ void oled_draw() {
     }
     memcpy(row5 + 14, tmp, 7);
 
-    display.setCursor(0, 5);
+    display.setCursor(0, 4);
     display.print(row5);
     display.clearToEOL();
   }
 
-  // Row 6: Graphical rudder bar — P...I...S
+  // Row 5: Graphical rudder bar — P---I---S
   // 'P' = port end (col 0), 'S' = stbd end (col 20), 'I' = indicator at proportional position.
-  // When rudder exceeds a limit the 'I' blinks over 'P' or 'S' (rudder_overshoot_active above).
+  // Track filled with '-'. When rudder exceeds a limit the 'I' blinks over 'P' or 'S'.
   {
     char rudbar[22];
-    memset(rudbar, ' ', 21);
+    memset(rudbar, '-', 21);
     rudbar[0]  = 'P';
     rudbar[20] = 'S';
     rudbar[21] = '\0';
@@ -993,10 +983,11 @@ void oled_draw() {
     }
     // else: no valid rudder data — show P and S only, no indicator
 
-    display.setCursor(0, 6);
+    display.setCursor(0, 5);
     display.print(rudbar);
     display.clearToEOL();
   }
+  display.setCursor(0, 6); display.clearToEOL();
 }
 
 bool oled_try_init(bool allow_blocking_splash) {

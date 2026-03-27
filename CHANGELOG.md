@@ -6,6 +6,17 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B20] — 2026-03-27 — OLED Layout Compaction: Remove Diagnostics Row, Move Helm/Cmd/Rudder Up
+
+### Changed
+- **Nano**: Removed Rx diagnostics row (was row 3: `Rx:N Er:N A:N.N`) — no longer shown in normal or offline state
+- **Nano**: Helm mode moved from row 4 to row 3 (guarded: hidden during 2X fault messages that span rows 2-3)
+- **Nano**: Cmd/HDG row moved from row 5 to row 4
+- **Nano**: Graphical rudder bar moved from row 6 to row 5; track now filled with `-` instead of spaces (`P---I---S`)
+- **Nano**: Row 6 always cleared (was rudder bar); row 7 V/A/T unchanged
+- **Nano**: Offline path now simply clears rows 3-6 (no diagnostics text in middle rows)
+- **Bridge**: Build bumped to B20 to match Nano
+
 ## [v0.2.0_B19] — 2026-03-27 — Remote Safety: TCP Indicator, Comms Display, Watchdog, Buzzer, Version Handshake
 
 ### Added
