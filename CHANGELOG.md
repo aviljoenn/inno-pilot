@@ -6,6 +6,23 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B19] — 2026-03-27 — Remote Safety: TCP Indicator, Comms Display, Watchdog, Buzzer, Version Handshake
+
+### Added
+- **Remote**: No-bridge connecting screen — when TCP is not established in normal mode, OLED shows "NO BRIDGE / Connecting..." instead of simulated instrument values; simulation is now strictly a demo-mode feature (hold ESTOP at boot)
+- **Remote**: COMMS fault display — parses `COMMS WARN` / `COMMS CRIT` from bridge; mode line becomes `MODE: AUTO [W]` on WARN and `!COMMS FAULT!` on CRIT
+- **Remote**: Buzzer drive — GPIO 8 (NPN transistor) now driven for three events:
+  - ESTOP press: double-beep (100 ms on / 60 ms off / 100 ms on), highest priority
+  - TCP bridge lost mid-session: triple short pulse alarm
+  - COMMS CRIT active: continuous 500 ms on/off slow beep (matches Nano pattern)
+- **Remote**: Task watchdog — `esp_task_wdt_add(NULL)` registered in `app_main`; fed by `esp_task_wdt_reset()` every 20 ms loop; 10 s timeout + panic in `sdkconfig.defaults`
+- **Remote**: VERSION handshake — sends `HELLO v0.2.0_B19` on every new TCP connection; logs mismatch warning if bridge replies with a different version
+- **Remote**: `tcp_client_set_connect_callback()` API — fires once per new TCP connection, used for HELLO send
+- **Bridge**: HELLO command handler — parses remote version, logs match/mismatch at INFO/WARNING, replies `HELLO <bridge_version>`
+
+### Changed
+- All components bumped to B19 (Nano: version constant only, no logic changes)
+
 ## [v0.2.0_B18] — 2026-03-27 — OLED Simplification & Graphical Rudder Bar
 
 ### Changed

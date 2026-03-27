@@ -27,7 +27,8 @@ static const char *TAG = "TCP";
 static volatile bool s_connected = false;
 static int s_sock = -1;
 static SemaphoreHandle_t s_sock_mutex = NULL;
-static tcp_rx_callback_t s_rx_cb = NULL;
+static tcp_rx_callback_t      s_rx_cb      = NULL;
+static tcp_connect_callback_t s_connect_cb = NULL;
 
 // ---- public API -----------------------------------------------------------
 
@@ -39,6 +40,11 @@ bool tcp_client_is_connected(void)
 void tcp_client_set_rx_callback(tcp_rx_callback_t cb)
 {
     s_rx_cb = cb;
+}
+
+void tcp_client_set_connect_callback(tcp_connect_callback_t cb)
+{
+    s_connect_cb = cb;
 }
 
 bool tcp_client_send(const char *line)
@@ -108,6 +114,7 @@ static bool try_connect(void)
     }
 
     ESP_LOGI(TAG, "Connected to bridge");
+    if (s_connect_cb) s_connect_cb();
     return true;
 }
 

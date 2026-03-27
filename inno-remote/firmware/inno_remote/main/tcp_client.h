@@ -34,3 +34,16 @@ typedef void (*tcp_rx_callback_t)(const char *line);
  * Must be called before tcp_client_start().
  */
 void tcp_client_set_rx_callback(tcp_rx_callback_t cb);
+
+/**
+ * Callback type invoked immediately after each new TCP connection is
+ * established (called from the TCP task, before the first PING is sent).
+ * Use it to send a handshake frame on every new connection.
+ */
+typedef void (*tcp_connect_callback_t)(void);
+
+/**
+ * Register a callback that fires once per new bridge connection.
+ * Must be called before tcp_client_start().
+ */
+void tcp_client_set_connect_callback(tcp_connect_callback_t cb);

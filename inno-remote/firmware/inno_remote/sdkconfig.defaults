@@ -10,3 +10,9 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
 
 # Allow plain HTTP for OTA (trusted local network only)
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+
+# Task watchdog: 10 s timeout, trigger panic (reboot) on expiry.
+# Main loop feeds the watchdog every 20 ms; guards against I2C/SPI lockups.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_PANIC=y

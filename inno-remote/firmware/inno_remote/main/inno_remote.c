@@ -18,6 +18,7 @@
 #include "wifi_status.h"
 #include "tcp_client.h"
 #include <stdarg.h>
+#include "esp_task_wdt.h"
 
 static const char *TAG = "INNO_REMOTE";
 
@@ -33,8 +34,12 @@ static volatile uint32_t g_warn_ap_pressed_ms = 0;
 static char              g_bridge_mode[16]    = "IDLE";
 static portMUX_TYPE      g_bridge_mux         = portMUX_INITIALIZER_UNLOCKED;
 
+// Nano comms fault state forwarded by bridge (written from TCP rx callback, read in main loop)
+typedef enum { BRIDGE_COMMS_OK = 0, BRIDGE_COMMS_WARN = 1, BRIDGE_COMMS_CRIT = 2 } bridge_comms_t;
+static volatile bridge_comms_t g_bridge_comms = BRIDGE_COMMS_OK;
+
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v0.2.0_B7"
+#define INNOPILOT_VERSION "v0.2.0_B19"
 
 // ========================
 // OLED PINS (as built)
@@ -53,6 +58,7 @@ static portMUX_TYPE      g_bridge_mux         = portMUX_INITIALIZER_UNLOCKED;
 #define PIN_ESTOP          3    // active-low STOP
 #define PIN_ADC_LADDER     0    // ADC ladder sense
 #define PIN_ADC_POT        1    // ADC pot wiper
+#define PIN_BUZZER         8    // Buzzer / NPN transistor drive (active-high)
 
 // ADC channels for ESP32-C3 (GPIO0=CH0, GPIO1=CH1)
 #define ADC_UNIT_USED      ADC_UNIT_1
@@ -114,6 +120,19 @@ static void init_adc(void)
 
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CH_LADDER, &chan_cfg));
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CH_POT, &chan_cfg));
+}
+
+static void init_buzzer(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << PIN_BUZZER),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+    gpio_set_level(PIN_BUZZER, 0);  // off on startup
 }
 
 static int adc_read_raw(adc_channel_t ch)
@@ -591,8 +610,32 @@ static void on_bridge_rx(const char *line)
     } else if (strcmp(line, "WARN AP_PRESSED") == 0) {
         g_warn_ap_pressed    = true;
         g_warn_ap_pressed_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    } else if (strncmp(line, "COMMS ", 6) == 0) {
+        bridge_comms_t cs = BRIDGE_COMMS_OK;
+        if      (strncmp(line + 6, "WARN", 4) == 0) cs = BRIDGE_COMMS_WARN;
+        else if (strcmp (line + 6, "CRIT")    == 0) cs = BRIDGE_COMMS_CRIT;
+        portENTER_CRITICAL(&g_bridge_mux);
+        g_bridge_comms = cs;
+        portEXIT_CRITICAL(&g_bridge_mux);
+    } else if (strncmp(line, "HELLO ", 6) == 0) {
+        if (strcmp(line + 6, INNOPILOT_VERSION) != 0) {
+            ESP_LOGW(TAG, "Version mismatch: remote=%s bridge=%s",
+                     INNOPILOT_VERSION, line + 6);
+        }
     }
     // PONG is silently accepted (keepalive ack)
+}
+
+// ------------------------------ TCP connect callback -----------------------
+
+// Called from tcp_client_task immediately after each new connection is established.
+// Sends our version string so the bridge can detect firmware mismatches early.
+static void on_tcp_connect(void)
+{
+    char hello[40];
+    snprintf(hello, sizeof(hello), "HELLO %s", INNOPILOT_VERSION);
+    tcp_client_send(hello);
+    ESP_LOGI(TAG, "TCP connected: sent %s", hello);
 }
 
 // ------------------------------ Main ---------------------------------------
@@ -604,6 +647,7 @@ void app_main(void)
     bool demo_mode = demo_mode_boot_check();
     ESP_LOGI(TAG, "Boot mode: %s", demo_mode ? "DEMO" : "NORMAL");
     init_adc();
+    init_buzzer();
     init_oled_u8g2();
 
     wifi_sta_start();
@@ -611,7 +655,31 @@ void app_main(void)
     // Start TCP client (connects to bridge when Wi-Fi is up)
     if (!demo_mode) {
         tcp_client_set_rx_callback(on_bridge_rx);
+        tcp_client_set_connect_callback(on_tcp_connect);
         tcp_client_start();
+    }
+
+    // Enable task watchdog — 10 s timeout, fed every 20 ms main loop iteration.
+    // Guards against I2C/SPI lockup or unexpected main-loop hang.
+    // Fully self-contained: initialises the TWDT from code if sdkconfig hasn't
+    // already done so, so no manual idf.py menuconfig / fullclean step is needed.
+    {
+        const esp_task_wdt_config_t twdt_cfg = {
+            .timeout_ms     = 10000,  // 10 s
+            .idle_core_mask = 0,      // do not watch idle tasks
+            .trigger_panic  = true,   // reboot on timeout
+        };
+        // Reconfigure if already initialised from sdkconfig; otherwise init fresh.
+        esp_err_t wdt_err = esp_task_wdt_reconfigure(&twdt_cfg);
+        if (wdt_err == ESP_ERR_INVALID_STATE) {
+            wdt_err = esp_task_wdt_init(&twdt_cfg);
+        }
+        if (wdt_err == ESP_OK) {
+            wdt_err = esp_task_wdt_add(NULL);
+        }
+        if (wdt_err != ESP_OK) {
+            ESP_LOGW(TAG, "Task WDT setup failed (0x%x) — watchdog disabled", wdt_err);
+        }
     }
 
     // ===== Log View state =====
@@ -682,7 +750,29 @@ void app_main(void)
 
     const float dt = (float)LOOP_MS / 1000.0f;
 
+    // TCP connection state tracking (detects mid-session disconnects)
+    bool prev_tcp_connected = false;
+
+    // Buzzer state machine.
+    // Priority: BUZZ_ESTOP (3) > BUZZ_BRIDGE_LOST (2) > BUZZ_COMMS_CRIT (1) > BUZZ_NONE (0)
+    // Higher-priority patterns only start if nothing of equal or higher priority is running.
+    typedef enum {
+        BUZZ_NONE        = 0,  // silent
+        BUZZ_COMMS_CRIT  = 1,  // continuous 500ms on/off while COMMS CRIT active
+        BUZZ_BRIDGE_LOST = 2,  // one-shot triple-pulse on TCP mid-session loss
+        BUZZ_ESTOP       = 3,  // one-shot double-beep on ESTOP press
+    } buzz_pat_t;
+    buzz_pat_t buzz_pat  = BUZZ_NONE;
+    int        buzz_tick = 0;
+
     while (1) {
+        esp_task_wdt_reset();
+
+        // Track TCP connection state for this iteration
+        bool tcp_connected = (!demo_mode && tcp_client_is_connected());
+        bool tcp_just_lost  = (prev_tcp_connected && !tcp_connected);
+        prev_tcp_connected  = tcp_connected;
+
         bool auto_low   = (gpio_get_level(PIN_MODE_AUTO) == 0);
         bool manual_low = (gpio_get_level(PIN_MODE_MANUAL) == 0);
         bool in_auto    = mode_is_auto(auto_low, manual_low);
@@ -759,6 +849,17 @@ void app_main(void)
         // ESTOP: send to bridge on every STOP press (safety — always, even for log view entry)
         if (stop_edge_press && !demo_mode) {
             tcp_client_send("ESTOP");
+        }
+
+        // Buzzer: one-shot double-beep on every ESTOP press (highest priority)
+        if (stop_edge_press && buzz_pat < BUZZ_ESTOP) {
+            buzz_pat  = BUZZ_ESTOP;
+            buzz_tick = 0;
+        }
+        // Buzzer: one-shot alarm when TCP drops after having been connected
+        if (tcp_just_lost && buzz_pat < BUZZ_BRIDGE_LOST) {
+            buzz_pat  = BUZZ_BRIDGE_LOST;
+            buzz_tick = 0;
         }
 
         // ===== Enter Log View: STOP tapped 5x within 4s window =====
@@ -1030,11 +1131,26 @@ void app_main(void)
         }
 
         // When connected to bridge, override local sim values with real telemetry
-        if (!demo_mode && tcp_client_is_connected()) {
+        if (tcp_connected) {
             head_deg    = wrap360f((float)g_bridge_hdg);
             command_deg = wrap360(g_bridge_cmd);
             ap_on       = g_bridge_ap;
             rudder_deg  = g_bridge_rdr;
+        }
+
+        // Buzzer: continuous slow beep while COMMS CRIT (lowest priority — only start if idle)
+        {
+            bridge_comms_t comms_now = g_bridge_comms;
+            if (comms_now == BRIDGE_COMMS_CRIT) {
+                if (buzz_pat == BUZZ_NONE) {
+                    buzz_pat  = BUZZ_COMMS_CRIT;
+                    buzz_tick = 0;
+                }
+            } else if (buzz_pat == BUZZ_COMMS_CRIT) {
+                // Comms recovered — stop the continuous alarm
+                buzz_pat  = BUZZ_NONE;
+                buzz_tick = 0;
+            }
         }
 
         // Expire AP_PRESSED warning after 5s
@@ -1043,6 +1159,54 @@ void app_main(void)
             if (g_warn_ap_pressed && (now_warn - g_warn_ap_pressed_ms) >= 5000) {
                 g_warn_ap_pressed = false;
             }
+        }
+
+        // ---- Buzzer output (executes every loop iteration, before UI) ----
+        {
+            bool buz = false;
+            switch (buzz_pat) {
+            case BUZZ_ESTOP:
+                // Double-beep: 100 ms on | 60 ms off | 100 ms on | done
+                if      (buzz_tick < 5)  buz = true;   // 0-4   (100 ms on)
+                else if (buzz_tick < 8)  buz = false;  // 5-7   ( 60 ms off)
+                else if (buzz_tick < 13) buz = true;   // 8-12  (100 ms on)
+                else { buzz_pat = BUZZ_NONE; buzz_tick = 0; }
+                buzz_tick++;
+                break;
+            case BUZZ_BRIDGE_LOST:
+                // Triple short pulse: [80 ms on | 60 ms off] × 3, then done
+                { int p = buzz_tick % 7; buz = (p < 4); }
+                if (buzz_tick >= 21) { buzz_pat = BUZZ_NONE; buzz_tick = 0; }
+                buzz_tick++;
+                break;
+            case BUZZ_COMMS_CRIT:
+                // Slow beep: 500 ms on / 500 ms off  (25 ticks each @ 20 ms/tick)
+                buz = ((buzz_tick % 50) < 25);
+                if (++buzz_tick >= 50000) buzz_tick = 0;   // prevent tick overflow
+                break;
+            case BUZZ_NONE:
+            default:
+                buz = false;
+                break;
+            }
+            gpio_set_level(PIN_BUZZER, buz ? 1 : 0);
+        }
+
+        // ---- Connecting screen (normal mode only, bridge not yet reachable) ----
+        // Never display simulated values — the instrument display is only shown
+        // when live bridge telemetry is available (or in explicit demo mode).
+        if (!demo_mode && !tcp_connected) {
+            u8g2_ClearBuffer(&u8g2);
+            draw_title_centered("Inno-Remote", 9);
+            draw_centered_line_6x10("NO BRIDGE", 30);
+            draw_centered_line_6x10("Connecting...", 42);
+            draw_stop_snug(54, stop_on);
+            u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+            u8g2_DrawStr(&u8g2, 0, 64, INNOPILOT_VERSION);
+            draw_wifi_icon_top_right();
+            u8g2_SendBuffer(&u8g2);
+            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            continue;
         }
 
         // ---------------- UI DRAW (line order fixed) ----------------
@@ -1070,12 +1234,19 @@ void app_main(void)
         float rudder_norm_ui = rudder_deg / MAX_RUDDER_DEG;
         draw_rudder_bar(0, Y_BAR_TOP, SCREEN_W, H_BAR, rudder_norm_ui);
 
-        // Line 3 (MODE centered; AP-rejected warning overlaid when active)
-        char mode_line[24];
-        snprintf(mode_line, sizeof(mode_line), "MODE: %s", mode_str(auto_low, manual_low));
+        // Line 3 (MODE centered; warn/fault overlays in priority order)
+        // Priority: AP_PRESSED > COMMS_CRIT > COMMS_WARN (appended) > normal
+        char mode_line[32];
+        bridge_comms_t comms_disp = g_bridge_comms;
         if (g_warn_ap_pressed) {
             draw_centered_line_6x10("?AP Rejected?", Y_MODE_BASE);
+        } else if (comms_disp == BRIDGE_COMMS_CRIT) {
+            draw_centered_line_6x10("!COMMS FAULT!", Y_MODE_BASE);
+        } else if (comms_disp == BRIDGE_COMMS_WARN) {
+            snprintf(mode_line, sizeof(mode_line), "MODE: %s [W]", mode_str(auto_low, manual_low));
+            draw_centered_line_6x10(mode_line, Y_MODE_BASE);
         } else {
+            snprintf(mode_line, sizeof(mode_line), "MODE: %s", mode_str(auto_low, manual_low));
             draw_centered_line_6x10(mode_line, Y_MODE_BASE);
         }
 

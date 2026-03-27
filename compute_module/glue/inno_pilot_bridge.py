@@ -70,8 +70,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B18"
-INNOPILOT_BUILD_NUM = 18  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B19"
+INNOPILOT_BUILD_NUM = 19  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -499,6 +499,7 @@ def process_remote_line(
 
     Commands handled:
       PING              -> reply PONG
+      HELLO <ver>       -> log version match/mismatch, reply HELLO <bridge_ver>
       ESTOP             -> ap.enabled=False, exit MANUAL if active
       BTN TOGGLE        -> toggle AP (rejected with WARN_AP_PRESSED in MANUAL mode)
       BTN -10|-1|+1|+10 -> adjust ap.heading_command (ignored in MANUAL)
@@ -514,6 +515,15 @@ def process_remote_line(
 
     if cmd == "PING":
         remote_send(remote_sock, "PONG")
+
+    elif cmd == "HELLO":
+        remote_ver = parts[1] if len(parts) > 1 else "unknown"
+        if remote_ver != INNOPILOT_VERSION:
+            log.warning("Remote version mismatch: remote=%s bridge=%s — proceeding",
+                        remote_ver, INNOPILOT_VERSION)
+        else:
+            log.info("Remote version: %s (match)", remote_ver)
+        remote_send(remote_sock, f"HELLO {INNOPILOT_VERSION}")
 
     elif cmd == "ESTOP":
         set_q.put(("ap.enabled", False))
