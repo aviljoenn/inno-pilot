@@ -103,15 +103,30 @@ void motor_drive(int8_t dir, uint8_t duty) {
 
 // Drive opposite direction at full speed until ADC is back within
 // MOVE_THRESHOLD of target, or RETURN_TIMEOUT_MS expires.
-// Returns true on success, false on timeout.
+// Also guards the hard limit in the return direction (prevents overshoot
+// past the far end if start_adc was near that end).
+// Returns true on success, false on timeout or limit guard.
 bool return_to_start(int target_adc, int8_t return_dir) {
+  // Hard limit for the return direction, with same LIMIT_MARGIN clearance.
+  int return_hard_limit = (return_dir > 0) ? (RUDDER_STBD_END - LIMIT_MARGIN)
+                                           : (RUDDER_PORT_END  + LIMIT_MARGIN);
+
   unsigned long t0 = millis();
   while ((unsigned long)(millis() - t0) < RETURN_TIMEOUT_MS) {
     int cur = read_rudder();
+    // Reached target?
     if (abs(cur - target_adc) <= MOVE_THRESHOLD) {
       motor_stop();
       delay(200);
       return true;
+    }
+    // Limit guard in the return direction — stop rather than crash into end.
+    bool at_return_limit = (return_dir > 0) ? (cur >= return_hard_limit)
+                                            : (cur <= return_hard_limit);
+    if (at_return_limit) {
+      motor_stop();
+      Serial.println(F("[WARN] Return hit limit guard — stopping short of target."));
+      return false;
     }
     motor_drive(return_dir, 255);
   }
@@ -175,25 +190,30 @@ void run_direction_test(int8_t dir) {
     unsigned long t0 = millis();
     uint32_t curr_sum = 0;
     uint16_t curr_cnt = 0;
-    unsigned long last_pos_check_ms = 0;
     bool limit_tripped = false;
 
+    // Check limit on EVERY iteration (~416 µs/loop) so a fast motor cannot
+    // overshoot between polls.  Per-iteration pattern:
+    //   1. dummy analogRead(A2)  — settle S/H from last A1 read
+    //   2. real  analogRead(A2)  — quick limit guard (±a few counts OK here)
+    //   3. dummy analogRead(A1)  — settle S/H from A2
+    //   4. real  analogRead(A1)  — current sample
+    // Accepts minor channel-switch noise; limit margin >> noise floor.
     while ((unsigned long)(millis() - t0) < DWELL_MS) {
-      // Accumulate current samples (A1)
-      curr_sum += (uint32_t)analogRead(PIN_CURRENT);
-      curr_cnt++;
-
-      // Position limit check every 150 ms (switches to A2 briefly)
-      unsigned long now = millis();
-      if ((unsigned long)(now - last_pos_check_ms) >= 150) {
-        last_pos_check_ms = now;
-        int a = read_rudder();  // 8 reads on A2 with dummies
-        int d = (dir > 0) ? (RUDDER_STBD_END - a) : (a - RUDDER_PORT_END);
-        if (d < LIMIT_MARGIN) {
-          limit_tripped = true;
-          break;
-        }
+      // Quick rudder position check (A2)
+      (void)analogRead(RUDDER_PIN);                      // dummy: settle from A1
+      int a_now = (int)analogRead(RUDDER_PIN);           // real limit-guard read
+      int d_fwd = (dir > 0) ? (RUDDER_STBD_END - a_now)
+                             : (a_now - RUDDER_PORT_END);
+      if (d_fwd < LIMIT_MARGIN) {
+        limit_tripped = true;
+        break;
       }
+
+      // Current sample (A1)
+      (void)analogRead(PIN_CURRENT);                     // dummy: settle from A2
+      curr_sum += (uint32_t)analogRead(PIN_CURRENT);     // real current read
+      curr_cnt++;
     }
 
     motor_stop();
