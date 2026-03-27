@@ -44,7 +44,7 @@ static volatile bool g_version_mismatch = false;  // set by HELLO handler
 static char          g_ota_url[72]      = "";      // set by OTA handler; empty = no update pending
 
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v1.2.0_B1"
+#define INNOPILOT_VERSION "v1.2.0_B3"
 
 // ========================
 // OLED PINS (as built)
@@ -145,6 +145,33 @@ static int adc_read_raw(adc_channel_t ch)
     int raw = 0;
     if (adc_oneshot_read(adc_handle, ch, &raw) != ESP_OK) return -1;
     return raw;
+}
+
+// Trimmed-mean read: two dummy reads to settle the SAR input after any channel
+// switch, then n_samples real reads.  Drops the single highest and lowest
+// values, returns the integer mean of the remaining (n_samples - 2) readings.
+// Returns -1 if there are not enough valid samples.
+// n_samples must be >= 3.
+static int adc_read_trimmed(adc_channel_t ch, int n_samples)
+{
+    // Settle ADC input after any preceding channel read.
+    int dummy;
+    adc_oneshot_read(adc_handle, ch, &dummy);
+    adc_oneshot_read(adc_handle, ch, &dummy);
+
+    int min_val = 5000, max_val = -1;
+    int32_t sum = 0;
+    int good    = 0;
+    for (int i = 0; i < n_samples; i++) {
+        int raw = 0;
+        if (adc_oneshot_read(adc_handle, ch, &raw) != ESP_OK) continue;
+        if (raw < min_val) min_val = raw;
+        if (raw > max_val) max_val = raw;
+        sum += raw;
+        good++;
+    }
+    if (good < 3) return -1;
+    return (int)((sum - min_val - max_val) / (good - 2));
 }
 
 static void init_oled_u8g2(void)
@@ -794,11 +821,13 @@ void app_main(void)
         stop_on = (gpio_get_level(PIN_ESTOP) == 0);
 
         int raw_ladder = adc_read_raw(ADC_CH_LADDER);
-        int raw_pot    = adc_read_raw(ADC_CH_POT);
+        // Trimmed mean (16 samples, discard min+max, 2 dummy settle reads) then
+        // IIR α=0.25 (τ ≈ 72 ms at 20 ms loop) for final noise rejection.
+        int raw_pot    = adc_read_trimmed(ADC_CH_POT, 16);
 
         if (raw_pot >= 0) {
             if (!pot_init) { pot_filt = (float)raw_pot; pot_last = pot_filt; pot_init = true; }
-            pot_filt = pot_filt + 0.35f * ((float)raw_pot - pot_filt);
+            pot_filt = pot_filt + 0.25f * ((float)raw_pot - pot_filt);
         }
 
         // Mode transition into manual: seed jog from current rudder; notify bridge

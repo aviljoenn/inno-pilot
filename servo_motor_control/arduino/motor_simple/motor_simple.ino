@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B2";
-const uint16_t INNOPILOT_BUILD_NUM = 2;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B3";
+const uint16_t INNOPILOT_BUILD_NUM = 3;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -122,10 +122,15 @@ const float VOLTAGE_SCALE         = 5.156f;
 
 const uint8_t ADC_SAMPLES         = 16;
 
-// Rudder pot: accumulate this many settled samples per published reading.
+// Rudder pot oversampling: accumulate this many settled samples per published reading.
 // At ~1–3 ms per loop iteration this gives ~16–48 ms latency — well within
 // the response time of any mechanical rudder system.
 const uint8_t RUDDER_ACC_SAMPLES  = 16;
+
+// IIR (EMA) applied on top of each trimmed-mean batch.
+// α=0.35 → τ ≈ 38 ms at 16 ms publish interval.  Keeps the output stable
+// between batch updates without adding meaningful lag for a slow-moving rudder.
+const float   RUDDER_IIR_ALPHA    = 0.35f;
 
 const float PI_VSENSE_SCALE = 5.25f;
 const float PI_VOLT_HIGH_FAULT = 5.40f;
@@ -333,9 +338,13 @@ int      rudder_adc_last  = 0;          // 0..1023, inverted (higher = stbd)
 // Updated by service_rudder_adc() once per main loop.  All other code reads
 // these instead of calling analogRead() directly on A2.
 uint32_t rdr_acc_sum          = 0;
+uint16_t rdr_acc_min          = 1023;  // tracks batch minimum for trimmed mean
+uint16_t rdr_acc_max          = 0;     // tracks batch maximum for trimmed mean
 uint8_t  rdr_acc_count        = 0;
-int      rudder_adc_smoothed  = 511;   // published average, inverted (higher = stbd)
-int      rudder_adc_raw_disp  = 511;   // non-inverted average, for OLED debug row
+float    rudder_iir           = 511.0f; // IIR (EMA) state, non-inverted raw scale
+bool     rudder_iir_init      = false;
+int      rudder_adc_smoothed  = 511;   // published value, inverted (higher = stbd)
+int      rudder_adc_raw_disp  = 511;   // non-inverted, for OLED debug row
 
 float pi_voltage_v = 0.0f;
 bool  pi_overvolt_fault = false;
@@ -1048,20 +1057,51 @@ int read_rudder_adc() {
 }
 
 // Called once per main-loop iteration (at the end, after all other ADC work).
-// Takes one dummy read to settle the S/H capacitor after whatever channel was
-// last active (A6 button, A0 voltage, A1 current, or A3 pi-vsense), then one
-// real sample.  Accumulates RUDDER_ACC_SAMPLES real samples before publishing
-// a new average.  Two reads per loop ≈ 208 µs — same budget as before.
+//
+// Pipeline per loop:
+//   1. Two dummy reads   — settles S/H cap after any preceding channel (A6/A0/A1/A3)
+//   2. One real sample   — accumulated into the current batch
+//
+// Every RUDDER_ACC_SAMPLES real samples:
+//   3. Trimmed mean      — drops the single highest and single lowest reading,
+//                          averages the remaining (RUDDER_ACC_SAMPLES-2) = 14 values.
+//   4. IIR / EMA         — smooths batch-to-batch variation with RUDDER_IIR_ALPHA.
+//   5. Publish           — rudder_adc_smoothed (inverted) and rudder_adc_raw_disp.
+//
+// Cost: 3 × ~104 µs = ~312 µs per loop.
 void service_rudder_adc() {
-  (void)analogRead(RUDDER_PIN);                   // discard: settle S/H cap onto A2
-  uint16_t raw = (uint16_t)analogRead(RUDDER_PIN); // settled sample
+  // Two dummy reads: belt-and-braces settling of the S/H capacitor.
+  (void)analogRead(RUDDER_PIN);
+  (void)analogRead(RUDDER_PIN);
+  uint16_t raw = (uint16_t)analogRead(RUDDER_PIN);  // settled sample
 
+  // Track min and max for trimmed mean (no array needed).
+  if (raw < rdr_acc_min) rdr_acc_min = raw;
+  if (raw > rdr_acc_max) rdr_acc_max = raw;
   rdr_acc_sum += raw;
+
   if (++rdr_acc_count >= RUDDER_ACC_SAMPLES) {
-    int avg = (int)(rdr_acc_sum / RUDDER_ACC_SAMPLES);
-    rudder_adc_smoothed = 1023 - avg;  // invert: higher = starboard
-    rudder_adc_raw_disp = avg;         // non-inverted, for OLED debug display
+    // Trimmed mean: remove the one min and one max, average the rest.
+    uint32_t trimmed = rdr_acc_sum - rdr_acc_min - rdr_acc_max;
+    float avg_raw = (float)trimmed / (float)(RUDDER_ACC_SAMPLES - 2);
+
+    // IIR (EMA) applied on top of the trimmed mean.
+    if (!rudder_iir_init) {
+      rudder_iir      = avg_raw;
+      rudder_iir_init = true;
+    } else {
+      rudder_iir += RUDDER_IIR_ALPHA * (avg_raw - rudder_iir);
+    }
+
+    // Publish — invert so higher counts = starboard.
+    int iir_int         = (int)(rudder_iir + 0.5f);
+    rudder_adc_smoothed = 1023 - iir_int;
+    rudder_adc_raw_disp = iir_int;  // non-inverted for OLED debug display
+
+    // Reset batch accumulators.
     rdr_acc_sum   = 0;
+    rdr_acc_min   = 1023;
+    rdr_acc_max   = 0;
     rdr_acc_count = 0;
   }
 }
