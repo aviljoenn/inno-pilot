@@ -70,8 +70,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B21"
-INNOPILOT_BUILD_NUM = 21  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B1"
+INNOPILOT_BUILD_NUM = 1  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -152,6 +152,15 @@ TELEM_PERIOD_S    = 0.2   # 5 Hz telemetry to Nano and remote
 REMOTE_TCP_PORT        = 8555
 REMOTE_TIMEOUT_S       = 6.0   # disconnect if no data received for this long
 REMOTE_PING_PERIOD_S   = 2.0   # send PONG keepalive to remote every N seconds
+
+# ---------------------------------------------------------------------------
+# OTA firmware server (serves inno_remote.bin to remote on version mismatch)
+# ---------------------------------------------------------------------------
+OTA_HTTP_PORT     = 8556
+OTA_SERVER_HOST   = "192.168.6.13"        # Pi fixed IP on boat LAN
+OTA_FIRMWARE_DIR  = "/var/lib/inno-pilot/ota"
+OTA_FIRMWARE_FILE = "inno_remote.bin"
+OTA_FIRMWARE_PATH = f"{OTA_FIRMWARE_DIR}/{OTA_FIRMWARE_FILE}"
 
 # ---------------------------------------------------------------------------
 # Probe / discovery constants
@@ -429,6 +438,51 @@ def enc_deg10_i16(deg: float) -> int:
 # TCP server helpers
 # ===========================================================================
 
+def setup_ota_http_server() -> None:
+    """Start a minimal HTTP file server in a daemon thread.
+
+    Serves GET /inno_remote.bin from OTA_FIRMWARE_DIR on OTA_HTTP_PORT.
+    Returns 404 if the file is not present (safe to call before binary is deployed).
+    The server runs for the lifetime of the process.
+    """
+    import http.server
+    import urllib.parse
+
+    class _OTAHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested = urllib.parse.unquote(self.path.lstrip("/"))
+            if requested != OTA_FIRMWARE_FILE:
+                self.send_error(404)
+                return
+            try:
+                with open(OTA_FIRMWARE_PATH, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            log.info("OTA: served %d bytes to %s", len(data), self.client_address[0])
+
+        def log_message(self, fmt, *args):  # suppress default access-log noise
+            pass
+
+    class _OTAServer(http.server.HTTPServer):
+        allow_reuse_address = True
+
+    def _serve():
+        srv = _OTAServer(("", OTA_HTTP_PORT), _OTAHandler)
+        log.info("OTA HTTP server listening on port %d (firmware: %s)",
+                 OTA_HTTP_PORT, OTA_FIRMWARE_PATH)
+        srv.serve_forever()
+
+    t = threading.Thread(target=_serve, daemon=True, name="ota-http")
+    t.start()
+
+
 def setup_tcp_server() -> socket.socket:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -519,11 +573,16 @@ def process_remote_line(
     elif cmd == "HELLO":
         remote_ver = parts[1] if len(parts) > 1 else "unknown"
         if remote_ver != INNOPILOT_VERSION:
-            log.warning("Remote version mismatch: remote=%s bridge=%s — proceeding",
+            log.warning("Remote version mismatch: remote=%s bridge=%s",
                         remote_ver, INNOPILOT_VERSION)
         else:
             log.info("Remote version: %s (match)", remote_ver)
         remote_send(remote_sock, f"HELLO {INNOPILOT_VERSION}")
+        # Offer OTA if remote is behind and firmware binary is available
+        if remote_ver != INNOPILOT_VERSION and os.path.isfile(OTA_FIRMWARE_PATH):
+            ota_url = f"http://{OTA_SERVER_HOST}:{OTA_HTTP_PORT}/{OTA_FIRMWARE_FILE}"
+            remote_send(remote_sock, f"OTA {ota_url}")
+            log.info("OTA offered to remote at %s", ota_url)
 
     elif cmd == "ESTOP":
         set_q.put(("ap.enabled", False))
@@ -675,6 +734,9 @@ def main() -> None:
     relay_good  = 0  # CRC-valid frames forwarded to Nano
     relay_drop  = 0  # bytes dropped during realignment
     relay_log_ts = 0.0
+
+    # ---- OTA firmware server (background daemon thread) ----
+    setup_ota_http_server()
 
     # ---- TCP remote state ----
     tcp_server  = setup_tcp_server()

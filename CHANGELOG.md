@@ -6,6 +6,19 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v1.2.0_B1] — 2026-03-27 — OTA Update Pipeline + Version Reset
+
+### Added
+- **Remote**: OTA firmware update via TCP — on TCP connect, HELLO version mismatch triggers automatic OTA download from bridge HTTP server (`http://192.168.6.13:8556/inno_remote.bin`), flashes inactive OTA partition, and reboots; OLED shows "OTA UPDATE / Updating..." during transfer, "OTA FAILED / Check bridge" on error
+- **Remote**: Task watchdog unregisters during OTA download to prevent false 10 s timeout during transfer
+- **Bridge**: OTA HTTP file server on port 8556 — serves `inno_remote.bin` from `/var/lib/inno-pilot/ota/` in a daemon thread; returns 404 if binary not yet deployed (safe at startup)
+- **Bridge**: HELLO handler now sends `OTA <url>` after `HELLO <ver>` reply when remote version mismatches and binary is present
+- **Deploy**: `deploy_inno_pilot_glue.sh` now copies `ota/inno_remote.bin` from repo to `/var/lib/inno-pilot/ota/` on Pi
+- **Repo**: `inno-remote/firmware/inno_remote/ota/` directory tracked in git; `.gitignore` exception allows committing the OTA-ready `.bin`
+
+### Changed
+- Version scheme reset from `v0.2.0_B21` (Bridge/Nano) / `v0.2.0_B19` (Remote) to `v1.2.0_B1` across all three components — build counter restarts at 1
+
 ## [v0.2.0_B21] — 2026-03-27 — OLED Fault Area Moved to Rows 1-2, Helm Always at Row 3
 
 ### Changed

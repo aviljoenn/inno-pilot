@@ -6,6 +6,7 @@ set -e
 #   ./compute_module/glue/deploy_inno_pilot_glue.sh
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$REPO_DIR/../.." && pwd)"
 
 echo "Inno-Pilot deploy (glue): using repo dir $REPO_DIR"
 
@@ -20,6 +21,18 @@ fi
 echo "Installing inno_pilot_bridge.py -> /usr/local/bin/"
 sudo cp "$REPO_DIR/inno_pilot_bridge.py" /usr/local/bin/inno_pilot_bridge.py
 sudo chmod 755 /usr/local/bin/inno_pilot_bridge.py
+
+# Copy OTA firmware binary (if committed to repo)
+OTA_BIN="$REPO_ROOT/inno-remote/firmware/inno_remote/ota/inno_remote.bin"
+OTA_DEST_DIR="/var/lib/inno-pilot/ota"
+if [ -f "$OTA_BIN" ]; then
+  echo "Installing OTA firmware -> $OTA_DEST_DIR/"
+  sudo mkdir -p "$OTA_DEST_DIR"
+  sudo cp "$OTA_BIN" "$OTA_DEST_DIR/inno_remote.bin"
+  sudo chmod 644 "$OTA_DEST_DIR/inno_remote.bin"
+else
+  echo "OTA firmware not found at $OTA_BIN — skipping (OTA unavailable until binary is committed)"
+fi
 
 # Copy symlink fix helper
 echo "Installing inno_pilot_fix_symlink.sh -> /usr/local/sbin/"

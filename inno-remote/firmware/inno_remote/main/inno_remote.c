@@ -17,6 +17,7 @@
 
 #include "wifi_status.h"
 #include "tcp_client.h"
+#include "ota_update.h"
 #include <stdarg.h>
 #include "esp_task_wdt.h"
 
@@ -38,8 +39,12 @@ static portMUX_TYPE      g_bridge_mux         = portMUX_INITIALIZER_UNLOCKED;
 typedef enum { BRIDGE_COMMS_OK = 0, BRIDGE_COMMS_WARN = 1, BRIDGE_COMMS_CRIT = 2 } bridge_comms_t;
 static volatile bridge_comms_t g_bridge_comms = BRIDGE_COMMS_OK;
 
+// OTA update state (written from TCP rx callback, consumed by main loop)
+static volatile bool g_version_mismatch = false;  // set by HELLO handler
+static char          g_ota_url[72]      = "";      // set by OTA handler; empty = no update pending
+
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v0.2.0_B19"
+#define INNOPILOT_VERSION "v1.2.0_B1"
 
 // ========================
 // OLED PINS (as built)
@@ -618,9 +623,17 @@ static void on_bridge_rx(const char *line)
         g_bridge_comms = cs;
         portEXIT_CRITICAL(&g_bridge_mux);
     } else if (strncmp(line, "HELLO ", 6) == 0) {
-        if (strcmp(line + 6, INNOPILOT_VERSION) != 0) {
+        bool mismatch = (strcmp(line + 6, INNOPILOT_VERSION) != 0);
+        if (mismatch) {
             ESP_LOGW(TAG, "Version mismatch: remote=%s bridge=%s",
                      INNOPILOT_VERSION, line + 6);
+        }
+        g_version_mismatch = mismatch;
+    } else if (strncmp(line, "OTA ", 4) == 0) {
+        // Only accept OTA offer when a version mismatch has been confirmed by HELLO
+        if (g_version_mismatch) {
+            strlcpy(g_ota_url, line + 4, sizeof(g_ota_url));
+            ESP_LOGI(TAG, "OTA update pending: %s", g_ota_url);
         }
     }
     // PONG is silently accepted (keepalive ack)
@@ -1206,6 +1219,40 @@ void app_main(void)
             draw_wifi_icon_top_right();
             u8g2_SendBuffer(&u8g2);
             vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            continue;
+        }
+
+        // ---- OTA update (triggered by bridge HELLO mismatch + OTA URL) ----
+        // g_ota_url is written from the TCP rx callback; consume and act here so
+        // we can drive the OLED and safely unregister from the task watchdog.
+        if (g_ota_url[0] != '\0') {
+            char url_copy[72];
+            strlcpy(url_copy, g_ota_url, sizeof(url_copy));
+            g_ota_url[0] = '\0';  // consume so we don't loop on failure
+
+            u8g2_ClearBuffer(&u8g2);
+            draw_title_centered("Inno-Remote", 9);
+            draw_centered_line_6x10("OTA UPDATE", 28);
+            draw_centered_line_6x10("Updating...", 40);
+            u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+            u8g2_DrawStr(&u8g2, 0, 64, INNOPILOT_VERSION);
+            u8g2_SendBuffer(&u8g2);
+
+            // OTA download can take several seconds — unregister from watchdog
+            // so the 10 s timeout does not fire during the transfer.
+            esp_task_wdt_delete(NULL);
+
+            esp_err_t ota_err = ota_update_from_url(url_copy);
+            // Only reached on failure (success reboots inside ota_update_from_url)
+            ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
+
+            esp_task_wdt_add(NULL);  // re-register for normal operation
+            u8g2_ClearBuffer(&u8g2);
+            draw_title_centered("Inno-Remote", 9);
+            draw_centered_line_6x10("OTA FAILED", 28);
+            draw_centered_line_6x10("Check bridge", 40);
+            u8g2_SendBuffer(&u8g2);
+            vTaskDelay(pdMS_TO_TICKS(3000));
             continue;
         }
 
