@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B16";
-const uint16_t INNOPILOT_BUILD_NUM = 16;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B17";
+const uint16_t INNOPILOT_BUILD_NUM = 17;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -649,42 +649,55 @@ void oled_draw() {
   }
 
   // ----------------------------
+  // Partial-update: skip rows 0-1 when their content hasn't changed.
+  // Saves ~25% of I2C time (two of eight rows).
+  // ----------------------------
+  bool pi_alive_now = pi_ever_online && !pi_timed_out;
+  // Pack: cur_state (3 bits) + pi_alive (1 bit) + bridge_build_valid (1 bit)
+  uint8_t top_ctx = (cur_state << 2) | (pi_alive_now ? 2 : 0) | (bridge_build_valid ? 1 : 0);
+  static uint8_t prev_top_ctx = 0xFF;
+  bool top_changed = (top_ctx != prev_top_ctx);
+  prev_top_ctx = top_ctx;
+
+  // ----------------------------
   // Draw
   // ----------------------------
   display.setFont(System5x7);
   display.set1X();
 
-  // --- Row 0: heading (always name + version; boot shows progress instead) ---
-  display.setCursor(0, 0);
-  if (within_boot_window) {
-    uint8_t pct = (uint8_t)((elapsed_boot * 100UL) / PI_BOOT_EST_MS);
-    if (pct > 100) pct = 100;
-    display.print(F("Inno-Cntl:Boot "));
-    display.print(pct);
-    display.print(F("%"));
-  } else {
-    display.print(F("Inno-Ctrl "));
-    display.print(INNOPILOT_VERSION);
-  }
-  display.clearToEOL();
-
-  // --- Row 1: Pi online/offline + bridge version ---
-  display.setCursor(0, 1);
-  if (!within_boot_window) {
-    bool pi_alive_now = pi_ever_online && !pi_timed_out;
-    if (pi_alive_now) {
-      if (bridge_build_valid) {
-        char buf[22];
-        snprintf(buf, sizeof(buf), "Pi: Online v0.2.0_B%u", bridge_build_num);
-        display.print(buf);
-      } else {
-        display.print(F("Pi: Online"));
-      }
+  // --- Rows 0-1: only redraw when context changed (or during boot — progress %) ---
+  if (top_changed || within_boot_window) {
+    // --- Row 0: heading (always name + version; boot shows progress instead) ---
+    display.setCursor(0, 0);
+    if (within_boot_window) {
+      uint8_t pct = (uint8_t)((elapsed_boot * 100UL) / PI_BOOT_EST_MS);
+      if (pct > 100) pct = 100;
+      display.print(F("Inno-Cntl:Boot "));
+      display.print(pct);
+      display.print(F("%"));
     } else {
-      display.print(F("Pi: Offline"));
+      display.print(F("Inno-Ctrl "));
+      display.print(INNOPILOT_VERSION);
     }
+    display.clearToEOL();
+
+    // --- Row 1: Pi online/offline + bridge version ---
+    display.setCursor(0, 1);
+    if (!within_boot_window) {
+      if (pi_alive_now) {
+        if (bridge_build_valid) {
+          char buf[22];
+          snprintf(buf, sizeof(buf), "Pi: Online v0.2.0_B%u", bridge_build_num);
+          display.print(buf);
+        } else {
+          display.print(F("Pi: Online"));
+        }
+      } else {
+        display.print(F("Pi: Offline"));
+      }
+    }
+    display.clearToEOL();
   }
-  display.clearToEOL();
 
   // --- Rows 2-3: fault/warning display (priority: steer_loss > hw_fault > ap_warn > overlay) ---
   {
@@ -1797,9 +1810,9 @@ if (!ap_engaged && !remote_manual_active) {
   update_motor_from_command();
 
   static unsigned long last_draw = 0;
-  if (oled_ok && (now - last_draw >= 200)) {
+  if (oled_ok && (now - last_draw >= 1000)) {
     last_draw = now;
-    // oled_draw();  // TEMP: disabled to test if OLED I2C blocking causes RX buffer overflow
+    oled_draw();
   }
 }
 

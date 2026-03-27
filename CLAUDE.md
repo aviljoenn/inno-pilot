@@ -82,7 +82,10 @@ Before adding new tooling, check what the repo already uses:
 
 > **Pi Zero (192.168.6.13):** `arduino-cli` (v1.4.0) is installed at `/usr/local/bin/arduino-cli`
 > with the `arduino:avr` core. The Nano is on `/dev/ttyUSB0`.
-> Flash command: `arduino-cli compile --fqbn arduino:avr:nano . && arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
+> Compile: `arduino-cli compile --fqbn arduino:avr:nano --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .`
+> Upload:  `arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
+> The `SERIAL_RX_BUFFER_SIZE=128` flag is **required** — the default 64-byte buffer overflows
+> during bridge telemetry bursts while the OLED I2C draw blocks `loop()`.
 > Stop `inno-pilot-bridge`, `inno-pilot-socat`, `pypilot` services before flashing; restart after.
 
 ---

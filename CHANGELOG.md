@@ -6,6 +6,14 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B17] — 2026-03-27 — Fix CRC Errors: RX Buffer + OLED Throttle
+
+### Fixed
+- **Nano**: Root cause of sustained ~20 CRC errors/10s identified — OLED I2C draw blocking `loop()` long enough to overflow the 64-byte Arduino serial RX buffer during bridge telemetry bursts
+- **Nano**: Increased serial RX buffer from 64 to 128 bytes via `--build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128"` (required on every compile)
+- **Nano**: Reduced OLED refresh from 200ms (5 Hz) to 1000ms (1 Hz) — eliminates buffer pressure overlap with 5 Hz telemetry bursts
+- **Nano**: Partial OLED update — rows 0-1 (version/Pi status) skip I2C writes when content unchanged, saving ~25% of draw time
+
 ## [v0.2.0_B16] — 2026-03-27 — Comms Error Diagnostic Logging
 
 ### Added
