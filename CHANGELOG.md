@@ -6,6 +6,46 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B15] — 2026-03-26 — Comms-Fault Detection & Safety System
+
+### Added
+- **Nano**: Sliding-window CRC error rate monitor — 10 × 1-second buckets, cached sum, evaluated every loop
+- **Nano**: Two-level fault thresholds: WARN (≥5 errors/10 s) and CRITICAL (≥15/10 s held 3 consecutive seconds)
+- **Nano**: Autonomous AP disengage (one-shot latch) on CRITICAL — motor neutral, clutch off, 0ms latency
+- **Nano**: 1 Hz comms buzzer alarm (500ms on/off) — distinct from 100ms hw-alarm rapid beeps
+- **Nano**: OLED comms-fault slots: `!COMMS ERR!` (flashing 2×) at CRITICAL, `?Comms:N err/10s` (static 1×) at WARN
+- **Nano**: PTM two-press extended to silence comms buzzer (first press silence, second press STOP)
+- **Nano**: `COMMS_DIAG_CODE` (0xEC) telemetry at 1 Hz — lo byte = err_window_sum, hi byte = crit_consec_s
+- **Nano**: New flag bits `COMMS_WARN_FAULT=0x1000`, `COMMS_CRIT_FAULT=0x2000` in FLAGS word
+- **Bridge**: Parse `COMMS_WARN_FAULT`/`COMMS_CRIT_FAULT` from FLAGS — auto-disengage AP via pypilot set_q on CRITICAL
+- **Bridge**: `COMMS_DIAG_CODE` handler — logs elevated error rates at INFO, clean at DEBUG
+- **Bridge**: CRC validation on Nano→bridge frames in `extract_wrapped_frames()` — corrupt frames dropped, not forwarded to pypilot
+- **Bridge**: `COMMS OK` / `COMMS WARN N` / `COMMS CRIT` TCP telemetry to remote at 5 Hz
+- **Bridge**: Relay diagnostics — drop-rate percentage logged every 30 s, warns at >5%
+
+### Changed
+- OLED fault priority: steer_loss > hw_fault > **comms_crit** > **comms_warn** > ap_pressed_warn > overlay
+- Buzzer priority: steer_loss > hw_alarm > **comms_fault** (500ms/1Hz) > ap_pressed_warn
+
+## [v0.2.0_B14] — 2026-03-26 — AP State Cleanup + Probe Refactor
+
+### Changed
+- **Bridge**: Removed `AP_ENABLED_CODE` (0xE1) send — AP engage/disengage is now derived from pypilot's native `COMMAND_CODE`/`DISENGAGE_CODE` relay frames (single source of truth)
+- **Bridge**: Removed `ap.enabled` subscription from pypilot worker thread (redundant after above)
+- **Bridge**: Relay loop now inspects forwarded pypilot frames to keep `bstate.mode` accurate when pypilot changes AP state externally
+- **Bridge**: `probe_nano_port()` now uses `send_nano_frame()` — removes hand-rolled wrap/build duplication
+- **Nano**: Removed `AP_ENABLED_CODE` handler; `ap_enabled_remote` set true on first `COMMAND_CODE`, cleared on `DISENGAGE_CODE`
+
+## [v0.2.0_B11] — 2026-03-26 — Serial Reliability + HUPCL Fix
+
+### Added
+- **Bridge**: B8 — CRC-validated pypilot relay: wraps outbound pypilot frames in bridge framing + CRC before forwarding to Nano; prevents Nano CRC-error flood from raw pypilot data
+- **Bridge**: B9 — Structured DEBUG logging for relay diagnostics (SIGUSR1 toggle)
+- **Nano**: B10 — RX debug counters on OLED (CRC errors, raw bytes, valid frames)
+
+### Fixed
+- **Bridge**: B11 — HUPCL disabled on serial open via `termios.tcsetattr(~termios.HUPCL)` — prevents Nano reset (DTR-drop) when the port is closed. Documented in `CLAUDE.md` and top-level `CLAUDE.md`.
+
 ## [v0.2.0_B7] — 2026-03-25 — Remote Integration (Tasks #2–#10)
 
 ### Added

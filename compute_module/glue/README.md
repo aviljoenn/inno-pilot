@@ -29,6 +29,9 @@ Inno-Pilot servo controller (Nano) to pypilot on the compute module (Pi Zero).
     - In MANUAL mode, translates pot-based RUD commands to Nano motor frames
     - On TCP disconnect in MANUAL: triggers steer-loss warning on Nano (life-safety)
   - Parses `FLAGS_CODE` and `BUZZER_STATE_CODE` from Nano for remote relay
+  - Validates CRC on all Nano→bridge frames; corrupt frames are dropped (never forwarded to pypilot)
+  - Monitors Nano-reported comms error rate via `COMMS_DIAG_CODE` (0xEC) telemetry; auto-disengages
+    AP if error rate exceeds safety threshold; sends `COMMS WARN`/`COMMS CRIT` to TCP remote
 
 In short: pypilot still sees its normal servo device, but we have inserted a
 transparent bridge in the middle that adds Inno-Pilot control head + wireless remote features.
