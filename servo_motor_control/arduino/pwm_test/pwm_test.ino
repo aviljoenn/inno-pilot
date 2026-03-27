@@ -66,7 +66,7 @@ int read_rudder() {
     if (r > mx) mx = r;
     sum += r;
   }
-  return (int)((sum - mn - mx) / 4);
+  return (int)(1023 - (sum - mn - mx) / 4);  // invert: match motor_simple.ino convention (STBD=high)
 }
 
 // Current ADC: average 16 samples (all on A1 after channel settle).
