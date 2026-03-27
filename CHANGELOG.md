@@ -6,6 +6,18 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B18] — 2026-03-27 — OLED Simplification & Graphical Rudder Bar
+
+### Changed
+- **Nano**: OLED Row 1 removed — Pi online/offline status replaced by version-mismatch-by-exception warning in rows 2-3 (flashing `!VER MISMATCH!` + build numbers when bridge ≠ Nano build)
+- **Nano**: Boot splash is now non-blocking — `loop()` runs during the 3 s splash (serial RX uninterrupted); old `delay(3000)` removed
+- **Nano**: Row 4 replaces AP/Clutch dual-field with single `Helm:` field: `HAND` (manual jog), `AUTO` (AP engaged), `REMOTE` (TCP remote manual)
+- **Nano**: Row 5 heading values always 3-digit zero-padded (e.g. `005`); `HDG:` right-justified on the display
+- **Nano**: Row 6 replaced with graphical rudder bar — `P` on left, `S` on right, `I` indicator proportionally placed within [port_lim, stbd_lim]; `I` blinks over `P` or `S` when rudder exceeds a limit, with `?Rud>Limit` warning in rows 2-3
+- **Nano**: Rows 2-3 warning priority updated: steer_loss > hw_fault > ver_mismatch > comms_crit > comms_warn > rud_overshoot > ap_pressed
+- **Nano**: Removed unused `rudder_deg` local in `oled_draw()` (was never read)
+- **Bridge**: Build bumped to B18 to match Nano
+
 ## [v0.2.0_B17] — 2026-03-27 — Fix CRC Errors: RX Buffer + OLED Throttle
 
 ### Fixed

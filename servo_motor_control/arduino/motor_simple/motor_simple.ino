@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B17";
-const uint16_t INNOPILOT_BUILD_NUM = 17;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B18";
+const uint16_t INNOPILOT_BUILD_NUM = 18;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -77,6 +77,7 @@ bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
 bool pi_online           = false;    // true once we see first valid frame
 unsigned long boot_start_ms    = 0;  // reference after splash
+unsigned long splash_until_ms  = 0;  // non-blocking 3 s boot splash timer (0 = not active)
 unsigned long pi_online_time_ms = 0; // when we first saw Pi online
 // NEW: track if Pi was ever online and when we last heard from it
 bool pi_ever_online       = false;
@@ -574,6 +575,12 @@ void oled_draw() {
 
   const unsigned long now = millis();
 
+  // Non-blocking boot splash: hold the display on the splash screen until timer expires
+  if (splash_until_ms) {
+    if (now < splash_until_ms) return;
+    splash_until_ms = 0;   // expired — fall through to first normal draw
+  }
+
   // ----------------------------
   // Measurements used everywhere
   // ----------------------------
@@ -610,15 +617,6 @@ void oled_draw() {
     strncat(tbuf, "C", sizeof(tbuf) - strlen(tbuf) - 1);
   }
 
-  // Rudder angle (rough local mapping for now)
-  float rudder_deg = 0.0f;
-  {
-    float centre   = 0.5f * (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END);
-    float halfSpan = 0.5f * (RUDDER_ADC_STBD_END - RUDDER_ADC_PORT_END);
-    if (halfSpan < 1.0f) halfSpan = 1.0f;
-    rudder_deg = (rudder_adc_last - centre) * (RUDDER_RANGE_DEG / halfSpan);
-  }
-
   // ----------------------------
   // Controller status state
   // ----------------------------
@@ -652,9 +650,8 @@ void oled_draw() {
   // Partial-update: skip rows 0-1 when their content hasn't changed.
   // Saves ~25% of I2C time (two of eight rows).
   // ----------------------------
-  bool pi_alive_now = pi_ever_online && !pi_timed_out;
-  // Pack: cur_state (3 bits) + pi_alive (1 bit) + bridge_build_valid (1 bit)
-  uint8_t top_ctx = (cur_state << 2) | (pi_alive_now ? 2 : 0) | (bridge_build_valid ? 1 : 0);
+  // Rows 0-1 content now depends only on cur_state (Row 1 is blank)
+  uint8_t top_ctx = cur_state;
   static uint8_t prev_top_ctx = 0xFF;
   bool top_changed = (top_ctx != prev_top_ctx);
   prev_top_ctx = top_ctx;
@@ -681,25 +678,31 @@ void oled_draw() {
     }
     display.clearToEOL();
 
-    // --- Row 1: Pi online/offline + bridge version ---
+    // --- Row 1: removed — version management by exception (mismatch shown in rows 2-3) ---
     display.setCursor(0, 1);
-    if (!within_boot_window) {
-      if (pi_alive_now) {
-        if (bridge_build_valid) {
-          char buf[22];
-          snprintf(buf, sizeof(buf), "Pi: Online v0.2.0_B%u", bridge_build_num);
-          display.print(buf);
-        } else {
-          display.print(F("Pi: Online"));
-        }
-      } else {
-        display.print(F("Pi: Offline"));
-      }
-    }
     display.clearToEOL();
   }
 
-  // --- Rows 2-3: fault/warning display (priority: steer_loss > hw_fault > ap_warn > overlay) ---
+  // --- Pre-calculate rudder overshoot (used in rows 2-3 warning and row 6 bar) ---
+  bool rudder_overshoot_active = false;
+  bool rudder_over_port        = false;
+  bool rudder_over_stbd        = false;
+  {
+    bool lims_ok = pilot_rudder_valid && pilot_port_lim_valid && pilot_stbd_lim_valid
+                   && (pilot_stbd_lim_deg10 > pilot_port_lim_deg10);
+    if (lims_ok) {
+      if (pilot_rudder_deg10 < pilot_port_lim_deg10) {
+        rudder_overshoot_active = true;
+        rudder_over_port        = true;
+      } else if (pilot_rudder_deg10 > pilot_stbd_lim_deg10) {
+        rudder_overshoot_active = true;
+        rudder_over_stbd        = true;
+      }
+    }
+  }
+
+  // --- Rows 2-3: fault/warning display ---
+  // Priority: steer_loss > hw_fault > ver_mismatch > comms_crit > comms_warn > rud_overshoot > ap_warn > overlay
   {
     bool any_hw_fault = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
     bool hw_fault_shown = any_hw_fault && !pi_fault_alarm_silenced;
@@ -757,6 +760,24 @@ void oled_draw() {
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
       }
+    } else if (bridge_build_valid && bridge_build_num != INNOPILOT_BUILD_NUM) {
+      // Version mismatch: flash 1X warning — all components must run the same build
+      static bool vm_vis = true;
+      static unsigned long vm_flash_ms = 0;
+      if (now - vm_flash_ms >= 500UL) { vm_flash_ms = now; vm_vis = !vm_vis; }
+      if (vm_vis) {
+        display.setCursor(0, 2);
+        display.print(F("!VER MISMATCH!"));
+        display.clearToEOL();
+        char vmbuf[22];
+        snprintf(vmbuf, sizeof(vmbuf), "Pi:B%u Nano:B%u", bridge_build_num, INNOPILOT_BUILD_NUM);
+        display.setCursor(0, 3);
+        display.print(vmbuf);
+        display.clearToEOL();
+      } else {
+        display.setCursor(0, 2); display.clearToEOL();
+        display.setCursor(0, 3); display.clearToEOL();
+      }
     } else if (comms_crit_active && !comms_fault_silenced) {
       // COMMS CRITICAL: flash 2X "!COMMS ERR!" every 400ms
       static bool cf_vis = true;
@@ -784,6 +805,12 @@ void oled_draw() {
       char wbuf[22];
       snprintf(wbuf, sizeof(wbuf), "?Comms:%u err/10s", err_window_sum);
       display.print(wbuf);
+      display.clearToEOL();
+      display.setCursor(0, 3); display.clearToEOL();
+    } else if (rudder_overshoot_active) {
+      // Rudder exceeds soft limits: static 1X warning
+      display.setCursor(0, 2);
+      display.print(F("?Rud>Limit"));
       display.clearToEOL();
       display.setCursor(0, 3); display.clearToEOL();
     } else if (ap_pressed_warn_active) {
@@ -880,41 +907,96 @@ void oled_draw() {
 
   // --- Online-only rows ---
 
-  // Row 4: AP + clutch (or MAN: ON when remote manual mode active)
+  // Row 4: Helm mode — HAND (manual jog), AUTO (AP engaged), REMOTE (TCP remote manual)
   display.setCursor(0, 4);
   if (remote_manual_active) {
-    display.print(F("MAN: ON  Clutch: "));
-    display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+    display.print(F("Helm: REMOTE"));
+  } else if (ap_display) {
+    display.print(F("Helm: AUTO"));
   } else {
-    display.print(F("AP: "));
-    display.print(ap_display ? F("ON") : F("OFF"));
-    display.print(F("  Clutch: "));
-    display.print(digitalRead(CLUTCH_PIN) == HIGH ? F("ON") : F("OFF"));
+    display.print(F("Helm: HAND"));
   }
   display.clearToEOL();
 
-  // Row 5: Cmd / Heading
-  display.setCursor(0, 5);
-  display.print(F("Cmd: "));
-  if (pilot_command_valid) display.print((pilot_command_deg10 + 5) / 10);
-  else display.print(F("--.-"));
-  display.print(F(" Head: "));
-  if (pilot_heading_valid) display.print((pilot_heading_deg10 + 5) / 10);
-  else display.print(F("--.-"));
-  display.clearToEOL();
+  // Row 5: Cmd (left, 3-digit leading zeros) | HDG right-justified (3-digit leading zeros)
+  {
+    char row5[22];
+    char tmp[8];
+    memset(row5, ' ', 21);
+    row5[21] = '\0';
 
-  // Row 6: Rudder (port limit / current / stbd limit)
-  display.setCursor(0, 6);
-  display.print(F("Rud:"));
-  if (pilot_port_lim_valid) display.print(pilot_port_lim_deg10 / 10.0f, 1);
-  else display.print(F("--.-"));
-  display.print(F(" "));
-  if (pilot_rudder_valid) display.print(pilot_rudder_deg10 / 10.0f, 1);
-  else display.print(F("--.-"));
-  display.print(F(" "));
-  if (pilot_stbd_lim_valid) display.print(pilot_stbd_lim_deg10 / 10.0f, 1);
-  else display.print(F("--.-"));
-  display.clearToEOL();
+    // Left: "Cmd:NNN"
+    if (pilot_command_valid) {
+      uint16_t deg = ((pilot_command_deg10 + 5) / 10) % 360;
+      snprintf(tmp, sizeof(tmp), "Cmd:%03u", (unsigned)deg);
+    } else {
+      strncpy(tmp, "Cmd:---", sizeof(tmp));
+    }
+    memcpy(row5, tmp, 7);
+
+    // Right: "HDG:NNN" — right-justified (cols 14-20 of the 21-char row)
+    if (pilot_heading_valid) {
+      uint16_t deg = ((pilot_heading_deg10 + 5) / 10) % 360;
+      snprintf(tmp, sizeof(tmp), "HDG:%03u", (unsigned)deg);
+    } else {
+      strncpy(tmp, "HDG:---", sizeof(tmp));
+    }
+    memcpy(row5 + 14, tmp, 7);
+
+    display.setCursor(0, 5);
+    display.print(row5);
+    display.clearToEOL();
+  }
+
+  // Row 6: Graphical rudder bar — P...I...S
+  // 'P' = port end (col 0), 'S' = stbd end (col 20), 'I' = indicator at proportional position.
+  // When rudder exceeds a limit the 'I' blinks over 'P' or 'S' (rudder_overshoot_active above).
+  {
+    char rudbar[22];
+    memset(rudbar, ' ', 21);
+    rudbar[0]  = 'P';
+    rudbar[20] = 'S';
+    rudbar[21] = '\0';
+
+    bool lims_ok = pilot_rudder_valid && pilot_port_lim_valid && pilot_stbd_lim_valid
+                   && (pilot_stbd_lim_deg10 > pilot_port_lim_deg10);
+
+    if (lims_ok) {
+      if (rudder_over_port) {
+        // Blink 'I' over 'P' (col 0)
+        static bool blink_p = true;
+        static unsigned long blink_p_ms = 0;
+        if (now - blink_p_ms >= 400UL) { blink_p_ms = now; blink_p = !blink_p; }
+        if (blink_p) rudbar[0] = 'I';
+      } else if (rudder_over_stbd) {
+        // Blink 'I' over 'S' (col 20)
+        static bool blink_s = true;
+        static unsigned long blink_s_ms = 0;
+        if (now - blink_s_ms >= 400UL) { blink_s_ms = now; blink_s = !blink_s; }
+        if (blink_s) rudbar[20] = 'I';
+      } else {
+        // Map pilot_rudder_deg10 in [port_lim, stbd_lim] → columns 1..19
+        int32_t num = (int32_t)(pilot_rudder_deg10 - pilot_port_lim_deg10) * 18;
+        int32_t den = pilot_stbd_lim_deg10 - pilot_port_lim_deg10;
+        int16_t col = (int16_t)(num / den) + 1;
+        if (col < 1)  col = 1;
+        if (col > 19) col = 19;
+        rudbar[col] = 'I';
+      }
+    } else if (pilot_rudder_valid) {
+      // No limit data: map pilot rudder angle over ±RUDDER_RANGE_DEG assumption
+      float rdeg = pilot_rudder_deg10 / 10.0f;
+      int16_t col = 10 + (int16_t)(rdeg * 9.0f / RUDDER_RANGE_DEG + 0.5f);
+      if (col < 1)  col = 1;
+      if (col > 19) col = 19;
+      rudbar[col] = 'I';
+    }
+    // else: no valid rudder data — show P and S only, no indicator
+
+    display.setCursor(0, 6);
+    display.print(rudbar);
+    display.clearToEOL();
+  }
 }
 
 bool oled_try_init(bool allow_blocking_splash) {
@@ -941,9 +1023,9 @@ bool oled_try_init(bool allow_blocking_splash) {
   display.print(F("Version "));
   display.println(INNOPILOT_VERSION);
 
-  // Only block for the full splash if the Pi doesn't appear online yet
+  // Non-blocking 3 s splash: oled_draw() will return early until the timer expires
   if (allow_blocking_splash && !pi_online_at_boot) {
-    delay(3000);   // Pi booting: OK to block
+    splash_until_ms = millis() + 3000UL;
   }
 
   return true;
