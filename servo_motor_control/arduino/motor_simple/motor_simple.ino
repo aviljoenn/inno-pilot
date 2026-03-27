@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B3";
-const uint16_t INNOPILOT_BUILD_NUM = 3;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B4";
+const uint16_t INNOPILOT_BUILD_NUM = 4;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -122,15 +122,14 @@ const float VOLTAGE_SCALE         = 5.156f;
 
 const uint8_t ADC_SAMPLES         = 16;
 
-// Rudder pot oversampling: accumulate this many settled samples per published reading.
-// At ~1–3 ms per loop iteration this gives ~16–48 ms latency — well within
-// the response time of any mechanical rudder system.
-const uint8_t RUDDER_ACC_SAMPLES  = 16;
-
-// IIR (EMA) applied on top of each trimmed-mean batch.
-// α=0.35 → τ ≈ 38 ms at 16 ms publish interval.  Keeps the output stable
-// between batch updates without adding meaningful lag for a slow-moving rudder.
-const float   RUDDER_IIR_ALPHA    = 0.35f;
+// Rudder ADC two-stage filter:
+//   Stage 1 (per loop): 8 reads — 2 dummy (S/H settle) + 6 real.
+//                       Drop highest and lowest of the 6; average remaining 4.
+//   Stage 2 (FIFO MA): sliding window of RUDDER_FIFO_SIZE Stage-1 values.
+//                       Running sum keeps the average O(1) per update.
+// Combined noise reduction: σ / (√4 × √RUDDER_FIFO_SIZE) = σ / 8.
+// Tune RUDDER_FIFO_SIZE to trade smoothness vs step-response lag.
+const uint8_t RUDDER_FIFO_SIZE    = 16;
 
 const float PI_VSENSE_SCALE = 5.25f;
 const float PI_VOLT_HIGH_FAULT = 5.40f;
@@ -334,17 +333,14 @@ unsigned long last_command_ms = 0;
 uint16_t rudder_raw       = 0;          // 0..65535 (scaled)
 int      rudder_adc_last  = 0;          // 0..1023, inverted (higher = stbd)
 
-// ---- Rudder ADC background accumulator ----
-// Updated by service_rudder_adc() once per main loop.  All other code reads
-// these instead of calling analogRead() directly on A2.
-uint32_t rdr_acc_sum          = 0;
-uint16_t rdr_acc_min          = 1023;  // tracks batch minimum for trimmed mean
-uint16_t rdr_acc_max          = 0;     // tracks batch maximum for trimmed mean
-uint8_t  rdr_acc_count        = 0;
-float    rudder_iir           = 511.0f; // IIR (EMA) state, non-inverted raw scale
-bool     rudder_iir_init      = false;
-int      rudder_adc_smoothed  = 511;   // published value, inverted (higher = stbd)
-int      rudder_adc_raw_disp  = 511;   // non-inverted, for OLED debug row
+// ---- Rudder ADC FIFO moving-average state ----
+// service_rudder_adc() writes here; all other code reads rudder_adc_smoothed.
+uint16_t rdr_fifo[16];                 // ring buffer — size matches RUDDER_FIFO_SIZE
+uint8_t  rdr_fifo_idx         = 0;    // next write position
+uint32_t rdr_fifo_sum         = 0;    // running sum for O(1) average
+bool     rdr_fifo_ready       = false; // false until first Stage-1 pre-fills the FIFO
+int      rudder_adc_smoothed  = 511;  // published value, inverted (higher = stbd)
+int      rudder_adc_raw_disp  = 511;  // non-inverted, for OLED debug row
 
 float pi_voltage_v = 0.0f;
 bool  pi_overvolt_fault = false;
@@ -1056,54 +1052,49 @@ int read_rudder_adc() {
   return rudder_adc_smoothed;
 }
 
-// Called once per main-loop iteration (at the end, after all other ADC work).
+// Called once per main-loop iteration (end of loop, after all other ADC work).
 //
-// Pipeline per loop:
-//   1. Two dummy reads   — settles S/H cap after any preceding channel (A6/A0/A1/A3)
-//   2. One real sample   — accumulated into the current batch
+// Stage 1 — synchronous burst of 8 reads, every loop:
+//   2 dummy reads  : settle S/H cap after any preceding channel (A6/A0/A1/A3)
+//   6 real reads   : take min/max on the fly (no array)
+//   drop min + max : trimmed mean of 4 remaining values → stage1 (0..1023)
+//   Cost: 8 × ~104 µs = ~832 µs per loop.
 //
-// Every RUDDER_ACC_SAMPLES real samples:
-//   3. Trimmed mean      — drops the single highest and single lowest reading,
-//                          averages the remaining (RUDDER_ACC_SAMPLES-2) = 14 values.
-//   4. IIR / EMA         — smooths batch-to-batch variation with RUDDER_IIR_ALPHA.
-//   5. Publish           — rudder_adc_smoothed (inverted) and rudder_adc_raw_disp.
-//
-// Cost: 3 × ~104 µs = ~312 µs per loop.
+// Stage 2 — 16-slot FIFO moving average (O(1) running sum):
+//   Insert stage1, evict oldest; published value = running_sum / RUDDER_FIFO_SIZE.
+//   On first call, pre-fill all slots so output is immediately valid.
+//   Combined noise floor: σ / (√4 × √16) = σ / 8.
 void service_rudder_adc() {
-  // Two dummy reads: belt-and-braces settling of the S/H capacitor.
-  (void)analogRead(RUDDER_PIN);
-  (void)analogRead(RUDDER_PIN);
-  uint16_t raw = (uint16_t)analogRead(RUDDER_PIN);  // settled sample
-
-  // Track min and max for trimmed mean (no array needed).
-  if (raw < rdr_acc_min) rdr_acc_min = raw;
-  if (raw > rdr_acc_max) rdr_acc_max = raw;
-  rdr_acc_sum += raw;
-
-  if (++rdr_acc_count >= RUDDER_ACC_SAMPLES) {
-    // Trimmed mean: remove the one min and one max, average the rest.
-    uint32_t trimmed = rdr_acc_sum - rdr_acc_min - rdr_acc_max;
-    float avg_raw = (float)trimmed / (float)(RUDDER_ACC_SAMPLES - 2);
-
-    // IIR (EMA) applied on top of the trimmed mean.
-    if (!rudder_iir_init) {
-      rudder_iir      = avg_raw;
-      rudder_iir_init = true;
-    } else {
-      rudder_iir += RUDDER_IIR_ALPHA * (avg_raw - rudder_iir);
-    }
-
-    // Publish — invert so higher counts = starboard.
-    int iir_int         = (int)(rudder_iir + 0.5f);
-    rudder_adc_smoothed = 1023 - iir_int;
-    rudder_adc_raw_disp = iir_int;  // non-inverted for OLED debug display
-
-    // Reset batch accumulators.
-    rdr_acc_sum   = 0;
-    rdr_acc_min   = 1023;
-    rdr_acc_max   = 0;
-    rdr_acc_count = 0;
+  // --- Stage 1: trimmed burst ---
+  (void)analogRead(RUDDER_PIN);   // dummy 1 — S/H cap settle
+  (void)analogRead(RUDDER_PIN);   // dummy 2 — belt-and-braces
+  uint16_t mn = 1023, mx = 0, sum6 = 0;
+  for (uint8_t i = 0; i < 6; i++) {
+    uint16_t r = (uint16_t)analogRead(RUDDER_PIN);
+    if (r < mn) mn = r;
+    if (r > mx) mx = r;
+    sum6 += r;
   }
+  uint16_t stage1 = (sum6 - mn - mx) / 4;  // trimmed mean of 4 middle values
+
+  // --- Stage 2: FIFO moving average ---
+  if (!rdr_fifo_ready) {
+    // Pre-fill all slots with the first valid reading for instant stable output.
+    for (uint8_t i = 0; i < RUDDER_FIFO_SIZE; i++) rdr_fifo[i] = stage1;
+    rdr_fifo_sum   = (uint32_t)stage1 * RUDDER_FIFO_SIZE;
+    rdr_fifo_idx   = 0;
+    rdr_fifo_ready = true;
+  } else {
+    rdr_fifo_sum            -= rdr_fifo[rdr_fifo_idx];  // evict oldest
+    rdr_fifo[rdr_fifo_idx]   = stage1;                  // insert newest
+    rdr_fifo_sum            += stage1;
+    rdr_fifo_idx = (rdr_fifo_idx + 1) % RUDDER_FIFO_SIZE;
+  }
+
+  // Publish: FIFO average, inverted so higher = starboard.
+  uint16_t avg_raw    = (uint16_t)(rdr_fifo_sum / RUDDER_FIFO_SIZE);
+  rudder_adc_smoothed = 1023 - (int)avg_raw;  // inverted for limit/motor logic
+  rudder_adc_raw_disp = (int)avg_raw;          // non-inverted for OLED debug row
 }
 
 // ---- Limit logic helpers ----

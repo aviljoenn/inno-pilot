@@ -44,7 +44,7 @@ static volatile bool g_version_mismatch = false;  // set by HELLO handler
 static char          g_ota_url[72]      = "";      // set by OTA handler; empty = no update pending
 
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v1.2.0_B3"
+#define INNOPILOT_VERSION "v1.2.0_B4"
 
 // ========================
 // OLED PINS (as built)
@@ -76,6 +76,10 @@ static char          g_ota_url[72]      = "";      // set by OTA handler; empty 
 // Button responsiveness
 #define LOOP_MS             20
 #define BUTTON_DEBOUNCE_MS  15
+
+// Pot FIFO moving-average depth.  8 slots × 20 ms loop = 160 ms window,
+// ~40 ms group delay — smooth yet responsive for manual rudder control.
+#define POT_FIFO_SIZE       8
 
 // Rudder limits (demo)
 #define MAX_RUDDER_DEG      40.0f
@@ -764,9 +768,13 @@ void app_main(void)
     float ladder_idle = 0.0f;
     bool  ladder_idle_init = false;
 
-    float pot_filt = 0.0f;
-    bool  pot_init = false;
-    float pot_last = 0.0f;
+    // Pot FIFO state (Stage 1: adc_read_trimmed, Stage 2: sliding window MA)
+    int  pot_fifo[POT_FIFO_SIZE];
+    int  pot_fifo_sum   = 0;
+    int  pot_fifo_idx   = 0;
+    bool pot_fifo_ready = false;
+    int  pot_smooth     = 0;   // current FIFO average (replaces pot_filt)
+    int  pot_last       = 0;   // previous FIFO average (for change detection)
 
     // Debounce
     btn_t candidate_btn = BTN_NONE;
@@ -821,13 +829,25 @@ void app_main(void)
         stop_on = (gpio_get_level(PIN_ESTOP) == 0);
 
         int raw_ladder = adc_read_raw(ADC_CH_LADDER);
-        // Trimmed mean (16 samples, discard min+max, 2 dummy settle reads) then
-        // IIR α=0.25 (τ ≈ 72 ms at 20 ms loop) for final noise rejection.
-        int raw_pot    = adc_read_trimmed(ADC_CH_POT, 16);
 
+        // Stage 1: 2 dummy + 6 real reads, trim min/max, average 4 → one clean value.
+        // Stage 2: 8-slot FIFO moving average (O(1) running sum).
+        // Combined: σ / (√4 × √8) = σ / 5.7.  ~40 ms group delay at 20 ms loop.
+        int raw_pot = adc_read_trimmed(ADC_CH_POT, 6);
         if (raw_pot >= 0) {
-            if (!pot_init) { pot_filt = (float)raw_pot; pot_last = pot_filt; pot_init = true; }
-            pot_filt = pot_filt + 0.25f * ((float)raw_pot - pot_filt);
+            if (!pot_fifo_ready) {
+                // Pre-fill for instant valid output on first read.
+                for (int i = 0; i < POT_FIFO_SIZE; i++) pot_fifo[i] = raw_pot;
+                pot_fifo_sum   = raw_pot * POT_FIFO_SIZE;
+                pot_fifo_idx   = 0;
+                pot_fifo_ready = true;
+            } else {
+                pot_fifo_sum           -= pot_fifo[pot_fifo_idx];
+                pot_fifo[pot_fifo_idx]  = raw_pot;
+                pot_fifo_sum           += raw_pot;
+                pot_fifo_idx = (pot_fifo_idx + 1) % POT_FIFO_SIZE;
+            }
+            pot_smooth = pot_fifo_sum / POT_FIFO_SIZE;
         }
 
         // Mode transition into manual: seed jog from current rudder; notify bridge
@@ -1110,13 +1130,13 @@ void app_main(void)
                     rudder_target_deg = 0.0f;
                 }
             } else if (in_manual) {
-                if (pot_init) {
-                    float pot_deg = ((pot_filt / 4095.0f) * 2.0f - 1.0f) * MAX_RUDDER_DEG;
+                if (pot_fifo_ready) {
+                    float pot_deg = ((pot_smooth / 4095.0f) * 2.0f - 1.0f) * MAX_RUDDER_DEG;
 
-                    if (fabsf(pot_filt - pot_last) > 35.0f) {
+                    if (abs(pot_smooth - pot_last) > 35) {
                         manual_using_jog = false;
                     }
-                    pot_last = pot_filt;
+                    pot_last = pot_smooth;
 
                     if (!manual_using_jog) {
                         manual_rudder_deg = pot_deg;
@@ -1129,8 +1149,8 @@ void app_main(void)
                 rudder_target_deg = manual_rudder_deg;
 
                 // Send rudder target to bridge (throttled: change > 1% or every 200ms)
-                if (!demo_mode && pot_init) {
-                    float rud_pct = (pot_filt / 4095.0f) * 100.0f;
+                if (!demo_mode && pot_fifo_ready) {
+                    float rud_pct = (pot_smooth / 4095.0f) * 100.0f;
                     if (rud_pct < 0.0f) rud_pct = 0.0f;
                     if (rud_pct > 100.0f) rud_pct = 100.0f;
 
