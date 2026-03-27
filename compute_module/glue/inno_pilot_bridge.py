@@ -69,8 +69,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v0.2.0_B14"
-INNOPILOT_BUILD_NUM = 14  # increment with each push during development
+INNOPILOT_VERSION   = "v0.2.0_B15"
+INNOPILOT_BUILD_NUM = 15  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -114,9 +114,14 @@ BTN_EVT_STOP      = 6
 
 # Nano -> Bridge new telemetry
 BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
+COMMS_DIAG_CODE   = 0xEC  # Nano->Bridge: comms diagnostics (lo=err_window_sum, hi=crit_consec_s)
 
 # Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
 FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
+
+# Flag bit masks for bridge-side parsing of FLAGS_CODE value
+FLAG_COMMS_WARN   = 0x1000  # error rate elevated (WARN level)
+FLAG_COMMS_CRIT   = 0x2000  # error rate unsafe, AP auto-disengaged (CRITICAL level)
 
 # Bridge <-> Nano keepalive framing
 BRIDGE_MAGIC1         = 0xA5
@@ -184,6 +189,12 @@ class BridgeState:
     mode:              str  = MODE_IDLE  # IDLE / AP / MANUAL
     manual_rud_target: int  = 500        # 0-1000, sent as MANUAL_RUD_TARGET_CODE
     nano_buzzer_on:    bool = False      # last known Nano buzzer state
+    # Comms-fault state (populated from Nano FLAGS and COMMS_DIAG frames)
+    nano_comms_warn:      bool = False
+    nano_comms_crit:      bool = False
+    nano_err_window:      int  = 0       # errors in last 10-second window
+    nano_crit_consec:     int  = 0       # consecutive seconds above CRIT threshold
+    comms_disengage_sent: bool = False   # latch: prevents repeated disengage on same fault
 
 
 # ===========================================================================
@@ -314,9 +325,13 @@ def send_nano_frame(nano: serial.Serial, code: int, value_u16: int) -> None:
     nano.write(raw)
 
 
-def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
-    """Pull all complete 6-byte frames out of buf (mutates buf in place)."""
-    frames: list[bytes] = []
+def extract_wrapped_frames(buf: bytearray) -> list[tuple[bytes, bool]]:
+    """Pull all complete 6-byte frames out of buf (mutates buf in place).
+
+    Returns list of (frame_4bytes, crc_ok) tuples. Callers must skip frames
+    where crc_ok is False rather than forwarding corrupt data.
+    """
+    frames: list[tuple[bytes, bool]] = []
     while len(buf) >= 2:
         if buf[0] != BRIDGE_MAGIC1 or buf[1] != BRIDGE_MAGIC2:
             del buf[0]
@@ -325,7 +340,8 @@ def extract_wrapped_frames(buf: bytearray) -> list[bytes]:
             break
         frame = bytes(buf[2:6])
         del buf[:6]
-        frames.append(frame)
+        crc_ok = (crc8_msb(frame[:3]) == frame[3])
+        frames.append((frame, crc_ok))
     return frames
 
 
@@ -346,7 +362,9 @@ def probe_nano_port(port: str, timeout_s: float = 0.5) -> bool:
                     chunk = probe.read(64)
                     if chunk:
                         buf.extend(chunk)
-                        for frame in extract_wrapped_frames(buf):
+                        for frame, crc_ok in extract_wrapped_frames(buf):
+                            if not crc_ok:
+                                continue
                             code = frame[0]
                             value = frame[1] | (frame[2] << 8)
                             if code == BRIDGE_HELLO_ACK_CODE and value == BRIDGE_HELLO_VALUE:
@@ -699,6 +717,12 @@ def main() -> None:
                     rudder_pct = (rudder_angle + rudder_range) / (2.0 * rudder_range) * 100.0
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
                     ok = ok and remote_send(remote_sock, f"RDR_PCT {rudder_pct:.1f}")
+                if bstate.nano_comms_crit:
+                    ok = ok and remote_send(remote_sock, "COMMS CRIT")
+                elif bstate.nano_comms_warn:
+                    ok = ok and remote_send(remote_sock, f"COMMS WARN {bstate.nano_err_window}")
+                else:
+                    ok = ok and remote_send(remote_sock, "COMMS OK")
                 if not ok:
                     log.warning("TCP remote: send failed during telemetry, disconnecting")
                     handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
@@ -749,10 +773,18 @@ def main() -> None:
                     del pilot_buf[0]
                     relay_drop += 1
 
-            # Log relay stats every 30 s
+            # Log relay stats every 30 s (reset counters each window)
             if relay_good + relay_drop > 0 and (now - relay_log_ts) >= 30.0:
-                log.info("pypilot relay stats: %d forwarded, %d bytes dropped",
-                         relay_good, relay_drop)
+                total    = relay_good + relay_drop
+                drop_pct = relay_drop / total * 100.0
+                if drop_pct > 5.0:
+                    log.warning("pypilot relay: %.1f%% byte drop rate (%d/%d) — possible upstream issue",
+                                drop_pct, relay_drop, total)
+                else:
+                    log.info("pypilot relay stats: %d forwarded, %d bytes dropped (%.1f%%)",
+                             relay_good, relay_drop, drop_pct)
+                relay_good   = 0
+                relay_drop   = 0
                 relay_log_ts = now
 
         # ================================================================
@@ -769,7 +801,12 @@ def main() -> None:
                       data_from_nano.hex())
             nano_buf.extend(data_from_nano)
 
-            for f in extract_wrapped_frames(nano_buf):
+            for f, crc_ok in extract_wrapped_frames(nano_buf):
+                if not crc_ok:
+                    log.warning("Nano->bridge CRC error: frame=%s expected=0x%02X got=0x%02X",
+                                f.hex(), crc8_msb(f[:3]), f[3])
+                    continue  # drop corrupt frame — do not forward to pypilot
+
                 code  = f[0]
                 value = f[1] | (f[2] << 8)
 
@@ -835,12 +872,39 @@ def main() -> None:
                         log.error("Button event error: %s", e)
 
                 elif code == FLAGS_CODE:
-                    # Relay Nano fault flags to remote (remote can display fault indicators)
+                    # Parse comms fault bits (bridge-side detection plane)
+                    bstate.nano_comms_warn = bool(value & FLAG_COMMS_WARN)
+                    bstate.nano_comms_crit = bool(value & FLAG_COMMS_CRIT)
+
+                    # Auto-disengage AP on CRITICAL comms fault
+                    if bstate.nano_comms_crit and not bstate.comms_disengage_sent:
+                        set_q.put(("ap.enabled", False))
+                        with plock:
+                            pstate.ap_enabled = False
+                        if bstate.mode == MODE_AP:
+                            bstate.mode = MODE_IDLE
+                        bstate.comms_disengage_sent = True
+                        log.warning("COMMS CRITICAL: auto-disengage AP (Nano flags=0x%04X)", value)
+
+                    # Clear disengage latch once comms fully recovers
+                    if not bstate.nano_comms_warn and not bstate.nano_comms_crit:
+                        bstate.comms_disengage_sent = False
+
+                    # Relay flags to remote
                     if remote_sock is not None:
                         remote_send(remote_sock, f"FLAGS {value}")
 
                 elif code == BUZZER_STATE_CODE:
                     bstate.nano_buzzer_on = (value != 0)
+
+                elif code == COMMS_DIAG_CODE:
+                    bstate.nano_err_window  = value & 0xFF
+                    bstate.nano_crit_consec = (value >> 8) & 0xFF
+                    if bstate.nano_err_window > 0:
+                        log.info("Nano comms diag: %d errors/10s, %d consecutive CRIT seconds",
+                                 bstate.nano_err_window, bstate.nano_crit_consec)
+                    else:
+                        log.debug("Nano comms diag: clean (0 errors/10s)")
 
         # ================================================================
         # 6. TCP remote: accept new connections / handle existing client

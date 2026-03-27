@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B12";
-const uint16_t INNOPILOT_BUILD_NUM = 12;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B15";
+const uint16_t INNOPILOT_BUILD_NUM = 15;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -244,6 +244,8 @@ enum {
   MAX_RUDDER_FAULT    = 0x0200,   // port end
   CURRENT_RANGE       = 0x0400,
   BAD_FUSES           = 0x0800,
+  COMMS_WARN_FAULT    = 0x1000,  // error rate elevated (>= 5 errors in 10-second window)
+  COMMS_CRIT_FAULT    = 0x2000,  // error rate unsafe (>= 15/10s held 3s) — AP auto-disengaged
   REBOOTED            = 0x8000
 };
 
@@ -286,6 +288,25 @@ uint8_t  bridge_magic_state = 0;
 uint16_t rx_good_count   = 0;  // CRC-valid frames processed
 uint16_t rx_crc_err_count = 0;  // CRC mismatches
 uint16_t rx_sync_count   = 0;  // frames discarded during initial sync
+
+// ---- Comms-fault rate detection (sliding 10-second window) ----
+const uint8_t  COMMS_DIAG_CODE      = 0xEC;    // Nano->Bridge: lo=err_window_sum, hi=crit_consec_s
+const uint8_t  COMMS_ERR_BUCKETS    = 10;      // 10 x 1-second buckets = 10-second window
+const uint8_t  COMMS_WARN_THRESH    = 5;       // errors in window to enter WARN state
+const uint8_t  COMMS_CRIT_THRESH    = 15;      // errors in window to enter CRITICAL state
+const uint8_t  COMMS_CRIT_HOLD_S    = 3;       // consecutive seconds above CRIT before disengage
+const unsigned long COMMS_BUCKET_MS = 1000UL;
+
+uint8_t       err_buckets[COMMS_ERR_BUCKETS];  // per-second error count (circular buffer)
+uint8_t       err_bucket_idx    = 0;           // index of current bucket
+unsigned long err_bucket_ms     = 0;           // start time of current bucket
+uint8_t       err_window_sum    = 0;           // cached sum of all 10 buckets
+uint8_t       crit_consec_s     = 0;           // consecutive seconds above CRIT threshold
+
+bool          comms_warn_active      = false;
+bool          comms_crit_active      = false;
+bool          comms_fault_disengaged = false;  // true after autonomous AP disengage on CRIT
+bool          comms_fault_silenced   = false;  // true after user silences comms buzzer via PTM
 
 // ---- State / telemetry ----
 uint16_t flags            = REBOOTED;   // reported once then cleared
@@ -402,6 +423,43 @@ void send_frame(uint8_t code, uint16_t value) {
   Serial.write(BRIDGE_MAGIC2);
   Serial.write(body, 3);
   Serial.write(c);
+}
+
+// ---- Comms-fault sliding-window helpers ----
+
+// Record one CRC error into the current 1-second bucket.
+void comms_err_record() {
+  if (err_buckets[err_bucket_idx] < 255) {
+    err_buckets[err_bucket_idx]++;
+    if (err_window_sum < 255) err_window_sum++;
+  }
+}
+
+// Advance the circular bucket window every 1 second.
+// Also maintains crit_consec_s (consecutive seconds above CRIT threshold).
+void comms_err_bucket_tick(unsigned long now) {
+  if (err_bucket_ms == 0) {
+    // First call: initialise (global array is already zero-initialised)
+    err_bucket_ms = now;
+    return;
+  }
+  while (now - err_bucket_ms >= COMMS_BUCKET_MS) {
+    err_bucket_ms += COMMS_BUCKET_MS;
+    // Move to next slot: subtract outgoing bucket then zero it
+    err_bucket_idx = (err_bucket_idx + 1) % COMMS_ERR_BUCKETS;
+    if (err_window_sum >= err_buckets[err_bucket_idx]) {
+      err_window_sum -= err_buckets[err_bucket_idx];
+    } else {
+      err_window_sum = 0;
+    }
+    err_buckets[err_bucket_idx] = 0;
+    // Evaluate CRIT hold counter once per second
+    if (err_window_sum >= COMMS_CRIT_THRESH) {
+      if (crit_consec_s < 255) crit_consec_s++;
+    } else {
+      crit_consec_s = 0;
+    }
+  }
 }
 
 uint16_t read_adc_avg(uint8_t pin, uint8_t samples) {
@@ -679,6 +737,35 @@ void oled_draw() {
         display.setCursor(0, 2); display.clearToEOL();
         display.setCursor(0, 3); display.clearToEOL();
       }
+    } else if (comms_crit_active && !comms_fault_silenced) {
+      // COMMS CRITICAL: flash 2X "!COMMS ERR!" every 400ms
+      static bool cf_vis = true;
+      static unsigned long cf_flash_ms = 0;
+      if (now - cf_flash_ms >= 400UL) {
+        cf_flash_ms = now;
+        cf_vis = !cf_vis;
+      }
+      if (cf_vis) {
+        display.set2X();
+        const char *msg = "!COMMS ERR!";
+        int16_t x = (SCREEN_WIDTH - (int16_t)strlen(msg) * 12) / 2;
+        if (x < 0) x = 0;
+        display.setCursor(x, 2);
+        display.print(msg);
+        display.clearToEOL();
+        display.set1X();
+      } else {
+        display.setCursor(0, 2); display.clearToEOL();
+        display.setCursor(0, 3); display.clearToEOL();
+      }
+    } else if (comms_warn_active) {
+      // COMMS WARN: static 1X error rate summary
+      display.setCursor(0, 2);
+      char wbuf[22];
+      snprintf(wbuf, sizeof(wbuf), "?Comms:%u err/10s", err_window_sum);
+      display.print(wbuf);
+      display.clearToEOL();
+      display.setCursor(0, 3); display.clearToEOL();
     } else if (ap_pressed_warn_active) {
       // AP-pressed warning: 1X "?AP Pressed?" (no flashing)
       display.setCursor(0, 2);
@@ -1393,12 +1480,15 @@ void loop() {
 
   if (ptm_edge) {
     // Two-press STOP: first press silences active alarm if any; second (or first if no alarm) is full stop
-    bool alarm_was_active = (steer_loss_active && !steer_loss_silenced) || ap_pressed_warn_active;
+    bool alarm_was_active = (steer_loss_active && !steer_loss_silenced)
+                          || ap_pressed_warn_active
+                          || (comms_crit_active && !comms_fault_silenced);
 
     if (alarm_was_active) {
       // First press: silence alarm only, AP stays engaged
       steer_loss_silenced    = true;
       ap_pressed_warn_active = false;
+      comms_fault_silenced   = true;
       show_overlay("SIL");
     } else {
       // Full emergency stop
@@ -1485,7 +1575,7 @@ if (!ap_engaged && !remote_manual_active) {
     flags &= ~OVERTEMP_FAULT;
   }
 
-  // Buzzer logic (priority: steer_loss > hw_fault > ap_warn > silent)
+  // Buzzer logic (priority: steer_loss > hw_fault > comms_fault > ap_warn > silent)
   bool hw_alarm_active   = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
   bool hw_alarm_silenced = pi_fault_alarm_silenced;
   bool buzzer_on = false;
@@ -1508,6 +1598,15 @@ if (!ap_engaged && !remote_manual_active) {
       hw_buzz_on = !hw_buzz_on;
     }
     buzzer_on = hw_buzz_on;
+  } else if (comms_crit_active && !comms_fault_silenced) {
+    // Slow 500ms on/off (1 Hz) for comms fault — distinguishable from rapid 100ms hw alarm
+    static unsigned long cf_buzz_last = 0;
+    static bool cf_buzz_on = false;
+    if (now - cf_buzz_last >= 500UL) {
+      cf_buzz_last = now;
+      cf_buzz_on = !cf_buzz_on;
+    }
+    buzzer_on = cf_buzz_on;
   } else if (ap_pressed_warn_active && (now < ap_warn_beep_end_ms)) {
     // Single 200ms beep for AP-pressed warning
     buzzer_on = true;
@@ -1519,6 +1618,37 @@ if (!ap_engaged && !remote_manual_active) {
   if (buzzer_on != last_buzzer_state) {
     last_buzzer_state = buzzer_on;
     send_frame(BUZZER_STATE_CODE, buzzer_on ? 1 : 0);
+  }
+
+  // ---- Comms-fault rate evaluation ----
+  comms_err_bucket_tick(now);
+
+  if (err_window_sum >= COMMS_CRIT_THRESH && crit_consec_s >= COMMS_CRIT_HOLD_S) {
+    comms_warn_active = true;
+    comms_crit_active = true;
+  } else if (err_window_sum >= COMMS_WARN_THRESH) {
+    comms_warn_active = true;
+    comms_crit_active = false;
+  } else {
+    // Rate cleared: reset latches so next fault re-arms fully
+    if (comms_warn_active || comms_crit_active) {
+      comms_fault_disengaged = false;
+      comms_fault_silenced   = false;
+    }
+    comms_warn_active = false;
+    comms_crit_active = false;
+  }
+
+  if (comms_warn_active) flags |= COMMS_WARN_FAULT; else flags &= ~COMMS_WARN_FAULT;
+  if (comms_crit_active) flags |= COMMS_CRIT_FAULT; else flags &= ~COMMS_CRIT_FAULT;
+
+  // Autonomous AP disengage on CRITICAL (Nano-side safety plane, ~0ms latency)
+  if (comms_crit_active && !comms_fault_disengaged) {
+    ap_enabled_remote      = false;
+    flags                 &= ~ENGAGED;
+    last_command_val       = 1000;  // neutral
+    ap_display             = false;
+    comms_fault_disengaged = true;
   }
 
   if (pi_fault || vin_low_fault || vin_high_fault) {
@@ -1574,6 +1704,7 @@ if (!ap_engaged && !remote_manual_active) {
         flags |= INVALID;
         in_sync_count = 0;
         rx_crc_err_count++;
+        comms_err_record();  // feed sliding-window rate detector
       }
 
       sync_b = 0;
@@ -1635,6 +1766,14 @@ if (!ap_engaged && !remote_manual_active) {
       send_frame(CONTROLLER_TEMP_CODE, (uint16_t)scaled);
     }
     last_temp_ms = now;
+  }
+
+  static unsigned long last_comms_diag_ms = 0;
+  if (now - last_comms_diag_ms >= 1000UL) {
+    // Pack: low byte = err_window_sum, high byte = crit_consec_s
+    uint16_t diag = (uint16_t)err_window_sum | ((uint16_t)crit_consec_s << 8);
+    send_frame(COMMS_DIAG_CODE, diag);
+    last_comms_diag_ms = now;
   }
 
   // --- Motor + clutch control with limit logic ---
