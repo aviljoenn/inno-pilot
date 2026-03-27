@@ -976,7 +976,16 @@ void oled_draw() {
     display.print(rudbar);
     display.clearToEOL();
   }
-  display.setCursor(0, 6); display.clearToEOL();
+  // --- Row 6: raw A2 ADC value (rudder pot), centre-justified ---
+  {
+    int a2_raw = analogRead(RUDDER_PIN);
+    char buf[8];
+    snprintf(buf, sizeof(buf), "A2:%d", a2_raw);
+    int16_t tw = (int16_t)strlen(buf) * 6;
+    display.setCursor((SCREEN_WIDTH - tw) / 2, 6);
+    display.print(buf);
+    display.clearToEOL();
+  }
 }
 
 bool oled_try_init(bool allow_blocking_splash) {
