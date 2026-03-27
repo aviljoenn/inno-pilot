@@ -6,6 +6,13 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously.
 
 ## [Unreleased]
 
+## [v0.2.0_B21] — 2026-03-27 — OLED Fault Area Moved to Rows 1-2, Helm Always at Row 3
+
+### Changed
+- **Nano**: All fault/warning messages moved from rows 2-3 to rows 1-2 — 2X messages span rows 1+2, 1X messages use row 1
+- **Nano**: Helm field (row 3) is now always drawn unconditionally — `row3_taken` guard removed entirely
+- **Bridge**: Build bumped to B21 to match Nano
+
 ## [v0.2.0_B20] — 2026-03-27 — OLED Layout Compaction: Remove Diagnostics Row, Move Helm/Cmd/Rudder Up
 
 ### Changed

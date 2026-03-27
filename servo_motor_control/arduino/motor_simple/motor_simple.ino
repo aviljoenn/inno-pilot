@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v0.2.0_B20";
-const uint16_t INNOPILOT_BUILD_NUM = 20;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v0.2.0_B21";
+const uint16_t INNOPILOT_BUILD_NUM = 21;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -678,7 +678,7 @@ void oled_draw() {
     }
     display.clearToEOL();
 
-    // --- Row 1: removed — version management by exception (mismatch shown in rows 2-3) ---
+    // --- Row 1: fault/warning area — cleared on state change; fault section overwrites each frame ---
     display.setCursor(0, 1);
     display.clearToEOL();
   }
@@ -701,12 +701,9 @@ void oled_draw() {
     }
   }
 
-  // row3_taken: set true whenever a fault/overlay actively occupies row 3, so the
-  // online Helm draw (row 3) is suppressed for that draw cycle.
-  bool row3_taken = false;
-
-  // --- Rows 2-3: fault/warning display ---
+  // --- Rows 1-2: fault/warning display ---
   // Priority: steer_loss > hw_fault > ver_mismatch > comms_crit > comms_warn > rud_overshoot > ap_warn > overlay
+  // 2X messages span rows 1-2; 1X messages use row 1 only. Row 3 is always free for Helm.
   {
     bool any_hw_fault = pi_fault || (flags & OVERTEMP_FAULT) || vin_low_fault || vin_high_fault;
     bool hw_fault_shown = any_hw_fault && !pi_fault_alarm_silenced;
@@ -729,14 +726,13 @@ void oled_draw() {
         const char *msg = "!STEER LOSS";
         int16_t x = (SCREEN_WIDTH - (int16_t)strlen(msg) * 12) / 2;
         if (x < 0) x = 0;
-        display.setCursor(x, 2);
+        display.setCursor(x, 1);
         display.print(msg);
         display.clearToEOL();
         display.set1X();
-        row3_taken = true;
       } else {
+        display.setCursor(0, 1); display.clearToEOL();
         display.setCursor(0, 2); display.clearToEOL();
-        display.setCursor(0, 3); display.clearToEOL();
       }
     } else if (hw_fault_shown) {
       // Hardware fault: flash 2X message every 400ms
@@ -757,14 +753,13 @@ void oled_draw() {
         display.set2X();
         int16_t x = (SCREEN_WIDTH - (int16_t)strlen(msg) * 12) / 2;
         if (x < 0) x = 0;
-        display.setCursor(x, 2);
+        display.setCursor(x, 1);
         display.print(msg);
         display.clearToEOL();
         display.set1X();
-        row3_taken = true;
       } else {
+        display.setCursor(0, 1); display.clearToEOL();
         display.setCursor(0, 2); display.clearToEOL();
-        display.setCursor(0, 3); display.clearToEOL();
       }
     } else if (bridge_build_valid && bridge_build_num != INNOPILOT_BUILD_NUM) {
       // Version mismatch: flash 1X warning — all components must run the same build
@@ -772,18 +767,17 @@ void oled_draw() {
       static unsigned long vm_flash_ms = 0;
       if (now - vm_flash_ms >= 500UL) { vm_flash_ms = now; vm_vis = !vm_vis; }
       if (vm_vis) {
-        display.setCursor(0, 2);
+        display.setCursor(0, 1);
         display.print(F("!VER MISMATCH!"));
         display.clearToEOL();
         char vmbuf[22];
         snprintf(vmbuf, sizeof(vmbuf), "Pi:B%u Nano:B%u", bridge_build_num, INNOPILOT_BUILD_NUM);
-        display.setCursor(0, 3);
+        display.setCursor(0, 2);
         display.print(vmbuf);
         display.clearToEOL();
-        row3_taken = true;
       } else {
+        display.setCursor(0, 1); display.clearToEOL();
         display.setCursor(0, 2); display.clearToEOL();
-        display.setCursor(0, 3); display.clearToEOL();
       }
     } else if (comms_crit_active && !comms_fault_silenced) {
       // COMMS CRITICAL: flash 2X "!COMMS ERR!" every 400ms
@@ -798,51 +792,49 @@ void oled_draw() {
         const char *msg = "!COMMS ERR!";
         int16_t x = (SCREEN_WIDTH - (int16_t)strlen(msg) * 12) / 2;
         if (x < 0) x = 0;
-        display.setCursor(x, 2);
+        display.setCursor(x, 1);
         display.print(msg);
         display.clearToEOL();
         display.set1X();
-        row3_taken = true;
       } else {
+        display.setCursor(0, 1); display.clearToEOL();
         display.setCursor(0, 2); display.clearToEOL();
-        display.setCursor(0, 3); display.clearToEOL();
       }
     } else if (comms_warn_active) {
       // COMMS WARN: static 1X error rate summary
-      display.setCursor(0, 2);
+      display.setCursor(0, 1);
       char wbuf[22];
       snprintf(wbuf, sizeof(wbuf), "?Comms:%u err/10s", err_window_sum);
       display.print(wbuf);
       display.clearToEOL();
-      display.setCursor(0, 3); display.clearToEOL();
+      display.setCursor(0, 2); display.clearToEOL();
     } else if (rudder_overshoot_active) {
       // Rudder exceeds soft limits: static 1X warning
-      display.setCursor(0, 2);
+      display.setCursor(0, 1);
       display.print(F("?Rud>Limit"));
       display.clearToEOL();
-      display.setCursor(0, 3); display.clearToEOL();
+      display.setCursor(0, 2); display.clearToEOL();
     } else if (ap_pressed_warn_active) {
       // AP-pressed warning: 1X "?AP Pressed?" (no flashing)
-      display.setCursor(0, 2);
+      display.setCursor(0, 1);
       display.print(F("?AP Pressed?"));
       display.clearToEOL();
-      display.setCursor(0, 3); display.clearToEOL();
+      display.setCursor(0, 2); display.clearToEOL();
     } else if (overlay_active && (now - overlay_start_ms < OVERLAY_DURATION_MS)) {
-      // Overlay (big transient button feedback) on rows 2-3
+      // Overlay (big transient button feedback) on rows 1-2
       display.set2X();
       uint8_t len = strlen(overlay_text);
       int16_t x = (SCREEN_WIDTH - (int16_t)len * 12) / 2;
       if (x < 0) x = 0;
-      display.setCursor(x, 2);
+      display.setCursor(x, 1);
       display.print(overlay_text);
       display.clearToEOL();
       display.set1X();
-      row3_taken = true;
     } else {
       if (!overlay_active || (now - overlay_start_ms >= OVERLAY_DURATION_MS)) {
         overlay_active = false;
+        display.setCursor(0, 1); display.clearToEOL();
         display.setCursor(0, 2); display.clearToEOL();
-        display.setCursor(0, 3); display.clearToEOL();
       }
     }
   }
@@ -895,18 +887,15 @@ void oled_draw() {
   // --- Online-only rows ---
 
   // Row 3: Helm mode — HAND (manual jog), AUTO (AP engaged), REMOTE (TCP remote manual)
-  // Guard: row3_taken means a 2X fault message is occupying rows 2-3 this frame.
-  if (!row3_taken) {
-    display.setCursor(0, 3);
-    if (remote_manual_active) {
-      display.print(F("Helm: REMOTE"));
-    } else if (ap_display) {
-      display.print(F("Helm: AUTO"));
-    } else {
-      display.print(F("Helm: HAND"));
-    }
-    display.clearToEOL();
+  display.setCursor(0, 3);
+  if (remote_manual_active) {
+    display.print(F("Helm: REMOTE"));
+  } else if (ap_display) {
+    display.print(F("Helm: AUTO"));
+  } else {
+    display.print(F("Helm: HAND"));
   }
+  display.clearToEOL();
 
   // Row 4: Cmd (left, 3-digit leading zeros) | HDG right-justified (3-digit leading zeros)
   {
