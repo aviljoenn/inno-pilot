@@ -383,6 +383,162 @@ void run_speed_sweep(int8_t dir) {
 }
 
 // ====================================================================
+// Coasting / ramp-down test
+//
+// For each speed (150, 190, 255 PWM), two phases:
+//   Phase A — hard cut at trigger point: measures coast distance.
+//   Phase B — proportional ramp starting coast_counts before trigger:
+//             duty = entry_pwm × (counts_to_target / coast_counts).
+//             Measures stopping error vs target.
+//
+// Reports: PWM | coast | hard_overshoot | ramp_error | improvement
+// Positive error = overshoot, negative = undershoot.
+// ====================================================================
+
+const int  COAST_TRAVEL    = 150;  // counts to drive before cut/ramp trigger
+const uint16_t COAST_SETTLE_MS = 350;  // position stable for this long = stopped
+
+// Poll every 30 ms until position stable for COAST_SETTLE_MS or timeout.
+// Returns the final stable position.
+int wait_for_stop(unsigned long timeout_ms) {
+  int  last     = read_rudder();
+  unsigned long t_stable = millis();
+  unsigned long t_start  = millis();
+  while ((unsigned long)(millis() - t_start) < timeout_ms) {
+    delay(30);
+    int cur = read_rudder();
+    if (abs(cur - last) > 1) {
+      t_stable = millis();
+      last = cur;
+    } else if ((unsigned long)(millis() - t_stable) >= COAST_SETTLE_MS) {
+      break;
+    }
+  }
+  return read_rudder();
+}
+
+void run_coast_test() {
+  const uint8_t TEST_PWMS[] = {150, 190, 255};
+  const uint8_t N  = sizeof(TEST_PWMS) / sizeof(TEST_PWMS[0]);
+  const int8_t  dir = +1;  // STBD — symmetric so one direction is enough
+
+  Serial.println(F("\n=== Coasting / ramp-down test (STBD) ==="));
+  Serial.println(F("Travel per step: " )); Serial.print(COAST_TRAVEL); Serial.println(F(" counts"));
+  Serial.println(F("  PWM  coast  hard_err  ramp_err  improvement"));
+  Serial.println(F("  ---  -----  --------  --------  -----------"));
+
+  for (uint8_t i = 0; i < N; i++) {
+    uint8_t pwm = TEST_PWMS[i];
+
+    // ------------------------------------------------------------------
+    // Phase A: hard cut — drive COAST_TRAVEL counts then cut to 0.
+    //          Measure how far past the trigger the rudder coasts.
+    // ------------------------------------------------------------------
+    if (!return_to_start(CENTRE_ADC)) {
+      Serial.println(F("[ERR] Centre failed, skipping."));
+      continue;
+    }
+    delay(500);
+    int start  = read_rudder();
+    int target = start + COAST_TRAVEL;   // trigger / ideal stop point
+
+    motor_drive(dir, pwm);
+    unsigned long t0 = millis();
+    while ((unsigned long)(millis() - t0) < 6000UL) {
+      int cur = read_rudder();
+      if (cur >= target)                           break;  // reached trigger
+      if (cur >= (RUDDER_STBD_END - LIMIT_MARGIN)) break;  // safety
+    }
+    motor_stop();
+    int stop_hard   = wait_for_stop(2000);
+    int coast_counts = stop_hard - target;
+    if (coast_counts < 0) coast_counts = 0;
+    int hard_err    = stop_hard - target;  // >0 = overshoot
+
+    // ------------------------------------------------------------------
+    // Phase B: proportional ramp.
+    //   Ramp starts coast_counts before target.
+    //   duty = entry_pwm × (target − cur) / coast_counts.
+    //   Motor turns off when duty reaches 0 or rudder passes target.
+    // ------------------------------------------------------------------
+    int ramp_err = 9999;
+    if (coast_counts > 0) {
+      if (!return_to_start(CENTRE_ADC)) {
+        Serial.println(F("[ERR] Centre failed, skipping."));
+        continue;
+      }
+      delay(500);
+      start         = read_rudder();
+      target        = start + COAST_TRAVEL;
+      int ramp_start = target - coast_counts;
+      if (ramp_start <= start) ramp_start = start + 1;
+
+      motor_drive(dir, pwm);   // set direction and full duty
+      t0 = millis();
+      bool ramping = false;
+      while ((unsigned long)(millis() - t0) < 6000UL) {
+        int cur = read_rudder();
+        if (cur >= (RUDDER_STBD_END - LIMIT_MARGIN)) { motor_stop(); break; }
+        if (cur >= target)                             { motor_stop(); break; }
+
+        if (!ramping && cur >= ramp_start) ramping = true;
+
+        if (ramping) {
+          int  dist = target - cur;
+          int  duty = (dist <= 0) ? 0 : (int)((long)pwm * dist / coast_counts);
+          if (duty < 0)   duty = 0;
+          if (duty > pwm) duty = (int)pwm;
+          analogWrite(HBRIDGE_PWM_PIN, (uint8_t)duty);
+          if (duty == 0) break;
+        }
+      }
+      motor_stop();
+      int stop_ramp = wait_for_stop(2000);
+      ramp_err = stop_ramp - target;
+    }
+
+    // ------------------------------------------------------------------
+    // Print result row
+    // ------------------------------------------------------------------
+    Serial.print(F("  "));
+    Serial.print(pwm);
+    Serial.print(F("  "));
+    if (coast_counts < 100) Serial.print(' ');
+    if (coast_counts <  10) Serial.print(' ');
+    Serial.print(coast_counts);
+    Serial.print(F("     "));
+    if (hard_err >= 0) Serial.print('+'); else Serial.print('-');
+    int ah = (hard_err >= 0) ? hard_err : -hard_err;
+    if (ah < 10) Serial.print('0');
+    Serial.print(ah);
+    Serial.print(F("       "));
+    if (ramp_err == 9999) {
+      Serial.print(F("  N/A        N/A"));
+    } else {
+      if (ramp_err >= 0) Serial.print('+'); else Serial.print('-');
+      int ar = (ramp_err >= 0) ? ramp_err : -ramp_err;
+      if (ar < 10) Serial.print('0');
+      Serial.print(ar);
+      Serial.print(F("       "));
+      int improvement = abs(hard_err) - abs(ramp_err);
+      if (improvement > 0) {
+        Serial.print('+'); Serial.print(improvement); Serial.print(F(" better"));
+      } else if (improvement < 0) {
+        Serial.print(improvement); Serial.print(F(" worse"));
+      } else {
+        Serial.print(F("no change"));
+      }
+    }
+    Serial.println();
+    delay(300);
+  }
+
+  Serial.println(F("=== Coast test done ==="));
+  Serial.println(F("Errors in ADC counts (+overshoot / -undershoot)"));
+  return_to_start(CENTRE_ADC);
+}
+
+// ====================================================================
 // Arduino entry points
 // ====================================================================
 
@@ -426,6 +582,9 @@ void setup() {
   run_speed_sweep(+1);     // STBD speed profile
   delay(1000);
   run_speed_sweep(-1);     // PORT speed profile
+  delay(1000);
+
+  run_coast_test();        // coasting + proportional ramp validation
 
   // Safe state
   motor_stop();
