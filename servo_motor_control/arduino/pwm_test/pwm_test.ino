@@ -139,6 +139,28 @@ bool return_to_start(int target_adc) {
 }
 
 // ====================================================================
+// Auto-centre: drive rudder to CENTRE_ADC before each direction test.
+// Uses return_to_start() at RETURN_DUTY.  Fails gracefully if centre
+// is unreachable (limit guard or timeout).
+// ====================================================================
+const int CENTRE_ADC = 512;
+
+bool centre_rudder() {
+  Serial.print(F("[CENTRE] Driving to ADC="));
+  Serial.print(CENTRE_ADC);
+  Serial.print(F(" from ADC="));
+  Serial.println(read_rudder());
+  if (return_to_start(CENTRE_ADC)) {
+    Serial.print(F("[CENTRE] Reached ADC="));
+    Serial.println(read_rudder());
+    delay(500);   // let hydraulics settle at centre
+    return true;
+  }
+  Serial.println(F("[CENTRE] Failed to reach centre — aborting test."));
+  return false;
+}
+
+// ====================================================================
 // Binary search for minimum starting PWM in one direction
 // ====================================================================
 
@@ -149,7 +171,10 @@ void run_direction_test(int8_t dir) {
   Serial.print(label);
   Serial.println(F(" ---"));
 
-  // --- Pre-flight: check mid-travel ---
+  // --- Auto-centre before each test ---
+  if (!centre_rudder()) return;
+
+  // --- Pre-flight: verify we have enough room ---
   int start_adc = read_rudder();
   int room_fwd  = (dir > 0) ? (RUDDER_STBD_END - start_adc)
                              : (start_adc - RUDDER_PORT_END);
@@ -164,7 +189,7 @@ void run_direction_test(int8_t dir) {
   Serial.println(room_rev);
 
   if (room_fwd < MIN_TRAVEL_NEEDED || room_rev < (LIMIT_MARGIN * 2)) {
-    Serial.println(F("[SKIP] Not enough mid-travel room. Move rudder to centre and retry."));
+    Serial.println(F("[SKIP] Not enough mid-travel room after centering."));
     return;
   }
 
