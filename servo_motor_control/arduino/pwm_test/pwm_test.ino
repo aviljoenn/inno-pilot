@@ -398,6 +398,13 @@ void run_speed_sweep(int8_t dir) {
 const int  COAST_TRAVEL    = 150;  // counts to drive before cut/ramp trigger
 const uint16_t COAST_SETTLE_MS = 350;  // position stable for this long = stopped
 
+// ---- Speed measurement ----
+const uint16_t SPEED_DWELL_MS  = 600;  // ms to drive while measuring counts/s
+
+// ---- Reverse-braking test ----
+const uint8_t  BRAKE_THRESHOLD = 5;    // counts: "dead stop" tolerance (±5 counts)
+const uint16_t BRAKE_MAX_MS    = 250;  // max reverse braking duration to try (ms)
+
 // Poll every 30 ms until position stable for settle_ms or timeout.
 // Returns the final stable position.
 // settle_ms defaults to COAST_SETTLE_MS; pass a shorter value for fast pulse checks.
@@ -613,6 +620,73 @@ int measure_min_pulse(uint8_t pwm, int &out_counts) {
   return lo;
 }
 
+// ---- Speed: drive from centre for SPEED_DWELL_MS, return counts/s -----
+int measure_speed(uint8_t pwm) {
+  if (!return_to_start(CENTRE_ADC)) return -1;
+  delay(400);
+  int start = read_rudder();
+  motor_drive(+1, pwm);
+  delay(SPEED_DWELL_MS);
+  motor_stop();
+  delay(150);
+  int end_pos = read_rudder();
+  int delta   = end_pos - start;
+  return (int)((long)delta * 1000L / SPEED_DWELL_MS);
+}
+
+// ---- Reverse-brake overshoot: drive COAST_TRAVEL counts STBD, then apply
+//      full reverse for brake_ms ms immediately at the cut point.
+//      Returns (final_pos - cut_pos): positive = still overshot forward,
+//      negative = overbraked past cut point.
+int measure_brake_overshoot(uint8_t pwm, uint16_t brake_ms) {
+  if (!return_to_start(CENTRE_ADC)) return 9999;
+  delay(400);
+  int start   = read_rudder();
+  int trigger = start + COAST_TRAVEL;
+  int cut_pos = start;
+
+  motor_drive(+1, pwm);
+  unsigned long t0 = millis();
+  while ((unsigned long)(millis() - t0) < 6000UL) {
+    cut_pos = read_rudder();
+    if (cut_pos >= trigger)                           break;
+    if (cut_pos >= (RUDDER_STBD_END - LIMIT_MARGIN)) break;
+  }
+
+  // Apply reverse immediately — no delay between cut and reverse
+  if (brake_ms > 0) {
+    motor_drive(-1, 255);
+    delay(brake_ms);
+  }
+  motor_stop();
+
+  int final_pos = wait_for_stop(2000);
+  return final_pos - cut_pos;
+}
+
+// ---- Binary search for minimum reverse braking time that dead-stops the
+//      rudder within BRAKE_THRESHOLD counts of the cut point.
+//      Returns ms found; -1 if BRAKE_MAX_MS is still insufficient.
+int find_brake_ms(uint8_t pwm) {
+  // Precondition check: BRAKE_MAX_MS must overbrake (go negative)
+  int ov_hi = measure_brake_overshoot(pwm, BRAKE_MAX_MS);
+  if (ov_hi > (int)BRAKE_THRESHOLD) {
+    return -1;  // even max reverse not enough — report as error
+  }
+
+  uint16_t lo = 0, hi = BRAKE_MAX_MS;
+  for (uint8_t iter = 0; iter < 8; iter++) {
+    uint16_t mid = lo + (hi - lo) / 2;
+    int ov = measure_brake_overshoot(pwm, mid);
+    if (ov > (int)BRAKE_THRESHOLD) {
+      lo = mid + 1;  // still overshot — need more reverse
+    } else {
+      hi = mid;      // dead-stopped or overbraked — try less
+    }
+  }
+  return (int)hi;
+}
+
 // ---- Table runner ---------------------------------------------------
 void run_comprehensive_table() {
   // 120, 130, ... 250, 255
@@ -629,8 +703,8 @@ void run_comprehensive_table() {
   Serial.print  (PULSE_MOVE);
   Serial.println(F(" counts"));
   Serial.println(F(""));
-  Serial.println(F("PWM\tcoast\tmin_pulse_ms\tpulse_counts"));
-  Serial.println(F("---\t-----\t------------\t------------"));
+  Serial.println(F("PWM\tcoast\tmin_pulse_ms\tpulse_counts\tspeed_cps\tbrake_ms"));
+  Serial.println(F("---\t-----\t------------\t------------\t---------\t--------"));
 
   for (uint8_t i = 0; i < N; i++) {
     uint8_t pwm = PWMS[i];
@@ -641,6 +715,10 @@ void run_comprehensive_table() {
     int pulse_counts = 0;
     int min_pulse_ms = measure_min_pulse(pwm, pulse_counts);
 
+    int spd_cps = measure_speed(pwm);
+
+    int brk_ms  = find_brake_ms(pwm);
+
     Serial.print(pwm);
     Serial.print(F("\t"));
     Serial.print(coast);
@@ -650,6 +728,12 @@ void run_comprehensive_table() {
     Serial.print(F("\t\t"));
     if (pulse_counts < 0) Serial.print(F("ERR"));
     else                  Serial.print(pulse_counts);
+    Serial.print(F("\t\t"));
+    if (spd_cps < 0)      Serial.print(F("ERR"));
+    else                  Serial.print(spd_cps);
+    Serial.print(F("\t\t"));
+    if (brk_ms < 0)       Serial.print(F("ERR"));
+    else                  Serial.print(brk_ms);
     Serial.println();
 
     delay(200);
@@ -695,8 +779,8 @@ void setup() {
   Serial.println(F("Starting in 2 s..."));
   delay(2000);
 
-  // Previous results (threshold ~91-105 PWM, speed profile) are already known.
-  // This run collects the comprehensive coast + minimum-pulse table only.
+  // Runs the extended characterisation table:
+  //   coast counts, min pulse ms, pulse counts, speed (counts/s), brake ms
   run_comprehensive_table();
 
   // Safe state
