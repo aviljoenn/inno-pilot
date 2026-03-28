@@ -304,6 +304,85 @@ void run_direction_test(int8_t dir) {
 }
 
 // ====================================================================
+// Speed sweep: drive at fixed PWM steps and measure counts/second.
+// One direction only (STBD) is enough to characterise the motor;
+// run with dir=+1 for STBD or dir=-1 for PORT.
+// ====================================================================
+
+// PWM values to sweep — starts above threshold, ends at max.
+const uint8_t SWEEP_PWM[]  = {100, 110, 120, 130, 140, 150, 170, 190, 210, 230, 255};
+const uint8_t SWEEP_N      = sizeof(SWEEP_PWM) / sizeof(SWEEP_PWM[0]);
+
+void run_speed_sweep(int8_t dir) {
+  const char* label = (dir > 0) ? "STBD" : "PORT";
+  Serial.print(F("\n=== Speed sweep: "));
+  Serial.print(label);
+  Serial.println(F(" ==="));
+  Serial.println(F("  PWM  counts/s  amps"));
+  Serial.println(F("  ---  --------  ----"));
+
+  for (uint8_t i = 0; i < SWEEP_N; i++) {
+    uint8_t pwm = SWEEP_PWM[i];
+
+    // Centre before each step
+    if (!return_to_start(CENTRE_ADC)) {
+      Serial.println(F("[WARN] Could not centre — aborting sweep."));
+      return;
+    }
+    delay(400);
+
+    int pre_adc    = read_rudder();
+    int curr_idle  = read_current_adc();
+
+    // Dwell
+    motor_drive(dir, pwm);
+    unsigned long t0 = millis();
+    uint32_t curr_sum = 0;
+    uint16_t curr_cnt = 0;
+    bool limit_hit    = false;
+
+    while ((unsigned long)(millis() - t0) < DWELL_MS) {
+      (void)analogRead(RUDDER_PIN);
+      int a_now = (int)analogRead(RUDDER_PIN);
+      int d_fwd = (dir > 0) ? (RUDDER_STBD_END - a_now) : (a_now - RUDDER_PORT_END);
+      if (d_fwd < LIMIT_MARGIN) { limit_hit = true; break; }
+      (void)analogRead(PIN_CURRENT);
+      curr_sum += (uint32_t)analogRead(PIN_CURRENT);
+      curr_cnt++;
+    }
+    motor_stop();
+    delay(150);
+
+    int post_adc  = read_rudder();
+    int delta     = (dir > 0) ? (post_adc - pre_adc) : (pre_adc - post_adc);
+    int curr_avg  = (curr_cnt > 0) ? (int)(curr_sum / curr_cnt) : curr_idle;
+    float amps    = adc_to_amps(curr_avg);
+
+    // Print row: PWM, counts/s (= delta over DWELL_MS seconds), amps
+    Serial.print(F("  "));
+    if (pwm < 100) Serial.print(' ');
+    Serial.print(pwm);
+    Serial.print(F("  "));
+    if (delta >= 0 && delta < 100) Serial.print(' ');
+    if (delta >= 0 && delta <  10) Serial.print(' ');
+    // delta is already counts over DWELL_MS ms; convert to counts/s
+    int cps = (int)((long)delta * 1000 / DWELL_MS);
+    if (cps >= 0 && cps < 100) Serial.print(' ');
+    if (cps >= 0 && cps <  10) Serial.print(' ');
+    Serial.print(cps);
+    Serial.print(F("       "));
+    int a_int  = (int)amps;
+    int a_frac = (int)((amps - (float)a_int) * 100.0f + 0.5f);
+    Serial.print(a_int); Serial.print('.');
+    if (a_frac < 10) Serial.print('0');
+    Serial.print(a_frac);
+    if (limit_hit) Serial.print(F("  [LIMIT]"));
+    Serial.println();
+  }
+  Serial.println(F("=== Sweep done ==="));
+}
+
+// ====================================================================
 // Arduino entry points
 // ====================================================================
 
@@ -342,6 +421,11 @@ void setup() {
   run_direction_test(+1);  // STBD
   delay(1000);
   run_direction_test(-1);  // PORT
+  delay(1000);
+
+  run_speed_sweep(+1);     // STBD speed profile
+  delay(1000);
+  run_speed_sweep(-1);     // PORT speed profile
 
   // Safe state
   motor_stop();
