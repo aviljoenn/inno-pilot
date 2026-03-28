@@ -101,16 +101,14 @@ void motor_drive(int8_t dir, uint8_t duty) {
   analogWrite(HBRIDGE_PWM_PIN, duty);
 }
 
-// Drive opposite direction at full speed until ADC is back within
-// MOVE_THRESHOLD of target, or RETURN_TIMEOUT_MS expires.
-// Also guards the hard limit in the return direction (prevents overshoot
-// past the far end if start_adc was near that end).
-// Returns true on success, false on timeout or limit guard.
-bool return_to_start(int target_adc, int8_t return_dir) {
-  // Hard limit for the return direction, with same LIMIT_MARGIN clearance.
-  int return_hard_limit = (return_dir > 0) ? (RUDDER_STBD_END - LIMIT_MARGIN)
-                                           : (RUDDER_PORT_END  + LIMIT_MARGIN);
+// Drive toward target_adc at up to RETURN_DUTY, stopping when within
+// MOVE_THRESHOLD counts.  Direction is determined each iteration from the
+// current vs target position, so it chases the target even if the rudder
+// drifted the "wrong" way while the pump was stopped.
+// Guards both hard limits.  Returns true on success, false on timeout/limit.
+const uint8_t RETURN_DUTY = 220;  // slightly below max to reduce overshoot
 
+bool return_to_start(int target_adc) {
   unsigned long t0 = millis();
   while ((unsigned long)(millis() - t0) < RETURN_TIMEOUT_MS) {
     int cur = read_rudder();
@@ -120,15 +118,21 @@ bool return_to_start(int target_adc, int8_t return_dir) {
       delay(200);
       return true;
     }
-    // Limit guard in the return direction — stop rather than crash into end.
-    bool at_return_limit = (return_dir > 0) ? (cur >= return_hard_limit)
-                                            : (cur <= return_hard_limit);
-    if (at_return_limit) {
+    // Figure out which way to drive from current position, not assumed direction.
+    int8_t dir_needed = (cur < target_adc) ? +1 : -1;
+
+    // Limit guards — don't drive past either hard end.
+    if (dir_needed > 0 && cur >= (RUDDER_STBD_END - LIMIT_MARGIN)) {
       motor_stop();
-      Serial.println(F("[WARN] Return hit limit guard — stopping short of target."));
+      Serial.println(F("[WARN] Return hit STBD limit guard."));
       return false;
     }
-    motor_drive(return_dir, 255);
+    if (dir_needed < 0 && cur <= (RUDDER_PORT_END + LIMIT_MARGIN)) {
+      motor_stop();
+      Serial.println(F("[WARN] Return hit PORT limit guard."));
+      return false;
+    }
+    motor_drive(dir_needed, RETURN_DUTY);
   }
   motor_stop();
   return false;
@@ -256,7 +260,7 @@ void run_direction_test(int8_t dir) {
     }
 
     // Return to start position
-    if (!return_to_start(start_adc, -dir)) {
+    if (!return_to_start(start_adc)) {
       Serial.println(F("[WARN] Return-to-start timed out. Position may have drifted."));
     }
     delay(300);  // settle before next iteration
