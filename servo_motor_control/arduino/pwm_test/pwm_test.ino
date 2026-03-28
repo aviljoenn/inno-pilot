@@ -398,9 +398,10 @@ void run_speed_sweep(int8_t dir) {
 const int  COAST_TRAVEL    = 150;  // counts to drive before cut/ramp trigger
 const uint16_t COAST_SETTLE_MS = 350;  // position stable for this long = stopped
 
-// Poll every 30 ms until position stable for COAST_SETTLE_MS or timeout.
+// Poll every 30 ms until position stable for settle_ms or timeout.
 // Returns the final stable position.
-int wait_for_stop(unsigned long timeout_ms) {
+// settle_ms defaults to COAST_SETTLE_MS; pass a shorter value for fast pulse checks.
+int wait_for_stop(unsigned long timeout_ms, uint16_t settle_ms = COAST_SETTLE_MS) {
   int  last     = read_rudder();
   unsigned long t_stable = millis();
   unsigned long t_start  = millis();
@@ -410,7 +411,7 @@ int wait_for_stop(unsigned long timeout_ms) {
     if (abs(cur - last) > 1) {
       t_stable = millis();
       last = cur;
-    } else if ((unsigned long)(millis() - t_stable) >= COAST_SETTLE_MS) {
+    } else if ((unsigned long)(millis() - t_stable) >= settle_ms) {
       break;
     }
   }
@@ -539,6 +540,126 @@ void run_coast_test() {
 }
 
 // ====================================================================
+// Comprehensive characterisation table
+//
+// For each PWM from 120 to 255 in steps of 10 (plus 255), STBD direction:
+//   Col 1: coast counts  — hard cut after COAST_TRAVEL, measure overshoot
+//   Col 2: min pulse ms  — shortest burst that produces >= PULSE_MOVE counts
+//   Col 3: pulse counts  — counts induced by that minimum-duration pulse
+//
+// Output is tab-friendly for pasting into a spreadsheet.
+// ====================================================================
+
+const int PULSE_MOVE = 3;   // counts: threshold for "rudder moved" in pulse test
+
+// ---- Coast measurement (one shot at a fixed travel distance) --------
+int measure_coast(uint8_t pwm) {
+  if (!return_to_start(CENTRE_ADC)) return -1;
+  delay(400);
+  int start  = read_rudder();
+  int target = start + COAST_TRAVEL;
+
+  motor_drive(+1, pwm);
+  unsigned long t0 = millis();
+  while ((unsigned long)(millis() - t0) < 6000UL) {
+    int cur = read_rudder();
+    if (cur >= target)                            break;
+    if (cur >= (RUDDER_STBD_END - LIMIT_MARGIN))  break;
+  }
+  motor_stop();
+  int final_pos   = wait_for_stop(2000);          // long settle: catch full coast
+  return final_pos - target;                       // >0 overshoot, <0 undershoot
+}
+
+// ---- Minimum pulse: binary search on duration (ms) ------------------
+// Returns min duration in ms; sets out_counts to delta at that duration.
+// Averages two confirmatory runs at the found minimum for stability.
+int measure_min_pulse(uint8_t pwm, int &out_counts) {
+  int lo = 5, hi = 300;
+
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+
+    if (!return_to_start(CENTRE_ADC)) { out_counts = -1; return -1; }
+    delay(250);
+    int start = read_rudder();
+
+    motor_drive(+1, pwm);
+    delay(mid);
+    motor_stop();
+
+    int final_pos = wait_for_stop(700, 180);  // short settle: speed up iterations
+    int delta     = final_pos - start;
+
+    if (delta >= PULSE_MOVE) hi = mid;
+    else                     lo = mid + 1;
+  }
+
+  // Confirmatory: run the found minimum twice and average the delta
+  int total = 0;
+  for (uint8_t k = 0; k < 2; k++) {
+    if (!return_to_start(CENTRE_ADC)) break;
+    delay(250);
+    int start = read_rudder();
+    motor_drive(+1, pwm);
+    delay(lo);
+    motor_stop();
+    int fp = wait_for_stop(700, 180);
+    int d  = fp - start;
+    if (d < 0) d = 0;
+    total += d;
+  }
+  out_counts = total / 2;
+  return lo;
+}
+
+// ---- Table runner ---------------------------------------------------
+void run_comprehensive_table() {
+  // 120, 130, ... 250, 255
+  const uint8_t PWMS[] = {
+    120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 255
+  };
+  const uint8_t N = sizeof(PWMS) / sizeof(PWMS[0]);
+
+  Serial.println(F("\n=== Comprehensive PWM table (STBD, hard cut) ==="));
+  Serial.println(F("Coast travel = " ));
+  Serial.print  (COAST_TRAVEL);
+  Serial.println(F(" counts before cut"));
+  Serial.println(F("Pulse move threshold = " ));
+  Serial.print  (PULSE_MOVE);
+  Serial.println(F(" counts"));
+  Serial.println(F(""));
+  Serial.println(F("PWM\tcoast\tmin_pulse_ms\tpulse_counts"));
+  Serial.println(F("---\t-----\t------------\t------------"));
+
+  for (uint8_t i = 0; i < N; i++) {
+    uint8_t pwm = PWMS[i];
+
+    int coast = measure_coast(pwm);
+    if (coast < 0) coast = 0;
+
+    int pulse_counts = 0;
+    int min_pulse_ms = measure_min_pulse(pwm, pulse_counts);
+
+    Serial.print(pwm);
+    Serial.print(F("\t"));
+    Serial.print(coast);
+    Serial.print(F("\t"));
+    if (min_pulse_ms < 0) Serial.print(F("ERR"));
+    else                  Serial.print(min_pulse_ms);
+    Serial.print(F("\t\t"));
+    if (pulse_counts < 0) Serial.print(F("ERR"));
+    else                  Serial.print(pulse_counts);
+    Serial.println();
+
+    delay(200);
+  }
+
+  Serial.println(F("\n=== Table complete ==="));
+  return_to_start(CENTRE_ADC);
+}
+
+// ====================================================================
 // Arduino entry points
 // ====================================================================
 
@@ -574,17 +695,9 @@ void setup() {
   Serial.println(F("Starting in 2 s..."));
   delay(2000);
 
-  run_direction_test(+1);  // STBD
-  delay(1000);
-  run_direction_test(-1);  // PORT
-  delay(1000);
-
-  run_speed_sweep(+1);     // STBD speed profile
-  delay(1000);
-  run_speed_sweep(-1);     // PORT speed profile
-  delay(1000);
-
-  run_coast_test();        // coasting + proportional ramp validation
+  // Previous results (threshold ~91-105 PWM, speed profile) are already known.
+  // This run collects the comprehensive coast + minimum-pulse table only.
+  run_comprehensive_table();
 
   // Safe state
   motor_stop();
