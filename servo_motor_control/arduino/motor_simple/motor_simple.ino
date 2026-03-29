@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B4";
-const uint16_t INNOPILOT_BUILD_NUM = 4;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B5";
+const uint16_t INNOPILOT_BUILD_NUM = 5;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -143,6 +143,25 @@ int8_t manual_dir     = 0;      // -1 = port, +1 = starboard, 0 = none
 // Remote manual mode state (from Bridge via TCP)
 bool     remote_manual_active     = false;  // true when Bridge is in MANUAL mode
 uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full port, 1000=full stbd
+
+// ---- Remote-manual brake state machine ----
+// States: 0 = DRIVING (toward target), 1 = BRAKING (timed reverse pulse), 2 = SETTLED (in deadband)
+enum RemoteManualState : uint8_t { RM_DRIVING = 0, RM_BRAKING = 1, RM_SETTLED = 2 };
+RemoteManualState rm_state         = RM_SETTLED;
+int8_t            rm_brake_dir     = 0;       // direction of brake pulse (-1 or +1)
+unsigned long     rm_brake_start_ms = 0;      // millis() when brake pulse began
+unsigned long     rm_brake_dur_ms  = 0;       // computed brake duration for this pulse
+
+// ---- Rudder speed estimation ----
+// Differentiates smoothed ADC over a ~50 ms window.
+const unsigned long SPEED_WINDOW_MS = 50;
+int           speed_prev_adc  = 511;          // ADC snapshot at start of window
+unsigned long speed_prev_ms   = 0;            // millis() at snapshot
+int16_t       rudder_speed_cps = 0;           // signed: +ve = increasing ADC (stbd)
+
+// Minimum speed (cps) below which we just coast instead of active braking.
+// Below ~60 cps coast distance is within deadband.
+const int16_t BRAKE_MIN_SPEED_CPS = 60;
 // AP-pressed warning (Bridge rejected AP toggle in MANUAL mode)
 bool          ap_pressed_warn_active = false;
 unsigned long ap_pressed_warn_ms     = 0;
@@ -1259,34 +1278,147 @@ void update_motor_from_command() {
     flags &= ~MIN_RUDDER_FAULT;
   }
 
-  // ---- Remote MANUAL mode: bang-bang to ADC target from remote pot ----
+  // ---- Remote MANUAL mode: drive at 255 PWM with active reverse-braking ----
+  //
+  // Speed-aware braking eliminates the coast overshoot that plagued the old
+  // bang-bang controller.  The motor always runs at full duty (255) but a
+  // timed reverse pulse decelerates the pump so it stops near the target
+  // centre.  The 21-count deadband absorbs residual error.
+  //
+  // Brake formula (linear fit to measured coast/speed/brake_ms table):
+  //   brake_ms  = 0.54 * speed_cps + 72
+  //   brake_dist ≈ speed_cps * brake_ms / 2000  (half-speed assumption)
+  //
+  // State machine: RM_DRIVING → RM_BRAKING → RM_SETTLED
+  //   RM_DRIVING : full 255 PWM toward target
+  //   RM_BRAKING : timed reverse pulse running; no re-evaluation until done
+  //   RM_SETTLED : inside deadband, motor off
+  //
   if (remote_manual_active) {
     // Map 0..1000 target to port-end..stbd-end ADC range
     int target_adc = RUDDER_ADC_PORT_END +
       (int)((long)(RUDDER_ADC_STBD_END - RUDDER_ADC_PORT_END) * manual_rud_target_0_1000 / 1000);
-    const int REMOTE_DEADBAND = 15;  // ADC counts
+    const int REMOTE_DEADBAND = 21;  // ADC counts — sized to absorb braking residual
 
-    int8_t dir = 0;
-    if      (a < target_adc - REMOTE_DEADBAND) dir = +1;   // need stbd
-    else if (a > target_adc + REMOTE_DEADBAND) dir = -1;   // need port
+    int error = target_adc - a;      // positive = need to go stbd (increase ADC)
+    int abs_error = (error >= 0) ? error : -error;
 
-    if (dir > 0 && (at_stbd_end || at_stbd_pilot)) dir = 0;
-    if (dir < 0 && (at_port_end || at_port_pilot)) dir = 0;
+    // --- Update rudder speed estimate ---
+    if (now - speed_prev_ms >= SPEED_WINDOW_MS) {
+      int delta_adc = a - speed_prev_adc;
+      unsigned long dt = now - speed_prev_ms;
+      // cps = delta_adc * 1000 / dt  (signed, +ve = moving stbd)
+      rudder_speed_cps = (int16_t)((long)delta_adc * 1000L / (long)dt);
+      speed_prev_adc = a;
+      speed_prev_ms  = now;
+    }
 
-    if (dir > 0) {
-      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-      digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-      analogWrite(HBRIDGE_PWM_PIN, 255);
-    } else if (dir < 0) {
-      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-      digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
-      analogWrite(HBRIDGE_PWM_PIN, 255);
-    } else {
-      analogWrite(HBRIDGE_PWM_PIN, 0);
-      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+    // Absolute speed for brake calculations
+    int16_t abs_speed = (rudder_speed_cps >= 0) ? rudder_speed_cps : -rudder_speed_cps;
+
+    // --- Compute brake parameters from current speed ---
+    // brake_ms = (54 * speed + 50) / 100 + 72   (integer-friendly 0.54*speed + 72)
+    unsigned long est_brake_ms = (unsigned long)((54L * abs_speed + 50) / 100) + 72UL;
+    // brake distance ≈ speed * brake_ms / 2000 counts
+    int est_brake_dist = (int)((long)abs_speed * (long)est_brake_ms / 2000L);
+    if (est_brake_dist < 1) est_brake_dist = 1;
+
+    // --- State machine ---
+    switch (rm_state) {
+
+      case RM_BRAKING: {
+        // Timed reverse pulse in progress — hold until duration expires
+        if (now - rm_brake_start_ms >= rm_brake_dur_ms) {
+          // Brake pulse complete — cut motor
+          analogWrite(HBRIDGE_PWM_PIN, 0);
+          digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+          digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+          // Check where we ended up
+          rm_state = (abs_error <= REMOTE_DEADBAND) ? RM_SETTLED : RM_DRIVING;
+        }
+        // else: keep brake pulse running (pins already set when entering BRAKING)
+        break;
+      }
+
+      case RM_SETTLED: {
+        // In deadband — stay put unless target moves outside
+        if (abs_error > REMOTE_DEADBAND) {
+          rm_state = RM_DRIVING;
+          // fall through to DRIVING below
+        } else {
+          // Motor off, hold position via hydraulic lock
+          analogWrite(HBRIDGE_PWM_PIN, 0);
+          digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+          digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+          break;
+        }
+      }
+      // intentional fall-through from SETTLED when error exceeds deadband
+      // fall through
+
+      case RM_DRIVING: {
+        // Determine drive direction
+        int8_t dir = 0;
+        if      (error > 0) dir = +1;   // need stbd (increase ADC)
+        else if (error < 0) dir = -1;   // need port (decrease ADC)
+
+        // Respect hard and soft limits
+        if (dir > 0 && (at_stbd_end || at_stbd_pilot)) dir = 0;
+        if (dir < 0 && (at_port_end || at_port_pilot)) dir = 0;
+
+        if (dir == 0) {
+          // At limit or exactly on target — stop
+          analogWrite(HBRIDGE_PWM_PIN, 0);
+          digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+          digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+          rm_state = RM_SETTLED;
+          break;
+        }
+
+        // Check if we should transition to braking.
+        // We're moving toward the target; is the distance to target centre
+        // within the estimated braking distance?
+        // Only brake if speed is meaningful (above minimum threshold) AND
+        // we're moving toward the target (not away from it).
+        bool moving_toward = (dir > 0 && rudder_speed_cps > 0) ||
+                             (dir < 0 && rudder_speed_cps < 0);
+
+        if (moving_toward && abs_speed >= BRAKE_MIN_SPEED_CPS &&
+            abs_error <= est_brake_dist) {
+          // Initiate reverse brake pulse
+          rm_brake_dir      = -dir;  // opposite to travel direction
+          rm_brake_dur_ms   = est_brake_ms;
+          rm_brake_start_ms = now;
+          rm_state          = RM_BRAKING;
+
+          // Set H-bridge to brake direction at full duty
+          if (rm_brake_dir > 0) {
+            digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+            digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+          } else {
+            digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+            digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+          }
+          analogWrite(HBRIDGE_PWM_PIN, 255);
+          break;
+        }
+
+        // Not yet at brake point — drive toward target at full duty
+        if (dir > 0) {
+          digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+          digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+        } else {
+          digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+          digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+        }
+        analogWrite(HBRIDGE_PWM_PIN, 255);
+        break;
+      }
     }
     return;
+  } else {
+    // Not in remote-manual mode — reset state machine so next entry starts clean
+    rm_state = RM_SETTLED;
   }
 
   // ---- Manual override branch (AP disengaged) ----
@@ -1474,6 +1606,13 @@ void process_packet() {
       break;
 
     case MANUAL_MODE_CODE:
+      if (value != 0 && !remote_manual_active) {
+        // Entering MANUAL: initialise speed estimator and brake state machine
+        speed_prev_adc    = rudder_adc_smoothed;
+        speed_prev_ms     = millis();
+        rudder_speed_cps  = 0;
+        rm_state          = RM_SETTLED;
+      }
       remote_manual_active = (value != 0);
       if (!remote_manual_active) {
         // Exiting MANUAL: clear steer-loss state
