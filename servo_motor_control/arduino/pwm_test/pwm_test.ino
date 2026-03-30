@@ -123,13 +123,14 @@ static void wait_for_btn3() {
   delay(BTN_DEBOUNCE_MS);
 }
 
-// ---- Interactive test targets ----
-// Evenly spaced from centre (ADC 512) toward each end (LIMIT_MARGIN = 60 counts).
-// Step ≈ 150 ADC counts; three targets per direction gives good coverage.
-#define N_TARGETS  3
-#define N_REPEATS  3
-const int STBD_TARGETS[N_TARGETS] = { 662, 812, 912 };  // +150, +300, +400 from centre
-const int PORT_TARGETS[N_TARGETS] = { 362, 212, 112 };  // -150, -300, -400 from centre
+// ---- Interactive test parameters ----
+// 6 runs total (3 STBD + 3 PORT), direction toggles after each run.
+// Each run starts from wherever the rudder stopped after the previous run.
+// Travel distance is fixed at TRAVEL_COUNTS; must exceed MIN_TRAVEL_COUNTS
+// (40% of usable ADC range 61..962 = 901 counts → 360 counts minimum).
+#define N_RUNS  6
+const int TRAVEL_COUNTS     = 450;  // 50% of usable range per run (~enough to show coast clearly)
+const int MIN_TRAVEL_COUNTS = 360;  // 40% floor — warn user if less is available
 
 // ---- Per-run result ----
 #endif  // RUN_INTERACTIVE_TEST
@@ -819,14 +820,15 @@ void run_comprehensive_table() {
 // Interactive target test
 //
 // Algorithm: hard-cut (worst-case baseline)
-//   - Centre rudder at ADC 512 before each run.
-//   - Drive at 255 PWM in target direction.
+//   - Drive at 255 PWM from current rudder position.
 //   - Hard cut (motor_stop) the instant the rudder ADC crosses the target.
 //   - Wait for rudder to coast to a stop; record final position.
+//   - No auto-centring: each run starts where the previous one ended.
 //
-// Targets (from centre, step 150 cts): STBD 662/812/912, PORT 362/212/112.
-// Sequence: 3 reps × (3 STBD + 3 PORT) = 18 runs total.
-// OLED shows: waiting screen → centering → driving (static) → result.
+// Sequence: 6 runs, direction toggles STBD/PORT/STBD/PORT/STBD/PORT.
+//   Target = current_pos + dir × 450 cts (clamped to safety limits).
+//   Travel ≥ 40% of usable range (360 of 901 cts); OLED warns if short.
+// OLED shows: waiting screen (from/to/dist) → driving (static) → result.
 // B3 button (A6 ladder) confirms GO and advances to next run.
 //
 // Serial output: TSV header + one row per run (copy-paste into spreadsheet).
@@ -835,8 +837,11 @@ void run_comprehensive_table() {
 
 // ---- OLED screens ----
 
-static void oled_show_waiting(int target_adc, int8_t dir, int run_num, int total_runs) {
+static void oled_show_waiting(int start_adc, int target_adc, int8_t dir, int run_num, int total_runs) {
   if (!oled_ok) return;
+  int dist = abs(target_adc - start_adc);
+  bool too_short = (dist < MIN_TRAVEL_COUNTS);
+
   oled.clearDisplay();
   oled.setTextSize(1);
   oled.setTextColor(SSD1306_WHITE);
@@ -844,22 +849,26 @@ static void oled_show_waiting(int target_adc, int8_t dir, int run_num, int total
   oled.setCursor(0, 0);
   oled.print(F("Run "));
   oled.print(run_num);
-  oled.print(F(" / "));
+  oled.print(F("/"));
   oled.print(total_runs);
+  oled.print(dir > 0 ? F("  >>STBD") : F("  <<PORT"));
 
   oled.setCursor(0, 12);
-  oled.print(F("Tgt: "));
-  oled.print(target_adc);
-  oled.print(dir > 0 ? F("  STBD") : F("  PORT"));
+  oled.print(F("From: "));
+  oled.print(start_adc);
 
   oled.setCursor(0, 22);
-  int dist = target_adc - CENTRE_ADC;
-  if (dist >= 0) oled.print('+');
+  oled.print(F("To:   "));
+  oled.print(target_adc);
+
+  oled.setCursor(0, 32);
   oled.print(dist);
-  oled.print(F(" cts from ctr"));
+  oled.print(F(" cts"));
+  if (too_short) oled.print(F(" !SHORT"));
 
   oled.setCursor(0, 54);
-  oled.print(F("B3 = GO"));
+  if (too_short) oled.print(F("REPOSITION/B3 go"));
+  else           oled.print(F("B3 = GO"));
 
   oled.display();
 }
@@ -936,18 +945,14 @@ static void oled_show_result(const TargetRunResult& r, int run_num, int total_ru
 
 // ---- Drive to ADC target, hard cut at trigger point ----
 //
+// Starts from the current rudder position — no auto-centring.
 // The OLED driving screen is shown ONCE before the drive loop starts
 // so the I2C update does not delay the cut-point poll.
-static TargetRunResult drive_to_target_hard_cut(int target_adc, int run_num, int total_runs) {
+static TargetRunResult drive_to_target_hard_cut(int target_adc) {
   TargetRunResult r;
   r.target_adc = target_adc;
+  r.start_adc  = read_rudder();  // start from wherever the rudder currently is
 
-  // Centre first; OLED shows static "Centering..." while return_to_start() runs.
-  oled_show_centering(read_rudder());
-  return_to_start(CENTRE_ADC);
-  delay(500);  // hydraulic settle at centre
-
-  r.start_adc = read_rudder();
   int8_t dir  = (target_adc > r.start_adc) ? +1 : -1;
 
   // Show static driving screen before starting — no OLED updates inside the
@@ -1010,59 +1015,56 @@ static void print_result_row(int run_num, const char* dir_label, const TargetRun
 
 // ---- Main interactive test loop ----
 //
-// Sequence: for each repeat, run all STBD targets then all PORT targets.
-// Each run: show target → wait B3 → centre → drive → show result → wait B3.
+// 6 runs total; direction toggles after each run (STBD/PORT/STBD/PORT/STBD/PORT).
+// Each run starts from wherever the rudder stopped at the end of the previous run.
+// Target = current_pos + dir × TRAVEL_COUNTS, clamped to safety limits.
+// If available travel < MIN_TRAVEL_COUNTS the OLED warns; B3 still proceeds.
 void run_remote_target_test() {
-  const int total_runs = N_TARGETS * N_REPEATS * 2;  // STBD + PORT directions
-  int run_num = 0;
+  const int total_runs = N_RUNS;
+  const int safe_lo    = RUDDER_PORT_END + LIMIT_MARGIN;
+  const int safe_hi    = RUDDER_STBD_END - LIMIT_MARGIN;
 
   Serial.println(F("\n=== Interactive Target Test: hard-cut baseline ==="));
   Serial.println(F("Algorithm: 255 PWM, hard cut at target ADC crossing"));
-  Serial.print  (F("Targets STBD: "));
-  for (uint8_t i = 0; i < N_TARGETS; i++) { Serial.print(STBD_TARGETS[i]); Serial.print(' '); }
-  Serial.println();
-  Serial.print  (F("Targets PORT: "));
-  for (uint8_t i = 0; i < N_TARGETS; i++) { Serial.print(PORT_TARGETS[i]); Serial.print(' '); }
-  Serial.println();
-  Serial.print  (F("Repeats: ")); Serial.println(N_REPEATS);
+  Serial.println(F("Direction: alternates STBD/PORT each run"));
+  Serial.print  (F("Travel per run: ")); Serial.print(TRAVEL_COUNTS); Serial.println(F(" cts from current stop"));
   Serial.println(F(""));
   Serial.println(F("run\tdir\tstart\ttarget\tfinal\tovershoot\tdrive_ms"));
   Serial.println(F("---\t---\t-----\t------\t-----\t---------\t--------"));
 
-  for (uint8_t rep = 0; rep < N_REPEATS; rep++) {
+  for (int run_num = 1; run_num <= total_runs; run_num++) {
+    // Odd runs = STBD (+1), even runs = PORT (-1)
+    int8_t dir = ((run_num % 2) == 1) ? +1 : -1;
 
-    // ---- STBD targets ----
-    for (uint8_t t = 0; t < N_TARGETS; t++) {
-      run_num++;
-      int target = STBD_TARGETS[t];
+    // Compute target from current position; clamp to safe travel range
+    int start   = read_rudder();
+    int raw_tgt = start + (int)dir * TRAVEL_COUNTS;
+    int target  = (raw_tgt < safe_lo) ? safe_lo :
+                  (raw_tgt > safe_hi) ? safe_hi : raw_tgt;
 
-      oled_show_waiting(target, +1, run_num, total_runs);
-      wait_for_btn3();
+    oled_show_waiting(start, target, dir, run_num, total_runs);
 
-      TargetRunResult r = drive_to_target_hard_cut(target, run_num, total_runs);
+    Serial.print(F("[WAIT] Run ")); Serial.print(run_num);
+    Serial.print(dir > 0 ? F(" STBD") : F(" PORT"));
+    Serial.print(F("  from=")); Serial.print(start);
+    Serial.print(F("  to=")); Serial.print(target);
+    Serial.print(F("  dist=")); Serial.println(abs(target - start));
 
-      oled_show_result(r, run_num, total_runs);
-      print_result_row(run_num, "STBD", r);
+    wait_for_btn3();
 
-      // Show result until user confirms they've seen it
-      wait_for_btn3();
-    }
+    // Re-read at the instant of GO in case of hydraulic drift since the
+    // waiting screen was drawn, then recompute target from new start.
+    start   = read_rudder();
+    raw_tgt = start + (int)dir * TRAVEL_COUNTS;
+    target  = (raw_tgt < safe_lo) ? safe_lo :
+              (raw_tgt > safe_hi) ? safe_hi : raw_tgt;
 
-    // ---- PORT targets ----
-    for (uint8_t t = 0; t < N_TARGETS; t++) {
-      run_num++;
-      int target = PORT_TARGETS[t];
+    TargetRunResult r = drive_to_target_hard_cut(target);
 
-      oled_show_waiting(target, -1, run_num, total_runs);
-      wait_for_btn3();
+    oled_show_result(r, run_num, total_runs);
+    print_result_row(run_num, (dir > 0) ? "STBD" : "PORT", r);
 
-      TargetRunResult r = drive_to_target_hard_cut(target, run_num, total_runs);
-
-      oled_show_result(r, run_num, total_runs);
-      print_result_row(run_num, "PORT", r);
-
-      wait_for_btn3();
-    }
+    wait_for_btn3();
   }
 
   Serial.println(F("\n=== Interactive test complete ==="));
