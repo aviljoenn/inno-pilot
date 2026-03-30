@@ -43,7 +43,7 @@
 #include <Arduino.h>
 
 // OLED + button hardware used by all interactive modes
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST) || defined(RUN_REMOTE_CONTROL_TEST)
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
