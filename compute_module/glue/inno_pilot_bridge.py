@@ -239,6 +239,7 @@ class BridgeState:
     nano_crit_consec:     int  = 0       # consecutive seconds above CRIT threshold
     comms_disengage_sent: bool = False   # latch: prevents repeated disengage on same fault
     rct_target:            int  = 500        # last TGT sent to Nano (pct×10, 0-1000)
+    rct_last_rdr_send:   float = 0.0        # monotonic time of last RDR_PCT forward to remote
 
 
 # ===========================================================================
@@ -1143,9 +1144,13 @@ def main() -> None:
                         remote_send(remote_sock, f"RCT_FINAL {value}")
 
                 elif code == RCT_RDR_PCT_CODE:
-                    # Ratify live position: forward as RDR_PCT (0-100) for remote rudder bar
+                    # Ratify live position: throttled to 50 ms (20 Hz) so a fast Nano
+                    # ratify loop (>100 Hz) does not flood the remote TCP connection.
                     if remote_sock is not None:
-                        remote_send(remote_sock, f"RDR_PCT {value / 10.0:.1f}")
+                        now = time.monotonic()
+                        if now - bstate.rct_last_rdr_send >= 0.05:
+                            remote_send(remote_sock, f"RDR_PCT {value / 10.0:.1f}")
+                            bstate.rct_last_rdr_send = now
 
                 elif code == RCT_HZ_CODE:
                     # Ratify loop Hz: forward to remote for display on MODE line

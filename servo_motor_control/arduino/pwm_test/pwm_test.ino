@@ -1960,6 +1960,30 @@ static void oled_rct_ratify_chasing(int target_adc, uint16_t hz) {
   oled.display();
 }
 
+// ---- Ratify entry splash ----
+// Displayed once on entry to ratify mode; OLED is not touched again until mode exits.
+static void oled_rct_ratify_splash() {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+  // Outer border
+  oled.drawRect(0, 0, 128, 64, SSD1306_WHITE);
+  // "REMOTE" in large text, centred  (6 chars × 12 px = 72 px; x = (128-72)/2 = 28)
+  oled.setTextSize(2);
+  oled.setCursor(28, 6);
+  oled.print(F("REMOTE"));
+  // Horizontal divider below large text
+  oled.drawFastHLine(1, 28, 126, SSD1306_WHITE);
+  // "CONTROLLED" in normal text, centred  (10 × 6 = 60 px; x = (128-60)/2 = 34)
+  oled.setTextSize(1);
+  oled.setCursor(34, 33);
+  oled.print(F("CONTROLLED"));
+  // Small exit hint at bottom  (14 × 6 = 84 px; x = (128-84)/2 = 22)
+  oled.setCursor(22, 50);
+  oled.print(F("AUTO sw = exit"));
+  oled.display();
+}
+
 // ---- Adjust mode ----
 // Blocks until a long B3 press (→ TEST) or MANUAL_MODE_CODE=1 (→ RATIFY).
 // On any value change or navigation, saves to EEPROM and reports to bridge.
@@ -2040,8 +2064,8 @@ static RctModeID rct_adjust_mode(RctSettings& s) {
 // receives back-to-back 10 ms pulses (~83 % duty) and runs smoothly when chasing.
 // Direction is re-evaluated after each pulse so overshoot self-corrects immediately.
 static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_target) {
-  // Blank the OLED for the duration of ratify mode.
-  if (oled_ok) { oled.clearDisplay(); oled.display(); }
+  // Show splash on entry; OLED is not touched again while ratify runs.
+  oled_rct_ratify_splash();
 
   uint16_t last_hz = 0;
 
