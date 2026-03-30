@@ -939,7 +939,7 @@ static void run_fine_direction(int start_pos, int8_t dir) {
       motor_drive(dir, 255);
       delay(bms);
       motor_stop();
-      delay(100);          // max 100ms between reps — keeps hydraulics primed
+      delay(250);          // 250ms between reps — keeps hydraulics primed
       int f = read_rudder();
       counts[rep] = f - s;
     }
@@ -971,7 +971,7 @@ static void run_fine_direction(int start_pos, int8_t dir) {
 
 void run_fine_burst_test() {
   Serial.println(F("\n=== Fine Burst Test (15–25 ms, 1 ms steps, 10 reps) ==="));
-  Serial.println(F("PWM=255, hard-cut, 10 reps per step, 100ms between reps, reposition between groups"));
+  Serial.println(F("PWM=255, hard-cut, 10 reps per step, 250ms between reps, reposition between groups"));
   Serial.println(F("STBD: PORT limit start per group.  PORT: STBD limit start per group."));
 
   oled_show_fine_wait();
