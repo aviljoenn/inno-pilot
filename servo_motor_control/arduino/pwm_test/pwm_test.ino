@@ -76,6 +76,16 @@ const uint16_t BRAKE_MAX_MS    = 250;  // max reverse braking duration to try (m
 
 const int PULSE_MOVE = 3;   // counts: threshold for "rudder moved" in pulse test
 
+// ---- Per-run result for interactive test (defined unconditionally so the
+//      Arduino preprocessor can resolve it when generating function prototypes)
+struct TargetRunResult {
+  int           start_adc;
+  int           target_adc;
+  int           final_adc;
+  int           overshoot;     // +ve = overshot past target, -ve = undershot
+  unsigned long drive_ms;      // time from motor-on to hard cut at trigger point
+};
+
 // ====================================================================
 // Interactive test constants (OLED + button + target list)
 // ====================================================================
@@ -122,14 +132,6 @@ const int STBD_TARGETS[N_TARGETS] = { 662, 812, 912 };  // +150, +300, +400 from
 const int PORT_TARGETS[N_TARGETS] = { 362, 212, 112 };  // -150, -300, -400 from centre
 
 // ---- Per-run result ----
-struct TargetRunResult {
-  int           start_adc;
-  int           target_adc;
-  int           final_adc;
-  int           overshoot;     // +ve = overshot past target, -ve = undershot
-  unsigned long drive_ms;      // time from motor-on to hard cut at trigger point
-};
-
 #endif  // RUN_INTERACTIVE_TEST
 
 // ====================================================================
