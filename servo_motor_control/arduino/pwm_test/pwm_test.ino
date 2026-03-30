@@ -82,8 +82,10 @@ struct TargetRunResult {
   int           start_adc;
   int           target_adc;
   int           final_adc;
-  int           overshoot;     // +ve = overshot past target, -ve = undershot
-  unsigned long drive_ms;      // time from motor-on to hard cut at trigger point
+  int           overshoot;       // +ve = overshot past target, -ve = undershot
+  unsigned long drive_ms;        // time from motor-on to settled/cut
+  int16_t       speed_at_brake;  // cps when brake was triggered (0 = no brake / hard-cut)
+  unsigned long brake_ms_used;   // ms of reverse brake applied  (0 = no brake / hard-cut)
 };
 
 // ====================================================================
@@ -122,6 +124,11 @@ static void wait_for_btn3() {
   while (is_btn3()) { delay(20); }
   delay(BTN_DEBOUNCE_MS);
 }
+
+// ---- Algorithm selector ----
+// 0 = hard-cut: motor off the instant target ADC is crossed (worst-case baseline)
+// 1 = speed-aware braking: motor_simple.ino B5 state machine (RM_DRIVING/BRAKING/SETTLED)
+#define TEST_ALGORITHM  1
 
 // ---- Interactive test parameters ----
 // 6 runs total (3 STBD + 3 PORT), direction toggles after each run.
@@ -916,26 +923,33 @@ static void oled_show_result(const TargetRunResult& r, int run_num, int total_ru
   oled.setCursor(0, 0);
   oled.print(F("Run "));
   oled.print(run_num);
-  oled.print(F(" / "));
+  oled.print(F("/"));
   oled.print(total_runs);
 
   oled.setCursor(0, 12);
-  oled.print(F("Tgt:  "));
+  oled.print(F("Tgt:"));
   oled.print(r.target_adc);
-
-  oled.setCursor(0, 22);
-  oled.print(F("Got:  "));
+  oled.print(F("  Got:"));
   oled.print(r.final_adc);
 
-  oled.setCursor(0, 32);
+  oled.setCursor(0, 22);
   oled.print(F("Err: "));
   if (r.overshoot >= 0) oled.print('+');
   oled.print(r.overshoot);
   oled.print(F(" cts"));
 
-  oled.setCursor(0, 42);
-  oled.print(r.drive_ms);
-  oled.print(F(" ms drive"));
+  oled.setCursor(0, 32);
+  if (r.brake_ms_used > 0) {
+    // Speed-brake algo: show brake telemetry
+    oled.print(r.speed_at_brake);
+    oled.print(F("cps "));
+    oled.print(r.brake_ms_used);
+    oled.print(F("ms brk"));
+  } else {
+    // Hard-cut: show drive time
+    oled.print(r.drive_ms);
+    oled.print(F("ms (hard cut)"));
+  }
 
   oled.setCursor(0, 54);
   oled.print(F("B3 = next"));
@@ -994,6 +1008,132 @@ static TargetRunResult drive_to_target_hard_cut(int target_adc) {
   return r;
 }
 
+// ---- Drive to ADC target: speed-aware braking (motor_simple.ino B5 algorithm) ----
+//
+// Faithfully replicates the RM_DRIVING / RM_BRAKING / RM_SETTLED state machine
+// from motor_simple.ino B5.  Runs in a blocking loop; same constants throughout.
+//
+// Constants (copied verbatim from motor_simple.ino B5):
+//   REMOTE_DEADBAND   = 21 ADC counts
+//   BRAKE_MIN_SPEED   = 60 cps
+//   SPEED_WINDOW_MS   = 50 ms
+//   brake_ms formula  = 0.54 × speed_cps + 72  (integer: (54*s+50)/100 + 72)
+//   brake_dist formula = speed_cps × brake_ms / 2000
+static TargetRunResult drive_to_target_speed_brake(int target_adc) {
+  TargetRunResult r = {0, 0, 0, 0, 0, 0, 0};
+  r.target_adc = target_adc;
+  r.start_adc  = read_rudder();
+
+  const int     REMOTE_DEADBAND  = 21;
+  const int16_t BRAKE_MIN_SPEED  = 60;
+  const unsigned long SPEED_WIN  = 50;
+  const unsigned long TIMEOUT    = 12000UL;
+
+  // State machine (mirrors motor_simple.ino globals, but local here)
+  uint8_t       rm_state          = 0;  // 0=DRIVING 1=BRAKING 2=SETTLED
+  int8_t        rm_brake_dir      = 0;
+  unsigned long rm_brake_start_ms = 0;
+  unsigned long rm_brake_dur_ms   = 0;
+
+  int           speed_prev_adc    = r.start_adc;
+  unsigned long speed_prev_ms     = millis();
+  int16_t       rudder_speed_cps  = 0;
+
+  int8_t initial_dir = (target_adc > r.start_adc) ? +1 : -1;
+  oled_show_driving(r.start_adc, target_adc, initial_dir);
+
+  unsigned long t_start = millis();
+
+  while (true) {
+    unsigned long now = millis();
+    int a = read_rudder();
+
+    // Safety hard limits
+    if (a >= (RUDDER_STBD_END - LIMIT_MARGIN) && initial_dir > 0) {
+      motor_stop();
+      Serial.println(F("[WARN] STBD limit guard hit"));
+      break;
+    }
+    if (a <= (RUDDER_PORT_END + LIMIT_MARGIN) && initial_dir < 0) {
+      motor_stop();
+      Serial.println(F("[WARN] PORT limit guard hit"));
+      break;
+    }
+    if ((unsigned long)(now - t_start) > TIMEOUT) {
+      motor_stop();
+      Serial.println(F("[WARN] drive timeout"));
+      break;
+    }
+
+    // --- Speed estimate (50 ms sliding window) ---
+    if (now - speed_prev_ms >= SPEED_WIN) {
+      int delta_adc        = a - speed_prev_adc;
+      unsigned long dt     = now - speed_prev_ms;
+      rudder_speed_cps     = (int16_t)((long)delta_adc * 1000L / (long)dt);
+      speed_prev_adc       = a;
+      speed_prev_ms        = now;
+    }
+
+    int16_t abs_speed = (rudder_speed_cps >= 0) ? rudder_speed_cps : -rudder_speed_cps;
+    int error         = target_adc - a;
+    int abs_error     = (error >= 0) ? error : -error;
+
+    // Brake parameters from current speed
+    unsigned long est_brake_ms   = (unsigned long)((54L * abs_speed + 50) / 100) + 72UL;
+    int           est_brake_dist = (int)((long)abs_speed * (long)est_brake_ms / 2000L);
+    if (est_brake_dist < 1) est_brake_dist = 1;
+
+    // --- State machine ---
+    if (rm_state == 1) {  // RM_BRAKING
+      if (now - rm_brake_start_ms >= rm_brake_dur_ms) {
+        motor_stop();
+        rm_state = (abs_error <= REMOTE_DEADBAND) ? 2 : 0;
+      }
+      // else: brake pulse still running — do nothing, pins already set
+
+    } else if (rm_state == 2) {  // RM_SETTLED
+      if (abs_error > REMOTE_DEADBAND) {
+        rm_state = 0;  // target moved outside deadband — re-drive
+        // fall through to DRIVING below
+      } else {
+        motor_stop();
+        break;  // within deadband, we're done
+      }
+    }
+
+    if (rm_state == 0) {  // RM_DRIVING (also handles fall-through from SETTLED)
+      int8_t dir = (error > 0) ? +1 : (error < 0) ? -1 : 0;
+
+      if (dir == 0 || abs_error <= REMOTE_DEADBAND) {
+        motor_stop();
+        rm_state = 2;
+        break;
+      }
+
+      bool moving_toward = (dir > 0 && rudder_speed_cps > 0) ||
+                           (dir < 0 && rudder_speed_cps < 0);
+
+      if (moving_toward && abs_speed >= BRAKE_MIN_SPEED && abs_error <= est_brake_dist) {
+        // Initiate reverse brake pulse
+        rm_brake_dir      = -dir;
+        rm_brake_dur_ms   = est_brake_ms;
+        rm_brake_start_ms = now;
+        rm_state          = 1;
+        r.speed_at_brake  = abs_speed;   // record for analysis
+        r.brake_ms_used   = est_brake_ms;
+        motor_drive(rm_brake_dir, 255);
+      } else {
+        motor_drive(dir, 255);
+      }
+    }
+  }
+
+  r.drive_ms  = millis() - t_start;
+  r.final_adc = wait_for_stop(2000);
+  r.overshoot = r.final_adc - target_adc;
+  return r;
+}
+
 // ---- Print one TSV result row to serial ----
 static void print_result_row(int run_num, const char* dir_label, const TargetRunResult& r) {
   Serial.print(run_num);
@@ -1010,6 +1150,10 @@ static void print_result_row(int run_num, const char* dir_label, const TargetRun
   Serial.print(r.overshoot);
   Serial.print('\t');
   Serial.print(r.drive_ms);
+  Serial.print('\t');
+  Serial.print(r.speed_at_brake);
+  Serial.print('\t');
+  Serial.print(r.brake_ms_used);
   Serial.println();
 }
 
@@ -1024,13 +1168,18 @@ void run_remote_target_test() {
   const int safe_lo    = RUDDER_PORT_END + LIMIT_MARGIN;
   const int safe_hi    = RUDDER_STBD_END - LIMIT_MARGIN;
 
-  Serial.println(F("\n=== Interactive Target Test: hard-cut baseline ==="));
-  Serial.println(F("Algorithm: 255 PWM, hard cut at target ADC crossing"));
+  Serial.println(F("\n=== Interactive Target Test ==="));
+#if TEST_ALGORITHM == 1
+  Serial.println(F("Algorithm: speed-aware braking (motor_simple.ino B5)"));
+  Serial.println(F("  brake_ms = 0.54*speed_cps + 72,  deadband = 21 cts,  min_speed = 60 cps"));
+#else
+  Serial.println(F("Algorithm: hard-cut baseline (255 PWM, cut at target crossing)"));
+#endif
   Serial.println(F("Direction: alternates STBD/PORT each run"));
   Serial.print  (F("Travel per run: ")); Serial.print(TRAVEL_COUNTS); Serial.println(F(" cts from current stop"));
   Serial.println(F(""));
-  Serial.println(F("run\tdir\tstart\ttarget\tfinal\tovershoot\tdrive_ms"));
-  Serial.println(F("---\t---\t-----\t------\t-----\t---------\t--------"));
+  Serial.println(F("run\tdir\tstart\ttarget\tfinal\tovershoot\tdrive_ms\tspeed_cps\tbrake_ms"));
+  Serial.println(F("---\t---\t-----\t------\t-----\t---------\t--------\t---------\t--------"));
 
   for (int run_num = 1; run_num <= total_runs; run_num++) {
     // Odd runs = STBD (+1), even runs = PORT (-1)
@@ -1059,7 +1208,11 @@ void run_remote_target_test() {
     target  = (raw_tgt < safe_lo) ? safe_lo :
               (raw_tgt > safe_hi) ? safe_hi : raw_tgt;
 
+#if TEST_ALGORITHM == 1
+    TargetRunResult r = drive_to_target_speed_brake(target);
+#else
     TargetRunResult r = drive_to_target_hard_cut(target);
+#endif
 
     oled_show_result(r, run_num, total_runs);
     print_result_row(run_num, (dir > 0) ? "STBD" : "PORT", r);
