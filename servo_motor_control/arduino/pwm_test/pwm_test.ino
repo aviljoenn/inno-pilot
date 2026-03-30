@@ -26,12 +26,17 @@
 //   A6  = Button ladder (B3 = GO / next, same resistor divider as motor_simple.ino)
 
 // ---- Test mode selector ----
-// Comment out to run the automated comprehensive table instead.
-#define RUN_INTERACTIVE_TEST
+// Define exactly one of the three modes:
+//   RUN_BURST_SWEEP_TEST  — automated burst-duration sweep (current)
+//   RUN_INTERACTIVE_TEST  — manual target test with B3 GO button
+//   (neither)             — automated comprehensive table
+#define RUN_BURST_SWEEP_TEST
+//#define RUN_INTERACTIVE_TEST
 
 #include <Arduino.h>
 
-#ifdef RUN_INTERACTIVE_TEST
+// OLED + button hardware used by both interactive modes
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -88,10 +93,20 @@ struct TargetRunResult {
   unsigned long brake_ms_used;   // ms of reverse brake applied  (0 = no brake / hard-cut)
 };
 
+// Per-burst result for RUN_BURST_SWEEP_TEST (defined unconditionally so Arduino
+// preprocessor can resolve it when generating function prototypes)
+struct BurstResult {
+  uint16_t burst_ms;    // programmed burst duration (ms)
+  int8_t   dir;         // +1 = STBD, -1 = PORT
+  int      start_adc;   // ADC at burst start
+  int      final_adc;   // ADC after hard-cut + hydraulic settle
+  int      counts_moved;// signed net displacement (final - start); includes coast
+};
+
 // ====================================================================
-// Interactive test constants (OLED + button + target list)
+// OLED + button — shared by RUN_INTERACTIVE_TEST and RUN_BURST_SWEEP_TEST
 // ====================================================================
-#ifdef RUN_INTERACTIVE_TEST
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
 
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT  64
@@ -125,6 +140,7 @@ static void wait_for_btn3() {
   delay(BTN_DEBOUNCE_MS);
 }
 
+#ifdef RUN_INTERACTIVE_TEST
 // ---- Algorithm selector ----
 // 0 = hard-cut: motor off the instant target ADC is crossed (worst-case baseline)
 // 1 = speed-aware braking: motor_simple.ino B5 state machine (RM_DRIVING/BRAKING/SETTLED)
@@ -138,9 +154,9 @@ static void wait_for_btn3() {
 #define N_RUNS  6
 const int TRAVEL_COUNTS     = 450;  // 50% of usable range per run (~enough to show coast clearly)
 const int MIN_TRAVEL_COUNTS = 360;  // 40% floor — warn user if less is available
+#endif  // RUN_INTERACTIVE_TEST (constants only)
 
-// ---- Per-run result ----
-#endif  // RUN_INTERACTIVE_TEST
+#endif  // RUN_INTERACTIVE_TEST || RUN_BURST_SWEEP_TEST
 
 // ====================================================================
 // Low-level helpers
@@ -840,6 +856,141 @@ void run_comprehensive_table() {
 //
 // Serial output: TSV header + one row per run (copy-paste into spreadsheet).
 // ====================================================================
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
+
+// ---- OLED screens (shared) ----
+
+static void oled_show_centering_screen(int current_adc) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0, 0);  oled.print(F("Centering..."));
+  oled.setCursor(0, 14); oled.print(F("ADC: ")); oled.print(current_adc);
+  oled.print(F(" -> ")); oled.print(CENTRE_ADC);
+  oled.display();
+}
+
+#endif  // RUN_INTERACTIVE_TEST || RUN_BURST_SWEEP_TEST
+
+// ====================================================================
+// Burst sweep test — 24 burst durations x 2 directions, fully automatic
+// ====================================================================
+#ifdef RUN_BURST_SWEEP_TEST
+
+// Burst duration sequence (ms).  Fine steps around the hydraulic cracking
+// threshold (~55 ms at PWM 255); coarser steps below and above.
+static const uint16_t burst_seq[] = {
+   10,  20,  30,  40,
+   45,  50,  55,  60,  65,  70,  75,  80,  85,  90,
+  100, 125, 150, 175, 200, 250, 300, 400, 500, 600
+};
+static const uint8_t N_BURST_STEPS = (uint8_t)(sizeof(burst_seq) / sizeof(burst_seq[0]));
+
+static void oled_show_burst_wait() {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("Burst Sweep Test"));
+  oled.setCursor(0, 12); oled.print(F("PWM=255, hard-cut"));
+  oled.setCursor(0, 24); oled.print(N_BURST_STEPS * 2);
+  oled.print(F(" runs, auto"));
+  oled.setCursor(0, 36); oled.print(F("Centre rudder 1st"));
+  oled.setCursor(0, 54); oled.print(F("B3 = START"));
+  oled.display();
+}
+
+static void oled_show_burst_run(uint16_t bms, int8_t dir, uint8_t run_num) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("Run ")); oled.print(run_num);
+  oled.print(F("/")); oled.print(N_BURST_STEPS * 2);
+  oled.setCursor(0, 14); oled.print(dir > 0 ? F(">> STBD") : F("<< PORT"));
+  oled.setCursor(0, 28); oled.print(bms); oled.print(F(" ms  PWM=255"));
+  oled.setCursor(0, 42); oled.print(F("Running..."));
+  oled.display();
+}
+
+// Execute one hard-cut burst: motor on for burst_ms, hard cut, wait for settle.
+// Returns a BurstResult with net counts_moved (includes hydraulic coast).
+static BurstResult run_single_burst(int8_t dir, uint16_t bms) {
+  BurstResult r;
+  r.burst_ms    = bms;
+  r.dir         = dir;
+  r.start_adc   = read_rudder();
+  motor_drive(dir, 255);
+  delay(bms);
+  motor_stop();
+  r.final_adc   = wait_for_stop(2000);
+  r.counts_moved = r.final_adc - r.start_adc;
+  return r;
+}
+
+static void print_burst_row(const BurstResult& r) {
+  Serial.print(r.burst_ms);
+  Serial.print('\t');
+  Serial.print(r.dir > 0 ? F("STBD") : F("PORT"));
+  Serial.print('\t');
+  Serial.print(r.start_adc);
+  Serial.print('\t');
+  Serial.print(r.final_adc);
+  Serial.print('\t');
+  if (r.counts_moved >= 0) Serial.print('+');
+  Serial.println(r.counts_moved);
+}
+
+void run_burst_sweep_test() {
+  Serial.println(F("\n=== Burst Sweep Test ==="));
+  Serial.println(F("PWM=255, hard-cut, no braking"));
+  Serial.println(F("Returns to ADC=512 between each burst"));
+  Serial.print  (F("Steps: ")); Serial.print(N_BURST_STEPS);
+  Serial.println(F(" burst durations x 2 directions (STBD then PORT)"));
+
+  // Centre rudder before we start
+  oled_show_centering_screen(read_rudder());
+  if (!centre_rudder()) return;
+
+  // Single GO press
+  oled_show_burst_wait();
+  Serial.println(F("Press B3 to start — then hands off..."));
+  wait_for_btn3();
+
+  Serial.println(F("\nburst_ms\tdir\tstart\tfinal\tcounts_moved"));
+  Serial.println(F("--------\t---\t-----\t-----\t------------"));
+
+  uint8_t run_num = 0;
+  for (uint8_t i = 0; i < N_BURST_STEPS; i++) {
+    uint16_t bms = burst_seq[i];
+
+    // STBD burst
+    return_to_start(CENTRE_ADC);
+    delay(300);
+    oled_show_burst_run(bms, +1, ++run_num);
+    BurstResult rs = run_single_burst(+1, bms);
+    print_burst_row(rs);
+
+    // PORT burst
+    return_to_start(CENTRE_ADC);
+    delay(300);
+    oled_show_burst_run(bms, -1, ++run_num);
+    BurstResult rp = run_single_burst(-1, bms);
+    print_burst_row(rp);
+  }
+
+  // Return to centre for safety
+  return_to_start(CENTRE_ADC);
+
+  Serial.println(F("\n=== Burst sweep complete ==="));
+}
+
+#endif  // RUN_BURST_SWEEP_TEST
+
+// ====================================================================
+// Interactive target test — OLED screens (RUN_INTERACTIVE_TEST only)
+// ====================================================================
 #ifdef RUN_INTERACTIVE_TEST
 
 // ---- OLED screens ----
@@ -880,20 +1031,6 @@ static void oled_show_waiting(int start_adc, int target_adc, int8_t dir, int run
   oled.display();
 }
 
-static void oled_show_centering(int current_adc) {
-  if (!oled_ok) return;
-  oled.clearDisplay();
-  oled.setTextSize(1);
-  oled.setTextColor(SSD1306_WHITE);
-  oled.setCursor(0, 0);
-  oled.print(F("Centering..."));
-  oled.setCursor(0, 14);
-  oled.print(F("ADC: "));
-  oled.print(current_adc);
-  oled.print(F(" -> "));
-  oled.print(CENTRE_ADC);
-  oled.display();
-}
 
 static void oled_show_driving(int start_adc, int target_adc, int8_t dir) {
   if (!oled_ok) return;
@@ -1259,23 +1396,32 @@ void setup() {
   pinMode(RUDDER_PIN,  INPUT);
   pinMode(PIN_CURRENT, INPUT);
 
-#ifdef RUN_INTERACTIVE_TEST
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
   // OLED init (non-blocking: if absent or dead, oled_ok stays false)
   oled_ok = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oled_ok) {
     oled.clearDisplay();
     oled.setTextSize(1);
     oled.setTextColor(SSD1306_WHITE);
+#ifdef RUN_BURST_SWEEP_TEST
+    oled.setCursor(0, 0);  oled.println(F("Burst Sweep Test"));
+    oled.setCursor(0, 12); oled.println(F("PWM=255 hard-cut"));
+    oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
+    oled.setCursor(0, 40); oled.println(F("press B3 to begin"));
+#else
     oled.setCursor(0, 0);  oled.println(F("PWM Target Test"));
     oled.setCursor(0, 12); oled.println(F("Hard-cut baseline"));
     oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
     oled.setCursor(0, 40); oled.println(F("press B3 to begin"));
+#endif
     oled.display();
   }
 #endif
 
   Serial.println(F("========================================"));
-#ifdef RUN_INTERACTIVE_TEST
+#ifdef RUN_BURST_SWEEP_TEST
+  Serial.println(F("  PWM Burst Sweep Test"));
+#elif defined(RUN_INTERACTIVE_TEST)
   Serial.println(F("  PWM Target Test — Hard-Cut Baseline"));
 #else
   Serial.println(F("  PWM Motor-Start Threshold Test"));
@@ -1286,7 +1432,9 @@ void setup() {
   Serial.println(F(""));
   Serial.println(F("Ensure rudder is near mid-travel before this runs."));
 
-#ifdef RUN_INTERACTIVE_TEST
+#ifdef RUN_BURST_SWEEP_TEST
+  run_burst_sweep_test();
+#elif defined(RUN_INTERACTIVE_TEST)
   Serial.println(F("Waiting for B3 (GO) to start first run..."));
   run_remote_target_test();
 #else
