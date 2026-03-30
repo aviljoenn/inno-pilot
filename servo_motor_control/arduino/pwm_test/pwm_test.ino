@@ -858,7 +858,7 @@ void run_comprehensive_table() {
 //
 // Serial output: TSV header + one row per run (copy-paste into spreadsheet).
 // ====================================================================
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
 
 // ---- OLED screens (shared) ----
 
