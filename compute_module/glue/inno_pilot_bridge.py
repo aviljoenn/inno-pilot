@@ -739,8 +739,6 @@ def process_remote_line(
 
     elif cmd == "RUD":
         # Rudder target percentage: 0.0 = full port, 100.0 = full stbd
-        if bstate.mode != MODE_MANUAL:
-            return  # only honoured in MANUAL mode
         if len(parts) < 2:
             return
         try:
@@ -750,12 +748,16 @@ def process_remote_line(
             return
         pct = max(0.0, min(100.0, pct))
         target_0_1000 = int(round(pct * 10.0))  # 0-1000
-        bstate.manual_rud_target = target_0_1000
-        send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
-        # Also forward as RCT target so the test sketch sees the remote position live.
-        # User steers to desired position; Nano OLED updates; B3 fires the test.
+        # Always forward as RCT target regardless of bridge mode — the test sketch
+        # uses this to show the live target on the Nano OLED.  This works even when
+        # the bridge is in IDLE (e.g. after restart before MODE MANUAL is re-sent).
         bstate.rct_target = target_0_1000
         send_nano_frame(nano, RCT_TARGET_CODE, target_0_1000)
+        # MANUAL_RUD_TARGET_CODE only applies in MANUAL mode
+        if bstate.mode != MODE_MANUAL:
+            return
+        bstate.manual_rud_target = target_0_1000
+        send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
 
     elif cmd == "TGT":
         # RCT test target: 0.0-100.0 % (0=port limit, 50=midships, 100=stbd limit)
