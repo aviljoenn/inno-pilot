@@ -71,7 +71,7 @@ if hasattr(signal, "SIGUSR1"):
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
 INNOPILOT_VERSION   = "v1.2.0_B5"
-INNOPILOT_BUILD_NUM = 5  # increment with each push during development
+INNOPILOT_BUILD_NUM = 6  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -124,6 +124,36 @@ FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remo
 # Flag bit masks for bridge-side parsing of FLAGS_CODE value
 FLAG_COMMS_WARN   = 0x1000  # error rate elevated (WARN level)
 FLAG_COMMS_CRIT   = 0x2000  # error rate unsafe, AP auto-disengaged (CRITICAL level)
+
+# RCT (Remote Control Test) frame codes — ignored by production motor_simple.ino
+RCT_SETTING_CODE        = 0xEE  # both dirs: HI=setting_index (0-6), LO=uint8 value
+RCT_TARGET_CODE         = 0xF3  # Pi -> Nano: target pct×10 (0-1000; 500 = midships)
+RCT_RESULT_STOP_CODE    = 0xF4  # Nano -> Pi: first_stop_adc after full-power coast
+RCT_RESULT_PULSES_CODE  = 0xF5  # Nano -> Pi: fine pulse count used to reach deadband
+RCT_RESULT_FINAL_CODE   = 0xF6  # Nano -> Pi: final_adc inside (or nearest to) deadband
+
+# RCT settings — stored on Pi as JSON, pushed to Nano on bridge startup
+RCT_SETTINGS_PATH = "/etc/inno-pilot/rct_settings.json"
+
+# Ordered list of setting keys (index must match Nano's RCT_SETTING_NAMES order)
+_RCT_KEYS = [
+    "pwm_max",         # 0
+    "coast_count_max", # 1
+    "pwm_min",         # 2
+    "coast_count_min", # 3
+    "pulse_ms",        # 4
+    "deadband",        # 5
+    "pulse_delay_ms",  # 6
+]
+_RCT_DEFAULTS: dict = {
+    "pwm_max":         255,
+    "coast_count_max":  50,
+    "pwm_min":         160,
+    "coast_count_min":  10,
+    "pulse_ms":         20,
+    "deadband":         20,
+    "pulse_delay_ms":  100,
+}
 
 # Bridge <-> Nano keepalive framing
 BRIDGE_MAGIC1         = 0xA5
@@ -206,6 +236,7 @@ class BridgeState:
     nano_err_window:      int  = 0       # errors in last 10-second window
     nano_crit_consec:     int  = 0       # consecutive seconds above CRIT threshold
     comms_disengage_sent: bool = False   # latch: prevents repeated disengage on same fault
+    rct_target:            int  = 500        # last TGT sent to Nano (pct×10, 0-1000)
 
 
 # ===========================================================================
@@ -432,6 +463,52 @@ def enc_deg10_i16(deg: float) -> int:
     v = int(round(float(deg) * 10.0))
     v = max(-32768, min(32767, v))
     return v & 0xFFFF
+
+
+# ===========================================================================
+# RCT settings helpers
+# ===========================================================================
+
+def load_or_create_rct_settings() -> dict:
+    """Load RCT settings from JSON, creating the file with defaults if absent."""
+    import json
+    if os.path.isfile(RCT_SETTINGS_PATH):
+        try:
+            with open(RCT_SETTINGS_PATH) as fh:
+                data = json.load(fh)
+            # Back-fill any missing keys added in later versions
+            missing = {k: v for k, v in _RCT_DEFAULTS.items() if k not in data}
+            if missing:
+                data.update(missing)
+                _save_rct_settings(data)
+            return data
+        except Exception as exc:
+            log.warning("RCT settings load failed (%s) — recreating with defaults", exc)
+    settings = dict(_RCT_DEFAULTS)
+    _save_rct_settings(settings)
+    log.info("RCT settings created at %s", RCT_SETTINGS_PATH)
+    return settings
+
+
+def _save_rct_settings(settings: dict) -> None:
+    """Write RCT settings dict to JSON (creates parent dir if needed)."""
+    import json
+    os.makedirs(os.path.dirname(RCT_SETTINGS_PATH), exist_ok=True)
+    with open(RCT_SETTINGS_PATH, "w") as fh:
+        json.dump(settings, fh, indent=2)
+    log.info("RCT settings saved to %s", RCT_SETTINGS_PATH)
+
+
+def push_rct_settings_to_nano(nano: "serial.Serial", settings: dict) -> None:
+    """Send all 7 RCT settings to the Nano as individual frames.
+
+    Frame encoding: CODE=RCT_SETTING_CODE, uint16 = (index << 8) | uint8_value.
+    Production motor_simple.ino ignores these frames silently.
+    """
+    for idx, key in enumerate(_RCT_KEYS):
+        val = max(0, min(255, int(settings.get(key, _RCT_DEFAULTS[key]))))
+        send_nano_frame(nano, RCT_SETTING_CODE, (idx << 8) | val)
+    log.info("RCT settings pushed to Nano (%d frames)", len(_RCT_KEYS))
 
 
 # ===========================================================================
@@ -676,6 +753,23 @@ def process_remote_line(
         bstate.manual_rud_target = target_0_1000
         send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
 
+    elif cmd == "TGT":
+        # RCT test target: 0.0-100.0 % (0=port limit, 50=midships, 100=stbd limit)
+        # Forwarded to Nano as RCT_TARGET_CODE (pct×10, 0-1000).
+        # Accepted in any bridge mode — the Nano test sketch decides when to act on it.
+        if len(parts) < 2:
+            return
+        try:
+            pct = float(parts[1])
+        except ValueError:
+            log.warning("Remote TGT: invalid value '%s', ignored", parts[1])
+            return
+        pct = max(0.0, min(100.0, pct))
+        target_0_1000 = int(round(pct * 10.0))
+        bstate.rct_target = target_0_1000
+        send_nano_frame(nano, RCT_TARGET_CODE, target_0_1000)
+        log.info("Remote TGT %.1f%% -> RCT_TARGET_CODE %d", pct, target_0_1000)
+
     else:
         log.warning("Remote: unknown command '%s', ignored", cmd)
 
@@ -704,6 +798,13 @@ def main() -> None:
     nano_port = find_nano_port()
     nano  = open_serial_no_reset(nano_port, BAUD, timeout=0.01)
     pilot = open_serial_no_reset(PILOT_PORT, BAUD, timeout=0.01)
+
+    # Load RCT settings and push to Nano.  Production motor_simple.ino ignores
+    # these frames; the remote_control_test sketch uses them.  We delay 1 s so
+    # the Nano has time to complete its setup() before the frames arrive.
+    rct_settings = load_or_create_rct_settings()
+    time.sleep(1.0)
+    push_rct_settings_to_nano(nano, rct_settings)
 
     nano_buf  = bytearray()
     pilot_buf = bytearray()
@@ -1007,6 +1108,31 @@ def main() -> None:
                         err_code_byte, err_rx_crc,
                         bstate.nano_err_window, bstate.nano_crit_consec,
                     )
+
+                elif code == RCT_SETTING_CODE:
+                    # Nano reports a setting it changed in adjust mode — update Pi JSON
+                    idx = (value >> 8) & 0xFF
+                    val =  value       & 0xFF
+                    if idx < len(_RCT_KEYS):
+                        key = _RCT_KEYS[idx]
+                        rct_settings[key] = val
+                        _save_rct_settings(rct_settings)
+                        log.info("RCT setting update from Nano: %s=%d", key, val)
+
+                elif code == RCT_RESULT_STOP_CODE:
+                    log.info("RCT result: first_stop_adc=%d", value)
+                    if remote_sock is not None:
+                        remote_send(remote_sock, f"RCT_STOP {value}")
+
+                elif code == RCT_RESULT_PULSES_CODE:
+                    log.info("RCT result: pulse_count=%d", value)
+                    if remote_sock is not None:
+                        remote_send(remote_sock, f"RCT_PULSES {value}")
+
+                elif code == RCT_RESULT_FINAL_CODE:
+                    log.info("RCT result: final_adc=%d", value)
+                    if remote_sock is not None:
+                        remote_send(remote_sock, f"RCT_FINAL {value}")
 
         # ================================================================
         # 6. TCP remote: accept new connections / handle existing client

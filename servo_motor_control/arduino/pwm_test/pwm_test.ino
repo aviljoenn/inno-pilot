@@ -27,10 +27,15 @@
 
 // ---- Test mode selector ----
 // Define exactly one of the modes:
-//   RUN_FINE_BURST_TEST   — 10–30 ms × 1 ms steps, 3 reps each, both dirs (current)
-//   RUN_BURST_SWEEP_TEST  — 24-step coarse burst-duration sweep
-//   RUN_INTERACTIVE_TEST  — manual target test with B3 GO button
-//   (neither)             — automated comprehensive table
+//   RUN_REMOTE_CONTROL_TEST — bridge-integrated positioning test (adjust mode + test mode)
+//   RUN_FINE_BURST_TEST     — 10–30 ms × 1 ms steps, 3 reps each, both dirs
+//   RUN_BURST_SWEEP_TEST    — 24-step coarse burst-duration sweep
+//   RUN_INTERACTIVE_TEST    — manual target test with B3 GO button
+//   (neither)               — automated comprehensive table
+//
+// NOTE: RUN_REMOTE_CONTROL_TEST uses 38400 baud (bridge-compatible).
+//       All other modes use 115200 baud (serial monitor).
+//#define RUN_REMOTE_CONTROL_TEST
 #define RUN_FINE_BURST_TEST
 //#define RUN_BURST_SWEEP_TEST
 //#define RUN_INTERACTIVE_TEST
@@ -105,10 +110,41 @@ struct BurstResult {
   int      counts_moved;// signed net displacement (final - start); includes coast
 };
 
+// RCT (Remote Control Test) types — defined unconditionally for preprocessor.
+// Seven settings that the Pi stores in JSON and pushes to the Nano on startup.
+// Stored in Nano EEPROM as fallback when Pi is unavailable.
+struct RctSettings {
+  uint8_t pwm_max;          // full-power drive PWM (0-255)
+  uint8_t coast_count_max;  // ADC counts before target to trigger hard-stop and coast
+  uint8_t pwm_min;          // fine-pulse PWM (0-255)
+  uint8_t coast_count_min;  // reserved for future use (coast at pwm_min)
+  uint8_t pulse_ms;         // duration of each fine pulse (ms)
+  uint8_t deadband;         // +/- ADC counts around target that counts as "arrived"
+  uint8_t pulse_delay_ms;   // inter-pulse delay (ms)
+};
+
+// Result of one RCT positioning trial
+struct RctTestResult {
+  int     first_stop_adc;  // rudder ADC after full-power coast settles
+  uint8_t pulse_count;     // number of fine pulses used
+  int     final_adc;       // final rudder ADC (inside or nearest to deadband)
+  bool    in_deadband;     // true if final_adc is within deadband of target
+};
+
+// Button IDs — used by RCT mode (same resistor ladder as motor_simple.ino)
+enum ButtonID : uint8_t {
+  BTN_NONE = 0,
+  BTN_B1,    // value down  / left-most
+  BTN_B2,    // scroll left
+  BTN_B3,    // enter (short press) / mode toggle (long press >=3 s)
+  BTN_B4,    // scroll right
+  BTN_B5,    // value up / right-most
+};
+
 // ====================================================================
 // OLED + button — shared by all interactive test modes
 // ====================================================================
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST) || defined(RUN_REMOTE_CONTROL_TEST)
 
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT  64
@@ -1503,12 +1539,525 @@ void run_remote_target_test() {
 #endif  // RUN_INTERACTIVE_TEST
 
 // ====================================================================
+// RUN_REMOTE_CONTROL_TEST — bridge-integrated positioning test
+//
+// Two modes selectable via B3:
+//   ADJUST: B2/B4 scroll settings, B1/B5 change value, short B3=save,
+//           long B3 (>=3 s) returns to TEST mode.
+//   TEST:   remote sends "TGT <pct>" via bridge -> Nano chases target.
+//           Short B3=run test, long B3=enter ADJUST mode.
+//
+// Serial: 38400 baud, bridge frame protocol (A5 5A CODE LO HI CRC).
+// No text output — OLED is the only UI feedback.
+// ====================================================================
+#ifdef RUN_REMOTE_CONTROL_TEST
+
+#include <EEPROM.h>
+
+// ---- Bridge frame protocol constants ----
+const uint8_t RCT_SETTING_CODE        = 0xEE; // both dirs: HI=setting_idx, LO=uint8 value
+const uint8_t RCT_TARGET_CODE         = 0xF3; // Pi->Nano: target pct×10 (0-1000)
+const uint8_t RCT_RESULT_STOP_CODE    = 0xF4; // Nano->Pi: first_stop_adc after coast
+const uint8_t RCT_RESULT_PULSES_CODE  = 0xF5; // Nano->Pi: fine pulse count
+const uint8_t RCT_RESULT_FINAL_CODE   = 0xF6; // Nano->Pi: final_adc
+
+// ---- EEPROM layout ----
+// Byte 0 : magic (0xAB = valid settings present)
+// Bytes 1-7: settings in RctSettings member order (one uint8 each)
+const uint8_t  RCT_EEPROM_MAGIC = 0xAB;
+const uint16_t RCT_EEPROM_BASE  = 0;
+
+// ---- Setting table (7 entries, indices 0-6 match bridge _RCT_KEYS order) ----
+const uint8_t RCT_NUM_SETTINGS = 7;
+const char* const RCT_SETTING_NAMES[7] = {
+  "PWM Max",        // 0
+  "Max Coast Cnt",  // 1
+  "PWM Min",        // 2
+  "Min Coast Cnt",  // 3
+  "Pulse ms",       // 4
+  "Deadband",       // 5
+  "Pulse Delay ms", // 6
+};
+// Adjustment bounds per setting (inclusive, uint8)
+const uint8_t RCT_MIN_VAL[7] = { 100,  1,  80,  1,  5,  3, 20 };
+const uint8_t RCT_MAX_VAL[7] = { 255, 200, 254, 200, 100, 100, 250 };
+
+// ---- Usable rudder range (hard limits ± LIMIT_MARGIN) ----
+const int RCT_PORT_LIMIT = RUDDER_PORT_END + LIMIT_MARGIN;  // 61
+const int RCT_STBD_LIMIT = RUDDER_STBD_END - LIMIT_MARGIN;  // 962
+
+// ---- CRC-8 MSB-first, poly=0x31, init=0xFF (matches bridge crc8_msb) ----
+static uint8_t rct_crc8(const uint8_t* data, uint8_t len) {
+  uint8_t crc = 0xFF;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      crc = (crc & 0x80) ? ((crc << 1) ^ 0x31) : (crc << 1);
+    }
+  }
+  return crc;
+}
+
+// ---- Frame TX ----
+static void rct_send_frame(uint8_t code, uint16_t val) {
+  uint8_t lo = val & 0xFF;
+  uint8_t hi = (val >> 8) & 0xFF;
+  uint8_t body[3] = {code, lo, hi};
+  Serial.write((uint8_t)0xA5);
+  Serial.write((uint8_t)0x5A);
+  Serial.write(body, 3);
+  Serial.write(rct_crc8(body, 3));
+}
+
+// ---- Frame RX parser ----
+enum RctPS : uint8_t { RP_M1, RP_M2, RP_CODE, RP_LO, RP_HI, RP_CRC };
+static RctPS   rct_ps    = RP_M1;
+static uint8_t rct_pcode = 0, rct_plo = 0, rct_phi = 0;
+static uint8_t  rct_rx_code  = 0;
+static uint16_t rct_rx_value = 0;
+// Returns true when a valid frame is ready (rct_rx_code + rct_rx_value set).
+static bool rct_feed(uint8_t b) {
+  switch (rct_ps) {
+    case RP_M1:   rct_ps = (b == 0xA5) ? RP_M2   : RP_M1;  break;
+    case RP_M2:   rct_ps = (b == 0x5A) ? RP_CODE  : RP_M1;  break;
+    case RP_CODE: rct_pcode = b; rct_ps = RP_LO; break;
+    case RP_LO:   rct_plo   = b; rct_ps = RP_HI; break;
+    case RP_HI:   rct_phi   = b; rct_ps = RP_CRC; break;
+    case RP_CRC: {
+      rct_ps = RP_M1;
+      uint8_t body[3] = {rct_pcode, rct_plo, rct_phi};
+      if (b == rct_crc8(body, 3)) {
+        rct_rx_code  = rct_pcode;
+        rct_rx_value = (uint16_t)rct_plo | ((uint16_t)rct_phi << 8);
+        return true;
+      }
+      break;
+    }
+  }
+  return false;
+}
+
+// ---- EEPROM helpers ----
+static bool rct_eeprom_valid() {
+  return EEPROM.read(RCT_EEPROM_BASE) == RCT_EEPROM_MAGIC;
+}
+
+static RctSettings rct_load() {
+  RctSettings s;
+  uint8_t* p = (uint8_t*)&s;
+  for (uint8_t i = 0; i < sizeof(RctSettings); i++) {
+    p[i] = EEPROM.read(RCT_EEPROM_BASE + 1 + i);
+  }
+  return s;
+}
+
+static void rct_save(const RctSettings& s) {
+  EEPROM.update(RCT_EEPROM_BASE, RCT_EEPROM_MAGIC);
+  const uint8_t* p = (const uint8_t*)&s;
+  for (uint8_t i = 0; i < sizeof(RctSettings); i++) {
+    EEPROM.update(RCT_EEPROM_BASE + 1 + i, p[i]);
+  }
+}
+
+// Apply one received RCT_SETTING_CODE frame to the in-memory settings struct.
+// Returns true if a value changed.
+static bool rct_apply_setting(RctSettings& s, uint16_t frame_val) {
+  uint8_t idx = (frame_val >> 8) & 0xFF;
+  uint8_t val =  frame_val       & 0xFF;
+  if (idx >= RCT_NUM_SETTINGS) return false;
+  uint8_t* p = (uint8_t*)&s;
+  if (p[idx] == val) return false;
+  p[idx] = val;
+  return true;
+}
+
+// Send one setting back to the bridge (Nano->Pi after adjust-mode change).
+static void rct_report_setting(const RctSettings& s, uint8_t idx) {
+  if (idx >= RCT_NUM_SETTINGS) return;
+  uint8_t val = ((const uint8_t*)&s)[idx];
+  rct_send_frame(RCT_SETTING_CODE, ((uint16_t)idx << 8) | val);
+}
+
+// Send all settings back to the bridge (on exit from adjust mode).
+static void rct_report_all_settings(const RctSettings& s) {
+  for (uint8_t i = 0; i < RCT_NUM_SETTINGS; i++) {
+    rct_report_setting(s, i);
+    delay(12);  // give bridge time between frames
+  }
+}
+
+// ---- Button reading ----
+static ButtonID rct_read_raw_button() {
+  int v = analogRead(BUTTON_ADC_PIN);
+  if (v > 865) return BTN_NONE;
+  if (v > 608) return BTN_B5;
+  if (v > 419) return BTN_B4;
+  if (v > 257) return BTN_B3;
+  if (v > 139) return BTN_B2;
+  return BTN_B1;
+}
+
+// Block until a debounced button is pressed and released.
+// *hold_ms is set to the duration the button was held.
+// Drains serial RX while waiting so the 128-byte buffer never overflows.
+static ButtonID rct_wait_button(unsigned long* hold_ms) {
+  *hold_ms = 0;
+  ButtonID b = BTN_NONE;
+  while (b == BTN_NONE) {
+    delay(10);
+    b = rct_read_raw_button();
+    while (Serial.available()) Serial.read();  // drain keepalive frames
+  }
+  delay(BTN_DEBOUNCE_MS);
+  b = rct_read_raw_button();
+  if (b == BTN_NONE) return BTN_NONE;  // spurious
+  unsigned long t0 = millis();
+  while (rct_read_raw_button() != BTN_NONE) {
+    delay(10);
+    while (Serial.available()) Serial.read();
+  }
+  delay(BTN_DEBOUNCE_MS);
+  *hold_ms = millis() - t0;
+  return b;
+}
+
+// ---- Percentage <-> ADC conversion ----
+// pct10: percentage × 10 (0-1000), matching bridge TGT / MANUAL_RUD_TARGET scale.
+// 0 = PORT limit (ADC 61), 500 = midships (ADC ~512), 1000 = STBD limit (ADC 962).
+static int rct_pct10_to_adc(uint16_t pct10) {
+  int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
+  return RCT_PORT_LIMIT + (int)((int32_t)pct10 * range / 1000);
+}
+
+// ---- OLED screens ----
+static void oled_rct_no_settings() {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("NO SETTINGS"));
+  oled.setCursor(0, 12); oled.print(F("Waiting for Pi..."));
+  oled.setCursor(0, 24); oled.print(F("Start bridge &"));
+  oled.setCursor(0, 32); oled.print(F("ensure JSON exists"));
+  oled.display();
+}
+
+static void oled_rct_adjust(const RctSettings& s, uint8_t idx) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("ADJUST "));
+  oled.print(idx + 1); oled.print('/'); oled.print(RCT_NUM_SETTINGS);
+  oled.setCursor(0, 12); oled.print(RCT_SETTING_NAMES[idx]);
+  oled.setCursor(0, 26); oled.print(F("Val: "));
+  oled.print(((const uint8_t*)&s)[idx]);
+  oled.setCursor(0, 40); oled.print(F("B1- B5+  B2< B4>"));
+  oled.setCursor(0, 52); oled.print(F("B3=save 3s=done"));
+  oled.display();
+}
+
+static void oled_rct_test_wait(int target_adc, int cur_adc, bool has_target) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("TEST MODE"));
+  oled.setCursor(0, 12);
+  if (has_target) {
+    int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
+    int pct10 = (int)((int32_t)(target_adc - RCT_PORT_LIMIT) * 1000 / range);
+    oled.print(F("Tgt:"));
+    oled.print(pct10 / 10); oled.print('.'); oled.print(pct10 % 10);
+    oled.print(F("% "));    oled.print(target_adc);
+  } else {
+    oled.print(F("No target received"));
+  }
+  oled.setCursor(0, 24); oled.print(F("Rudder: ")); oled.print(cur_adc);
+  oled.setCursor(0, 38); oled.print(F("B3=run test"));
+  oled.setCursor(0, 50); oled.print(F("3s B3=adjust mode"));
+  oled.display();
+}
+
+static void oled_rct_running(int target_adc) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("RUNNING..."));
+  oled.setCursor(0, 16); oled.print(F("Target: ")); oled.print(target_adc);
+  oled.setCursor(0, 28); oled.print(F("Rudder: ")); oled.print(read_rudder());
+  oled.display();
+}
+
+static void oled_rct_result(int target_adc, const RctTestResult& r) {
+  if (!oled_ok) return;
+  int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
+  int pct10 = (int)((int32_t)(target_adc - RCT_PORT_LIMIT) * 1000 / range);
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("TEST RESULT"));
+  oled.setCursor(0, 10);
+  oled.print(F("Tgt:")); oled.print(pct10 / 10); oled.print('.');
+  oled.print(pct10 % 10); oled.print(F("% ")); oled.print(target_adc);
+  oled.setCursor(0, 20); oled.print(F("Stop:  ")); oled.print(r.first_stop_adc);
+  oled.setCursor(0, 30); oled.print(F("Pulses:")); oled.print(r.pulse_count);
+  oled.setCursor(0, 40);
+  oled.print(F("Final: ")); oled.print(r.final_adc);
+  oled.print(r.in_deadband ? F(" OK") : F(" OOB"));
+  oled.setCursor(0, 52); oled.print(F("B3=next"));
+  oled.display();
+}
+
+// ---- Core test execution ----
+static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
+  RctTestResult r;
+  r.first_stop_adc = 0; r.pulse_count = 0; r.final_adc = 0; r.in_deadband = false;
+
+  int cur  = read_rudder();
+  int dist = abs(target_adc - cur);
+
+  // Already inside deadband — nothing to do
+  if (dist <= (int)s.deadband) {
+    r.first_stop_adc = cur;
+    r.final_adc      = cur;
+    r.in_deadband    = true;
+    return r;
+  }
+
+  // ---- Phase 1: full-power approach ----
+  // Only used when the target is far enough that coasting is meaningful.
+  // Threshold: distance >= 2 × coast_count_max (inclusive → aggressive side).
+  if (dist >= 2 * (int)s.coast_count_max) {
+    int8_t dir = (target_adc > cur) ? +1 : -1;
+
+    motor_drive(dir, s.pwm_max);
+
+    // Drive until within coast_count_max of target, then hard-stop
+    while (true) {
+      cur = read_rudder();
+      if (abs(target_adc - cur) <= (int)s.coast_count_max) break;
+      if (dir > 0 && cur >= (RUDDER_STBD_END - LIMIT_MARGIN)) break;
+      if (dir < 0 && cur <= (RUDDER_PORT_END + LIMIT_MARGIN)) break;
+    }
+    motor_stop();
+
+    // Wait for the rudder to coast to a complete stop
+    r.first_stop_adc = wait_for_stop(3000);
+  } else {
+    // Target is close: skip full-power phase, go straight to fine pulses
+    r.first_stop_adc = cur;
+  }
+
+  // ---- Phase 2: fine pulse approach ----
+  // Pulse toward target at pwm_min until inside deadband (or safety cap hit).
+  // Direction is recalculated after each pulse, so overshoot is recovered naturally.
+  const uint8_t MAX_FINE_PULSES = 30;
+
+  while (r.pulse_count < MAX_FINE_PULSES) {
+    cur = read_rudder();
+    int err = target_adc - cur;
+    if (abs(err) <= (int)s.deadband) {
+      r.in_deadband = true;
+      break;
+    }
+    int8_t pulse_dir = (err > 0) ? +1 : -1;
+    motor_drive(pulse_dir, s.pwm_min);
+    delay(s.pulse_ms);
+    motor_stop();
+    r.pulse_count++;
+    delay(s.pulse_delay_ms);
+  }
+
+  r.final_adc = read_rudder();
+  return r;
+}
+
+// ---- Adjust mode ----
+// Blocks until a long B3 press exits back to test mode.
+// On any value change or navigation, saves to EEPROM and reports to bridge.
+static void rct_adjust_mode(RctSettings& s) {
+  uint8_t idx      = 0;
+  uint8_t prev_idx = 0xFF;  // force initial draw
+
+  while (true) {
+    if (idx != prev_idx) {
+      oled_rct_adjust(s, idx);
+      prev_idx = idx;
+    }
+
+    unsigned long hold_ms = 0;
+    ButtonID btn = rct_wait_button(&hold_ms);
+
+    switch (btn) {
+      case BTN_B2:  // scroll left — save current setting, then move
+        rct_save(s);
+        rct_report_setting(s, idx);
+        idx = (idx == 0) ? RCT_NUM_SETTINGS - 1 : idx - 1;
+        prev_idx = 0xFF;  // force redraw
+        break;
+
+      case BTN_B4:  // scroll right — save current setting, then move
+        rct_save(s);
+        rct_report_setting(s, idx);
+        idx = (idx == RCT_NUM_SETTINGS - 1) ? 0 : idx + 1;
+        prev_idx = 0xFF;
+        break;
+
+      case BTN_B1: {  // value down
+        uint8_t* v = &((uint8_t*)&s)[idx];
+        if (*v > RCT_MIN_VAL[idx]) (*v)--;
+        prev_idx = 0xFF;
+        break;
+      }
+      case BTN_B5: {  // value up
+        uint8_t* v = &((uint8_t*)&s)[idx];
+        if (*v < RCT_MAX_VAL[idx]) (*v)++;
+        prev_idx = 0xFF;
+        break;
+      }
+      case BTN_B3:
+        if (hold_ms >= 3000UL) {
+          // Long press: save everything and exit adjust mode
+          rct_save(s);
+          rct_report_all_settings(s);
+          return;
+        } else {
+          // Short press: save current setting and confirm to bridge
+          rct_save(s);
+          rct_report_setting(s, idx);
+          prev_idx = 0xFF;  // brief redraw to confirm
+        }
+        break;
+
+      default: break;
+    }
+  }
+}
+
+// ---- Top-level entry point ----
+void run_remote_control_test() {
+  RctSettings s;
+
+  // ---- Load settings (EEPROM or wait for Pi push) ----
+  if (rct_eeprom_valid()) {
+    s = rct_load();
+  } else {
+    // No valid EEPROM: show splash and block until Pi pushes all 7 settings.
+    oled_rct_no_settings();
+    uint8_t received_mask = 0;  // bit i = setting index i received
+    while (received_mask != 0x7F) {  // 0b01111111 = all 7 received
+      while (Serial.available()) {
+        if (rct_feed(Serial.read()) && rct_rx_code == RCT_SETTING_CODE) {
+          uint8_t idx = (rct_rx_value >> 8) & 0xFF;
+          uint8_t val =  rct_rx_value       & 0xFF;
+          if (idx < RCT_NUM_SETTINGS) {
+            ((uint8_t*)&s)[idx] = val;
+            received_mask |= (1 << idx);
+          }
+        }
+      }
+      delay(50);
+    }
+    rct_save(s);  // write valid EEPROM for next boot
+  }
+
+  // ---- Main loop: TEST mode ↔ ADJUST mode ----
+  bool has_target   = false;
+  int  target_adc   = CENTRE_ADC;  // shown on OLED until remote sends TGT
+  unsigned long last_oled_ms = 0;
+
+  while (true) {
+    // ---- Poll serial for incoming bridge frames ----
+    while (Serial.available()) {
+      if (rct_feed(Serial.read())) {
+        if (rct_rx_code == RCT_SETTING_CODE) {
+          // Pi pushed a setting update (e.g. on bridge restart)
+          if (rct_apply_setting(s, rct_rx_value)) {
+            rct_save(s);
+          }
+        } else if (rct_rx_code == RCT_TARGET_CODE) {
+          target_adc  = rct_pct10_to_adc(rct_rx_value);
+          has_target  = true;
+          last_oled_ms = 0;  // force immediate OLED refresh
+        }
+      }
+    }
+
+    // ---- Check for B3 button press (non-blocking peek) ----
+    if (rct_read_raw_button() == BTN_B3) {
+      delay(BTN_DEBOUNCE_MS);
+      if (rct_read_raw_button() == BTN_B3) {
+        // Measure hold time while button is down
+        unsigned long t0 = millis();
+        while (rct_read_raw_button() == BTN_B3) {
+          delay(10);
+          while (Serial.available()) Serial.read();  // drain while holding
+        }
+        delay(BTN_DEBOUNCE_MS);
+        unsigned long hold_ms = millis() - t0;
+
+        if (hold_ms >= 3000UL) {
+          // Long press → enter adjust mode (blocks until long-press exit)
+          rct_adjust_mode(s);
+          last_oled_ms = 0;  // force OLED refresh on return
+
+        } else if (has_target) {
+          // Short press → run positioning test
+          oled_rct_running(target_adc);
+          RctTestResult r = rct_run_test(s, target_adc);
+
+          // Report results to bridge
+          rct_send_frame(RCT_RESULT_STOP_CODE,   (uint16_t)r.first_stop_adc);
+          rct_send_frame(RCT_RESULT_PULSES_CODE, (uint16_t)r.pulse_count);
+          rct_send_frame(RCT_RESULT_FINAL_CODE,  (uint16_t)r.final_adc);
+
+          // Display result on OLED; wait for B3 dismiss or 15 s timeout
+          oled_rct_result(target_adc, r);
+          unsigned long t_result = millis();
+          while ((millis() - t_result) < 15000UL) {
+            while (Serial.available()) {
+              if (rct_feed(Serial.read()) && rct_rx_code == RCT_TARGET_CODE) {
+                target_adc = rct_pct10_to_adc(rct_rx_value);
+                has_target = true;
+              }
+            }
+            if (rct_read_raw_button() == BTN_B3) {
+              delay(BTN_DEBOUNCE_MS);
+              while (rct_read_raw_button() == BTN_B3) delay(10);
+              delay(BTN_DEBOUNCE_MS);
+              break;
+            }
+            delay(50);
+          }
+          last_oled_ms = 0;  // return to test-wait screen
+        }
+        // else: short press with no target — do nothing (OLED already shows "No target")
+      }
+    }
+
+    // ---- Refresh test-wait OLED at ~3 Hz ----
+    unsigned long now = millis();
+    if ((now - last_oled_ms) >= 333UL) {
+      oled_rct_test_wait(target_adc, read_rudder(), has_target);
+      last_oled_ms = now;
+    }
+
+    delay(20);
+  }
+}
+
+#endif  // RUN_REMOTE_CONTROL_TEST
+
+// ====================================================================
 // Arduino entry points
 // ====================================================================
 
 void setup() {
+  // RCT mode uses 38400 baud (bridge-compatible binary frames).
+  // All other modes use 115200 baud for serial monitor text output.
+#ifdef RUN_REMOTE_CONTROL_TEST
+  Serial.begin(38400);
+#else
   Serial.begin(115200);
   delay(800);  // allow USB serial to connect
+#endif
 
   // H-bridge
   pinMode(HBRIDGE_RPWM_PIN, OUTPUT);
@@ -1525,14 +2074,19 @@ void setup() {
   pinMode(RUDDER_PIN,  INPUT);
   pinMode(PIN_CURRENT, INPUT);
 
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST) || defined(RUN_REMOTE_CONTROL_TEST)
   // OLED init (non-blocking: if absent or dead, oled_ok stays false)
   oled_ok = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oled_ok) {
     oled.clearDisplay();
     oled.setTextSize(1);
     oled.setTextColor(SSD1306_WHITE);
-#ifdef RUN_FINE_BURST_TEST
+#ifdef RUN_REMOTE_CONTROL_TEST
+    oled.setCursor(0, 0);  oled.println(F("Remote Control Test"));
+    oled.setCursor(0, 12); oled.println(F("B3 short=run"));
+    oled.setCursor(0, 20); oled.println(F("B3 3s=adjust mode"));
+    oled.setCursor(0, 32); oled.println(F("Initialising..."));
+#elif defined(RUN_FINE_BURST_TEST)
     oled.setCursor(0, 0);  oled.println(F("Fine Burst Test"));
     oled.setCursor(0, 12); oled.println(F("15-25ms  1ms steps"));
     oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
@@ -1552,6 +2106,11 @@ void setup() {
   }
 #endif
 
+#ifdef RUN_REMOTE_CONTROL_TEST
+  // RCT mode: binary serial only — no text output that would corrupt bridge frames.
+  run_remote_control_test();  // never returns
+
+#else
   Serial.println(F("========================================"));
 #ifdef RUN_FINE_BURST_TEST
   Serial.println(F("  PWM Fine Burst Test (15-25 ms, 10 reps)"));
@@ -1591,6 +2150,7 @@ void setup() {
   Serial.println(F("  Test complete. Clutch disengaged."));
   Serial.println(F("  Re-flash motor_simple.ino when ready."));
   Serial.println(F("========================================"));
+#endif  // !RUN_REMOTE_CONTROL_TEST
 }
 
 void loop() {
