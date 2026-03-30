@@ -813,6 +813,8 @@ def main() -> None:
     # the Nano has time to complete its setup() before the frames arrive.
     rct_settings = load_or_create_rct_settings()
     time.sleep(1.0)
+    # Safety: ensure Nano is not stuck in ratify mode from a previous run.
+    send_nano_frame(nano, MANUAL_MODE_CODE, 0)
     push_rct_settings_to_nano(nano, rct_settings)
 
     nano_buf  = bytearray()

@@ -2086,6 +2086,20 @@ static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_targ
       }
     }
 
+    // ---- B3 long-press: emergency exit regardless of serial state ----
+    if (rct_read_raw_button() == BTN_B3) {
+      unsigned long t0 = millis();
+      while (rct_read_raw_button() == BTN_B3) {
+        if ((millis() - t0) >= 3000UL) {
+          motor_stop();
+          while (rct_read_raw_button() == BTN_B3) { delay(10); }
+          delay(BTN_DEBOUNCE_MS);
+          return RCT_MODE_TEST;
+        }
+        delay(10);
+      }
+    }
+
     if (!has_target) continue;  // spin until first target arrives
 
     // ---- Read position and compute error ----
