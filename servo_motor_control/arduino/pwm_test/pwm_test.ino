@@ -141,12 +141,17 @@ enum ButtonID : uint8_t {
   BTN_B5,    // value up / right-most
 };
 
-// Long B3 cycles: TEST -> ADJUST -> RATIFY -> TEST
+// Long B3 cycles: TEST <-> ADJUST.
+// RATIFY entered by remote MANUAL switch (MANUAL_MODE_CODE=1); exited by AUTO switch (=0).
 enum RctModeID : uint8_t {
   RCT_MODE_TEST = 0,   // set target with remote POT, press B3 to run once
   RCT_MODE_ADJUST,     // configure settings via button ladder
-  RCT_MODE_RATIFY,     // continuously chases remote POT in real time
+  RCT_MODE_RATIFY,     // real-time remote steering; OLED off, fast pulse-per-loop
 };
+
+// Set by serial drain when MANUAL_MODE_CODE=1 received; allows rct_adjust_mode to
+// notice a mode-switch request even while blocked in rct_wait_button.
+static bool rct_ratify_requested = false;
 
 // ====================================================================
 // OLED + button — shared by all interactive test modes
@@ -1548,14 +1553,18 @@ void run_remote_target_test() {
 // ====================================================================
 // RUN_REMOTE_CONTROL_TEST — bridge-integrated positioning test
 //
-// Two modes selectable via B3:
+// Three modes:
+//   TEST:   remote sends RUD <pct> via bridge -> Nano shows live target.
+//           Short B3=run one positioning trial, long B3=enter ADJUST.
 //   ADJUST: B2/B4 scroll settings, B1/B5 change value, short B3=save,
 //           long B3 (>=3 s) returns to TEST mode.
-//   TEST:   remote sends "TGT <pct>" via bridge -> Nano chases target.
-//           Short B3=run test, long B3=enter ADJUST mode.
+//   RATIFY: real-time remote steering. Entered when bridge sends
+//           MANUAL_MODE_CODE=1 (remote AUTO/MANUAL switch -> MANUAL).
+//           Exited when MANUAL_MODE_CODE=0 (switch -> AUTO or TCP drop).
+//           OLED is blanked; loop runs fast pulse-per-loop control.
 //
 // Serial: 38400 baud, bridge frame protocol (A5 5A CODE LO HI CRC).
-// No text output — OLED is the only UI feedback.
+// No text output — OLED is the only UI feedback (off during RATIFY).
 // ====================================================================
 #ifdef RUN_REMOTE_CONTROL_TEST
 
@@ -1567,6 +1576,7 @@ const uint8_t RCT_TARGET_CODE         = 0xF3; // Pi->Nano: target pct×10 (0-100
 const uint8_t RCT_RESULT_STOP_CODE    = 0xF4; // Nano->Pi: first_stop_adc after coast
 const uint8_t RCT_RESULT_PULSES_CODE  = 0xF5; // Nano->Pi: fine pulse count
 const uint8_t RCT_RESULT_FINAL_CODE   = 0xF6; // Nano->Pi: final_adc
+const uint8_t MANUAL_MODE_CODE        = 0xE9; // Pi->Nano: 1=enter RATIFY, 0=exit (matches bridge)
 
 // ---- EEPROM layout ----
 // Byte 0 : magic (0xAB = valid settings present)
@@ -1736,7 +1746,11 @@ static ButtonID rct_wait_button(unsigned long* hold_ms) {
   while (b == BTN_NONE) {
     delay(10);
     b = rct_read_raw_button();
-    while (Serial.available()) Serial.read();  // drain keepalive frames
+    while (Serial.available()) {               // drain; detect manual-mode request
+      if (rct_feed(Serial.read()) &&
+          rct_rx_code == MANUAL_MODE_CODE && rct_rx_value == 1)
+        rct_ratify_requested = true;
+    }
   }
   delay(BTN_DEBOUNCE_MS);
   b = rct_read_raw_button();
@@ -1781,7 +1795,7 @@ static void oled_rct_adjust(const RctSettings& s, uint8_t idx) {
   oled.setCursor(0, 26); oled.print(F("Val: "));
   oled.print(((const uint8_t*)&s)[idx]);
   oled.setCursor(0, 40); oled.print(F("B1- B5+  B2< B4>"));
-  oled.setCursor(0, 52); oled.print(F("B3=save 3s=RATIFY"));
+  oled.setCursor(0, 52); oled.print(F("B3=save  3s=TEST"));
   oled.display();
 }
 
@@ -1950,20 +1964,23 @@ static void oled_rct_ratify_chasing(int target_adc, uint16_t hz) {
 }
 
 // ---- Adjust mode ----
-// Blocks until a long B3 press; returns RCT_MODE_RATIFY to advance the mode cycle.
+// Blocks until a long B3 press (→ TEST) or MANUAL_MODE_CODE=1 (→ RATIFY).
 // On any value change or navigation, saves to EEPROM and reports to bridge.
 static RctModeID rct_adjust_mode(RctSettings& s) {
   uint8_t idx      = 0;
   uint8_t prev_idx = 0xFF;  // force initial draw
 
   while (true) {
+    // Check if remote switch was flipped to MANUAL while we were blocked in rct_wait_button.
+    if (rct_ratify_requested) { rct_ratify_requested = false; return RCT_MODE_RATIFY; }
+
     if (idx != prev_idx) {
       oled_rct_adjust(s, idx);
       prev_idx = idx;
     }
 
     unsigned long hold_ms = 0;
-    ButtonID btn = rct_wait_button(&hold_ms);
+    ButtonID btn = rct_wait_button(&hold_ms);  // drains serial, sets rct_ratify_requested if needed
 
     switch (btn) {
       case BTN_B2:  // scroll left — save current setting, then move
@@ -1994,10 +2011,10 @@ static RctModeID rct_adjust_mode(RctSettings& s) {
       }
       case BTN_B3:
         if (hold_ms >= 3000UL) {
-          // Long press: save everything and advance to RATIFY mode
+          // Long press: save everything and return to TEST mode
           rct_save(s);
           rct_report_all_settings(s);
-          return RCT_MODE_RATIFY;
+          return RCT_MODE_TEST;
         } else {
           // Short press: save current setting and confirm to bridge
           rct_save(s);
@@ -2011,73 +2028,67 @@ static RctModeID rct_adjust_mode(RctSettings& s) {
   }
 }
 
-// ---- Ratify mode ----
-// Continuously chases the remote POT target using the same algorithm as TEST mode.
-// Updates at ~4 Hz when idle; runs rct_run_test() as needed.
-// Returns RCT_MODE_TEST when long B3 is pressed.
+// ---- Ratify mode (real-time remote steering) ----
+// Entered when MANUAL_MODE_CODE=1 is received (remote AUTO/MANUAL switch → MANUAL).
+// Exited when MANUAL_MODE_CODE=0 is received (switch → AUTO, or TCP disconnect).
+//
+// OLED is blanked for the duration — the loop must be as fast as possible.
+//
+// Three-zone pulse-per-loop control (re-evaluated every iteration):
+//   Zone 1  |err| <= deadband              : motor_stop() — hold position
+//   Zone 2  |err| <= coast_count_max       : 10 ms pulse at pwm_min — fine approach
+//   Zone 3  |err| >  coast_count_max       : 10 ms pulse at pwm_max — fast approach
+//
+// No blocking delays in the critical path. At ~2 ms loop overhead the motor
+// receives back-to-back 10 ms pulses (~83 % duty) and runs smoothly when chasing.
+// Direction is re-evaluated after each pulse so overshoot self-corrects immediately.
 static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_target) {
-  unsigned long last_oled_ms = 0;
-  unsigned long b3_down_ms   = 0;
-  bool          b3_held      = false;
+  // Blank the OLED for the duration of ratify mode.
+  if (oled_ok) { oled.clearDisplay(); oled.display(); }
 
   while (true) {
-    // ---- Drain serial: settings updates and target frames ----
+    // ---- Drain serial: target updates, settings, and exit trigger ----
     while (Serial.available()) {
       if (rct_feed(Serial.read())) {
-        if (rct_rx_code == RCT_SETTING_CODE) {
+        if (rct_rx_code == RCT_TARGET_CODE) {
+          target_adc = rct_pct10_to_adc(rct_rx_value);
+          has_target = true;
+        } else if (rct_rx_code == RCT_SETTING_CODE) {
           if (rct_apply_setting(s, rct_rx_value)) rct_save(s);
-        } else if (rct_rx_code == RCT_TARGET_CODE) {
-          target_adc   = rct_pct10_to_adc(rct_rx_value);
-          has_target   = true;
-          last_oled_ms = 0;  // force immediate OLED refresh
+        } else if (rct_rx_code == MANUAL_MODE_CODE && rct_rx_value == 0) {
+          // Remote switch → AUTO (or TCP disconnect): safe-stop and exit.
+          motor_stop();
+          return RCT_MODE_TEST;
         }
       }
     }
 
-    int cur = read_rudder();
-    int err = target_adc - cur;
+    if (!has_target) continue;  // spin until first target arrives
 
-    // ---- Non-blocking long-B3 detection to cycle back to TEST ----
-    ButtonID btn_now = rct_read_raw_button();
-    if (btn_now == BTN_B3) {
-      if (!b3_held) { b3_down_ms = millis(); b3_held = true; }
-      if ((millis() - b3_down_ms) >= 3000UL) {
-        // Long press confirmed: wait for release then return
-        while (rct_read_raw_button() == BTN_B3) { delay(10); while (Serial.available()) Serial.read(); }
-        delay(BTN_DEBOUNCE_MS);
-        return RCT_MODE_TEST;
-      }
-    } else {
-      b3_held = false;
+    // ---- Read position and compute error ----
+    int cur     = read_rudder();
+    int err     = target_adc - cur;
+    int abs_err = abs(err);
+
+    // ---- Zone 1: within deadband — hold position ----
+    if (abs_err <= (int)s.deadband) {
+      motor_stop();
+      continue;
     }
 
-    uint16_t hz = rct_tick_hz();
-
-    // ---- OLED refresh at ~4 Hz ----
-    unsigned long now = millis();
-    if ((now - last_oled_ms) >= 250UL) {
-      oled_rct_ratify(target_adc, cur, abs(err) <= (int)s.deadband, has_target, hz);
-      last_oled_ms = now;
-    }
-
-    // ---- Chase target if outside deadband ----
-    if (has_target && abs(err) > (int)s.deadband) {
-      oled_rct_ratify_chasing(target_adc, hz);
-      RctTestResult r = rct_run_test(s, target_adc);
-      // Send results to bridge for logging (same as TEST mode)
-      rct_send_frame(RCT_RESULT_STOP_CODE,   (uint16_t)r.first_stop_adc);
-      rct_send_frame(RCT_RESULT_PULSES_CODE, (uint16_t)r.pulse_count);
-      rct_send_frame(RCT_RESULT_FINAL_CODE,  (uint16_t)r.final_adc);
-      last_oled_ms = 0;  // force OLED refresh to show new position
-    }
-
-    delay(50);
+    // ---- Zone 2 or 3: single 10 ms pulse toward target ----
+    // No motor_stop() after the pulse — next iteration continues driving or stops.
+    // This gives ~83 % duty-cycle continuous motion when chasing.
+    int8_t  dir = (err > 0) ? +1 : -1;
+    uint8_t pwm = (abs_err <= (int)s.coast_count_max) ? s.pwm_min : s.pwm_max;
+    motor_drive(dir, pwm);
+    delay(10);
   }
 }
 
 // ---- Test mode ----
-// Waits for remote target; short B3 runs one positioning trial; long B3 → ADJUST.
-// Returns RCT_MODE_ADJUST when long B3 is pressed.
+// Waits for remote target; short B3 runs one trial; long B3 → ADJUST; MANUAL_MODE_CODE=1 → RATIFY.
+// Returns RCT_MODE_ADJUST (long B3) or RCT_MODE_RATIFY (remote switch → MANUAL).
 static RctModeID rct_test_mode(RctSettings& s, int& target_adc, bool& has_target) {
   unsigned long last_oled_ms = 0;
 
@@ -2091,6 +2102,8 @@ static RctModeID rct_test_mode(RctSettings& s, int& target_adc, bool& has_target
           target_adc   = rct_pct10_to_adc(rct_rx_value);
           has_target   = true;
           last_oled_ms = 0;
+        } else if (rct_rx_code == MANUAL_MODE_CODE && rct_rx_value == 1) {
+          return RCT_MODE_RATIFY;  // remote switch → MANUAL: enter real-time steering
         }
       }
     }
@@ -2123,9 +2136,13 @@ static RctModeID rct_test_mode(RctSettings& s, int& target_adc, bool& has_target
           unsigned long t_result = millis();
           while ((millis() - t_result) < 15000UL) {
             while (Serial.available()) {
-              if (rct_feed(Serial.read()) && rct_rx_code == RCT_TARGET_CODE) {
-                target_adc = rct_pct10_to_adc(rct_rx_value);
-                has_target = true;
+              if (rct_feed(Serial.read())) {
+                if (rct_rx_code == RCT_TARGET_CODE) {
+                  target_adc = rct_pct10_to_adc(rct_rx_value);
+                  has_target = true;
+                } else if (rct_rx_code == MANUAL_MODE_CODE && rct_rx_value == 1) {
+                  return RCT_MODE_RATIFY;
+                }
               }
             }
             if (rct_read_raw_button() == BTN_B3) {
@@ -2179,7 +2196,7 @@ void run_remote_control_test() {
     rct_save(s);  // write valid EEPROM for next boot
   }
 
-  // ---- Mode switcher: TEST → ADJUST → RATIFY → TEST (long B3 cycles) ----
+  // ---- Mode switcher: long B3 cycles TEST <-> ADJUST; remote switch enters/exits RATIFY ----
   bool       has_target = false;
   int        target_adc = CENTRE_ADC;
   RctModeID  mode       = RCT_MODE_TEST;
