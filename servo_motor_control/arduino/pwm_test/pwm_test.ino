@@ -35,8 +35,8 @@
 //
 // NOTE: RUN_REMOTE_CONTROL_TEST uses 38400 baud (bridge-compatible).
 //       All other modes use 115200 baud (serial monitor).
-//#define RUN_REMOTE_CONTROL_TEST
-#define RUN_FINE_BURST_TEST
+#define RUN_REMOTE_CONTROL_TEST
+//#define RUN_FINE_BURST_TEST
 //#define RUN_BURST_SWEEP_TEST
 //#define RUN_INTERACTIVE_TEST
 
