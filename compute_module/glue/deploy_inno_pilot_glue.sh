@@ -17,6 +17,11 @@ if ! command -v socat >/dev/null 2>&1; then
   exit 1
 fi
 
+# Ensure /etc/inno-pilot exists and is writable by the bridge service user (aviljoen)
+echo "Ensuring /etc/inno-pilot config dir exists..."
+sudo mkdir -p /etc/inno-pilot
+sudo chown aviljoen:aviljoen /etc/inno-pilot
+
 # Copy bridge script
 echo "Installing inno_pilot_bridge.py -> /usr/local/bin/"
 sudo cp "$REPO_DIR/inno_pilot_bridge.py" /usr/local/bin/inno_pilot_bridge.py
