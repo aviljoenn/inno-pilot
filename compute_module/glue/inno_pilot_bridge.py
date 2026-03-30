@@ -752,6 +752,10 @@ def process_remote_line(
         target_0_1000 = int(round(pct * 10.0))  # 0-1000
         bstate.manual_rud_target = target_0_1000
         send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
+        # Also forward as RCT target so the test sketch sees the remote position live.
+        # User steers to desired position; Nano OLED updates; B3 fires the test.
+        bstate.rct_target = target_0_1000
+        send_nano_frame(nano, RCT_TARGET_CODE, target_0_1000)
 
     elif cmd == "TGT":
         # RCT test target: 0.0-100.0 % (0=port limit, 50=midships, 100=stbd limit)
