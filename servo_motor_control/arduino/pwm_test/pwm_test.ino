@@ -1579,7 +1579,7 @@ const char* const RCT_SETTING_NAMES[7] = {
   "Pulse Delay ms", // 6
 };
 // Adjustment bounds per setting (inclusive, uint8)
-const uint8_t RCT_MIN_VAL[7] = { 100,  1,  80,  1,  5,  3, 20 };
+const uint8_t RCT_MIN_VAL[7] = { 100,  1,  80,  1,  0,  3, 20 };  // pulse_ms min=0 → continuous drive
 const uint8_t RCT_MAX_VAL[7] = { 255, 200, 254, 200, 100, 100, 250 };
 
 // ---- Usable rudder range (hard limits ± LIMIT_MARGIN) ----
@@ -1858,12 +1858,21 @@ static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
       break;
     }
     int8_t pulse_dir = (err > 0) ? +1 : -1;
-    motor_drive(pulse_dir, s.pwm_min);
-    delay(s.pulse_ms);
-    motor_stop();
-    r.pulse_count++;
-    delay(s.pulse_delay_ms);
+    if (s.pulse_ms == 0) {
+      // Continuous mode: drive without stopping; recheck position immediately.
+      // Motor keeps running across iterations — only stopped when in deadband or cap hit.
+      motor_drive(pulse_dir, s.pwm_min);
+      r.pulse_count++;
+      // (no motor_stop, no pulse_delay_ms — loop back to position check immediately)
+    } else {
+      motor_drive(pulse_dir, s.pwm_min);
+      delay(s.pulse_ms);
+      motor_stop();
+      r.pulse_count++;
+      delay(s.pulse_delay_ms);
+    }
   }
+  motor_stop();  // ensure stopped on exit (needed when pulse_ms=0 continuous mode)
 
   r.final_adc = read_rudder();
   return r;
