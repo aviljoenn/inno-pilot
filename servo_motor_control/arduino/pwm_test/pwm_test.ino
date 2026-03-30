@@ -2071,13 +2071,14 @@ static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_targ
       continue;
     }
 
-    // ---- Zone 2 or 3: single 10 ms pulse toward target ----
+    // ---- Zone 2 or 3: single pulse toward target ----
+    // Duration = pulse_ms (from settings). pulse_ms=0 means continuous — no delay,
+    // motor runs until next iteration re-evaluates direction or reaches deadband.
     // No motor_stop() after the pulse — next iteration continues driving or stops.
-    // This gives ~83 % duty-cycle continuous motion when chasing.
     int8_t  dir = (err > 0) ? +1 : -1;
     uint8_t pwm = (abs_err <= (int)s.coast_count_max) ? s.pwm_min : s.pwm_max;
     motor_drive(dir, pwm);
-    delay(10);
+    if (s.pulse_ms > 0) delay(s.pulse_ms);
   }
 }
 
