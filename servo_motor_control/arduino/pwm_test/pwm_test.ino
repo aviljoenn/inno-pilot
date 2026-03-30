@@ -882,7 +882,7 @@ static void oled_show_centering_screen(int current_adc) {
 // ====================================================================
 #ifdef RUN_FINE_BURST_TEST
 
-static const uint8_t  FINE_REPS       = 3;
+static const uint8_t  FINE_REPS       = 10;
 static const uint16_t FINE_SETTLE_MS  = 800;   // extra settle after return, before each burst
 
 static void oled_show_fine_wait() {
@@ -891,8 +891,8 @@ static void oled_show_fine_wait() {
   oled.setTextSize(1);
   oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0,  0); oled.print(F("Fine Burst Test"));
-  oled.setCursor(0, 12); oled.print(F("10-30ms, 1ms steps"));
-  oled.setCursor(0, 24); oled.print(F("3 reps x 2 dirs"));
+  oled.setCursor(0, 12); oled.print(F("15-25ms, 1ms steps"));
+  oled.setCursor(0, 24); oled.print(F("10 reps x 2 dirs"));
   oled.setCursor(0, 36); oled.print(F("PWM=255, hard-cut"));
   oled.setCursor(0, 54); oled.print(F("B3 = START"));
   oled.display();
@@ -924,7 +924,7 @@ static void run_fine_direction(int start_pos, int8_t dir) {
   return_to_start(start_pos);
   delay(FINE_SETTLE_MS);
 
-  for (uint16_t bms = 10; bms <= 30; bms++) {
+  for (uint16_t bms = 15; bms <= 25; bms++) {
     int counts[FINE_REPS];
 
     for (uint8_t rep = 0; rep < FINE_REPS; rep++) {
@@ -964,16 +964,22 @@ static void run_fine_direction(int start_pos, int8_t dir) {
 }
 
 void run_fine_burst_test() {
-  Serial.println(F("\n=== Fine Burst Test (10–30 ms, 1 ms steps) ==="));
-  Serial.println(F("PWM=255, hard-cut, 3 reps per step"));
+  Serial.println(F("\n=== Fine Burst Test (15–25 ms, 1 ms steps, 10 reps) ==="));
+  Serial.println(F("PWM=255, hard-cut, 10 reps per step"));
   Serial.println(F("STBD: from PORT limit.  PORT: from STBD limit."));
 
   oled_show_fine_wait();
   Serial.println(F("Press B3 to start..."));
   wait_for_btn3();
 
-  Serial.println(F("\nburst_ms\tdir\tc1\tc2\tc3\tavg"));
-  Serial.println(F("--------\t---\t--\t--\t--\t---"));
+  Serial.print(F("\nburst_ms\tdir"));
+  for (uint8_t i = 1; i <= FINE_REPS; i++) {
+    Serial.print('\t'); Serial.print('c'); Serial.print(i);
+  }
+  Serial.println(F("\tavg"));
+  Serial.print(F("--------\t---"));
+  for (uint8_t i = 0; i < FINE_REPS; i++) { Serial.print(F("\t--")); }
+  Serial.println(F("\t---"));
 
   // STBD direction: start at PORT limit
   run_fine_direction(RUDDER_PORT_END + LIMIT_MARGIN, +1);
@@ -1522,7 +1528,7 @@ void setup() {
     oled.setTextColor(SSD1306_WHITE);
 #ifdef RUN_FINE_BURST_TEST
     oled.setCursor(0, 0);  oled.println(F("Fine Burst Test"));
-    oled.setCursor(0, 12); oled.println(F("10-30ms  1ms steps"));
+    oled.setCursor(0, 12); oled.println(F("15-25ms  1ms steps"));
     oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
     oled.setCursor(0, 40); oled.println(F("press B3 to begin"));
 #elif defined(RUN_BURST_SWEEP_TEST)
@@ -1542,7 +1548,7 @@ void setup() {
 
   Serial.println(F("========================================"));
 #ifdef RUN_FINE_BURST_TEST
-  Serial.println(F("  PWM Fine Burst Test (10-30 ms)"));
+  Serial.println(F("  PWM Fine Burst Test (15-25 ms, 10 reps)"));
 #elif defined(RUN_BURST_SWEEP_TEST)
   Serial.println(F("  PWM Burst Sweep Test"));
 #elif defined(RUN_INTERACTIVE_TEST)
