@@ -1579,7 +1579,7 @@ const char* const RCT_SETTING_NAMES[7] = {
   "Pulse Delay ms", // 6
 };
 // Adjustment bounds per setting (inclusive, uint8)
-const uint8_t RCT_MIN_VAL[7] = { 100,  1,  80,  1,  0,  3, 20 };  // pulse_ms min=0 → continuous drive
+const uint8_t RCT_MIN_VAL[7] = { 100,  1,  80,  1,  0,  3,  0 };  // pulse_ms and pulse_delay_ms min=0
 const uint8_t RCT_MAX_VAL[7] = { 255, 200, 254, 200, 100, 100, 250 };
 
 // ---- Usable rudder range (hard limits ± LIMIT_MARGIN) ----
