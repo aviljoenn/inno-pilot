@@ -912,9 +912,9 @@ static void oled_show_fine_run(uint16_t bms, int8_t dir, uint8_t rep) {
 }
 
 // Run one direction's fine sweep.
-// Repositions to start_pos ONCE at the start, then fires all burst_ms steps
-// and all reps consecutively in dir with zero repositioning throughout —
-// so hydraulic slack and line pressure stay primed in dir for the entire run.
+// Before each burst_ms group: return to start_pos (hydraulics reset for that group).
+// Within each group: 10 consecutive bursts, max 100ms between reps, no repositioning.
+// After the 10 reps: wait for full settle, then return to start for the next group.
 static void run_fine_direction(int start_pos, int8_t dir) {
   const char* label = (dir > 0) ? "STBD" : "PORT";
   Serial.print(F("[INFO] "));
@@ -922,26 +922,30 @@ static void run_fine_direction(int start_pos, int8_t dir) {
   Serial.print(F(" direction: start ADC="));
   Serial.println(start_pos);
 
-  // Single reposition — then hands off, no further repositioning
-  oled_show_centering_screen(read_rudder());
-  return_to_start(start_pos);
-  wait_for_stop(2000);
-  delay(FINE_SETTLE_MS);
-
   for (uint16_t bms = 15; bms <= 25; bms++) {
+    // Return to start once before this group's 10 reps
+    oled_show_centering_screen(read_rudder());
+    return_to_start(start_pos);
+    wait_for_stop(2000);
+    delay(FINE_SETTLE_MS);
+
     int counts[FINE_REPS];
 
     for (uint8_t rep = 0; rep < FINE_REPS; rep++) {
-      // No repositioning — consecutive bursts, hydraulics stay primed in dir
+      // OLED updates each rep: shows ms value, direction, rep number
       oled_show_fine_run(bms, dir, rep + 1);
 
       int s = read_rudder();
       motor_drive(dir, 255);
       delay(bms);
       motor_stop();
-      int f = wait_for_stop(2000);
+      delay(100);          // max 100ms between reps — keeps hydraulics primed
+      int f = read_rudder();
       counts[rep] = f - s;
     }
+
+    // Full settle before the return drive
+    wait_for_stop(2000);
 
     // Print row: burst_ms, dir, c1..cN, avg (1 decimal place)
     int sum = 0;
@@ -967,8 +971,8 @@ static void run_fine_direction(int start_pos, int8_t dir) {
 
 void run_fine_burst_test() {
   Serial.println(F("\n=== Fine Burst Test (15–25 ms, 1 ms steps, 10 reps) ==="));
-  Serial.println(F("PWM=255, hard-cut, 10 consecutive reps per step (no reposition between reps)"));
-  Serial.println(F("STBD: repositions to PORT limit before each group.  PORT: to STBD limit."));
+  Serial.println(F("PWM=255, hard-cut, 10 reps per step, 100ms between reps, reposition between groups"));
+  Serial.println(F("STBD: PORT limit start per group.  PORT: STBD limit start per group."));
 
   oled_show_fine_wait();
   Serial.println(F("Press B3 to start..."));
