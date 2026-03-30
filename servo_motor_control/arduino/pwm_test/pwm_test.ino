@@ -2,7 +2,14 @@
 // Binary-search for the minimum PWM duty that reliably starts the motor
 // from standstill on the IBT-2 H-bridge.
 //
-// Usage:
+// ---- Test mode ----
+// RUN_INTERACTIVE_TEST (default): manual remote-target test with OLED + B3 button.
+//   - Centre rudder, display a pre-set ADC target on OLED, wait for B3 (GO).
+//   - Drive at 255 PWM, hard-cut at target, measure coast overshoot.
+//   - Repeat for 3 targets × 3 reps × 2 directions = 18 runs.
+// Comment out RUN_INTERACTIVE_TEST to run the automated comprehensive table instead.
+//
+// Usage (either mode):
 //   1. Stop inno-pilot-bridge, pypilot services on the Pi.
 //   2. Upload this sketch (arduino-cli compile/upload with arduino:avr:nano).
 //   3. Open Serial monitor at 115200 baud — results print automatically.
@@ -16,13 +23,19 @@
 //   D3  = HBRIDGE_LPWM (direction)
 //   D9  = HBRIDGE_EN   (R_EN + L_EN tied — PWM speed)
 //   D11 = Clutch (HIGH = engaged)
-//
-// Algorithm:
-//   Binary search over 0..255 in each direction (STBD then PORT).
-//   Each step: apply PWM for DWELL_MS, measure ADC delta, return to start.
-//   Convergence: 8 iterations per direction, ~3 s each = ~30 s total.
+//   A6  = Button ladder (B3 = GO / next, same resistor divider as motor_simple.ino)
+
+// ---- Test mode selector ----
+// Comment out to run the automated comprehensive table instead.
+#define RUN_INTERACTIVE_TEST
 
 #include <Arduino.h>
+
+#ifdef RUN_INTERACTIVE_TEST
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#endif
 
 // ---- Pin map (must match motor_simple.ino exactly) ----
 const uint8_t RUDDER_PIN       = A2;
@@ -49,6 +62,75 @@ const int      MIN_TRAVEL_NEEDED  = 250;   // minimum counts of free travel befo
 // From motor_simple.ino calibration: ADC=430 @ 0 A, decreases ~1.3 counts/A.
 const int   CURR_ZERO_ADC = 430;
 const float CURR_SLOPE    = 1.31f;  // ADC counts per amp (approx)
+
+// ---- Coasting / ramp-down test constants ----
+const int  COAST_TRAVEL    = 150;  // counts to drive before cut/ramp trigger
+const uint16_t COAST_SETTLE_MS = 350;  // position stable for this long = stopped
+
+// ---- Speed measurement ----
+const uint16_t SPEED_DWELL_MS  = 600;  // ms to drive while measuring counts/s
+
+// ---- Reverse-braking test ----
+const uint8_t  BRAKE_THRESHOLD = 5;    // counts: "dead stop" tolerance (±5 counts)
+const uint16_t BRAKE_MAX_MS    = 250;  // max reverse braking duration to try (ms)
+
+const int PULSE_MOVE = 3;   // counts: threshold for "rudder moved" in pulse test
+
+// ====================================================================
+// Interactive test constants (OLED + button + target list)
+// ====================================================================
+#ifdef RUN_INTERACTIVE_TEST
+
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT  64
+#define OLED_RESET     -1
+#define OLED_ADDR    0x3C
+static Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+static bool oled_ok = false;
+
+// ---- Button (A6 resistor ladder, same thresholds as motor_simple.ino) ----
+const uint8_t  BUTTON_ADC_PIN  = A6;
+const unsigned long BTN_DEBOUNCE_MS = 60UL;
+
+// B3 ADC window: > 257 and <= 419 (from motor_simple.ino decode_button_from_adc)
+static bool is_btn3() {
+  int v = analogRead(BUTTON_ADC_PIN);
+  return (v > 257 && v <= 419);
+}
+
+// Block until B3 is pressed and released (debounced).
+static void wait_for_btn3() {
+  // Wait for press
+  while (true) {
+    if (is_btn3()) {
+      delay(BTN_DEBOUNCE_MS);
+      if (is_btn3()) break;
+    }
+    delay(20);
+  }
+  // Wait for release
+  while (is_btn3()) { delay(20); }
+  delay(BTN_DEBOUNCE_MS);
+}
+
+// ---- Interactive test targets ----
+// Evenly spaced from centre (ADC 512) toward each end (LIMIT_MARGIN = 60 counts).
+// Step ≈ 150 ADC counts; three targets per direction gives good coverage.
+#define N_TARGETS  3
+#define N_REPEATS  3
+const int STBD_TARGETS[N_TARGETS] = { 662, 812, 912 };  // +150, +300, +400 from centre
+const int PORT_TARGETS[N_TARGETS] = { 362, 212, 112 };  // -150, -300, -400 from centre
+
+// ---- Per-run result ----
+struct TargetRunResult {
+  int           start_adc;
+  int           target_adc;
+  int           final_adc;
+  int           overshoot;     // +ve = overshot past target, -ve = undershot
+  unsigned long drive_ms;      // time from motor-on to hard cut at trigger point
+};
+
+#endif  // RUN_INTERACTIVE_TEST
 
 // ====================================================================
 // Low-level helpers
@@ -158,6 +240,26 @@ bool centre_rudder() {
   }
   Serial.println(F("[CENTRE] Failed to reach centre — aborting test."));
   return false;
+}
+
+// Poll every 30 ms until position stable for settle_ms or timeout.
+// Returns the final stable position.
+// settle_ms defaults to COAST_SETTLE_MS; pass a shorter value for fast pulse checks.
+int wait_for_stop(unsigned long timeout_ms, uint16_t settle_ms = COAST_SETTLE_MS) {
+  int  last     = read_rudder();
+  unsigned long t_stable = millis();
+  unsigned long t_start  = millis();
+  while ((unsigned long)(millis() - t_start) < timeout_ms) {
+    delay(30);
+    int cur = read_rudder();
+    if (abs(cur - last) > 1) {
+      t_stable = millis();
+      last = cur;
+    } else if ((unsigned long)(millis() - t_stable) >= settle_ms) {
+      break;
+    }
+  }
+  return read_rudder();
 }
 
 // ====================================================================
@@ -395,36 +497,6 @@ void run_speed_sweep(int8_t dir) {
 // Positive error = overshoot, negative = undershoot.
 // ====================================================================
 
-const int  COAST_TRAVEL    = 150;  // counts to drive before cut/ramp trigger
-const uint16_t COAST_SETTLE_MS = 350;  // position stable for this long = stopped
-
-// ---- Speed measurement ----
-const uint16_t SPEED_DWELL_MS  = 600;  // ms to drive while measuring counts/s
-
-// ---- Reverse-braking test ----
-const uint8_t  BRAKE_THRESHOLD = 5;    // counts: "dead stop" tolerance (±5 counts)
-const uint16_t BRAKE_MAX_MS    = 250;  // max reverse braking duration to try (ms)
-
-// Poll every 30 ms until position stable for settle_ms or timeout.
-// Returns the final stable position.
-// settle_ms defaults to COAST_SETTLE_MS; pass a shorter value for fast pulse checks.
-int wait_for_stop(unsigned long timeout_ms, uint16_t settle_ms = COAST_SETTLE_MS) {
-  int  last     = read_rudder();
-  unsigned long t_stable = millis();
-  unsigned long t_start  = millis();
-  while ((unsigned long)(millis() - t_start) < timeout_ms) {
-    delay(30);
-    int cur = read_rudder();
-    if (abs(cur - last) > 1) {
-      t_stable = millis();
-      last = cur;
-    } else if ((unsigned long)(millis() - t_stable) >= settle_ms) {
-      break;
-    }
-  }
-  return read_rudder();
-}
-
 void run_coast_test() {
   const uint8_t TEST_PWMS[] = {150, 190, 255};
   const uint8_t N  = sizeof(TEST_PWMS) / sizeof(TEST_PWMS[0]);
@@ -556,8 +628,6 @@ void run_coast_test() {
 //
 // Output is tab-friendly for pasting into a spreadsheet.
 // ====================================================================
-
-const int PULSE_MOVE = 3;   // counts: threshold for "rudder moved" in pulse test
 
 // ---- Coast measurement (one shot at a fixed travel distance) --------
 int measure_coast(uint8_t pwm) {
@@ -744,6 +814,272 @@ void run_comprehensive_table() {
 }
 
 // ====================================================================
+// Interactive target test
+//
+// Algorithm: hard-cut (worst-case baseline)
+//   - Centre rudder at ADC 512 before each run.
+//   - Drive at 255 PWM in target direction.
+//   - Hard cut (motor_stop) the instant the rudder ADC crosses the target.
+//   - Wait for rudder to coast to a stop; record final position.
+//
+// Targets (from centre, step 150 cts): STBD 662/812/912, PORT 362/212/112.
+// Sequence: 3 reps × (3 STBD + 3 PORT) = 18 runs total.
+// OLED shows: waiting screen → centering → driving (static) → result.
+// B3 button (A6 ladder) confirms GO and advances to next run.
+//
+// Serial output: TSV header + one row per run (copy-paste into spreadsheet).
+// ====================================================================
+#ifdef RUN_INTERACTIVE_TEST
+
+// ---- OLED screens ----
+
+static void oled_show_waiting(int target_adc, int8_t dir, int run_num, int total_runs) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+
+  oled.setCursor(0, 0);
+  oled.print(F("Run "));
+  oled.print(run_num);
+  oled.print(F(" / "));
+  oled.print(total_runs);
+
+  oled.setCursor(0, 12);
+  oled.print(F("Tgt: "));
+  oled.print(target_adc);
+  oled.print(dir > 0 ? F("  STBD") : F("  PORT"));
+
+  oled.setCursor(0, 22);
+  int dist = target_adc - CENTRE_ADC;
+  if (dist >= 0) oled.print('+');
+  oled.print(dist);
+  oled.print(F(" cts from ctr"));
+
+  oled.setCursor(0, 54);
+  oled.print(F("B3 = GO"));
+
+  oled.display();
+}
+
+static void oled_show_centering(int current_adc) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0, 0);
+  oled.print(F("Centering..."));
+  oled.setCursor(0, 14);
+  oled.print(F("ADC: "));
+  oled.print(current_adc);
+  oled.print(F(" -> "));
+  oled.print(CENTRE_ADC);
+  oled.display();
+}
+
+static void oled_show_driving(int start_adc, int target_adc, int8_t dir) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  // Direction indicator in large text
+  oled.setTextSize(2);
+  oled.setCursor(0, 0);
+  oled.print(dir > 0 ? F(">> STBD") : F("<< PORT"));
+  oled.setTextSize(1);
+  oled.setCursor(0, 20);
+  oled.print(F("From: "));
+  oled.print(start_adc);
+  oled.setCursor(0, 30);
+  oled.print(F("To:   "));
+  oled.print(target_adc);
+  oled.display();
+}
+
+static void oled_show_result(const TargetRunResult& r, int run_num, int total_runs) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+
+  oled.setCursor(0, 0);
+  oled.print(F("Run "));
+  oled.print(run_num);
+  oled.print(F(" / "));
+  oled.print(total_runs);
+
+  oled.setCursor(0, 12);
+  oled.print(F("Tgt:  "));
+  oled.print(r.target_adc);
+
+  oled.setCursor(0, 22);
+  oled.print(F("Got:  "));
+  oled.print(r.final_adc);
+
+  oled.setCursor(0, 32);
+  oled.print(F("Err: "));
+  if (r.overshoot >= 0) oled.print('+');
+  oled.print(r.overshoot);
+  oled.print(F(" cts"));
+
+  oled.setCursor(0, 42);
+  oled.print(r.drive_ms);
+  oled.print(F(" ms drive"));
+
+  oled.setCursor(0, 54);
+  oled.print(F("B3 = next"));
+
+  oled.display();
+}
+
+// ---- Drive to ADC target, hard cut at trigger point ----
+//
+// The OLED driving screen is shown ONCE before the drive loop starts
+// so the I2C update does not delay the cut-point poll.
+static TargetRunResult drive_to_target_hard_cut(int target_adc, int run_num, int total_runs) {
+  TargetRunResult r;
+  r.target_adc = target_adc;
+
+  // Centre first; OLED shows static "Centering..." while return_to_start() runs.
+  oled_show_centering(read_rudder());
+  return_to_start(CENTRE_ADC);
+  delay(500);  // hydraulic settle at centre
+
+  r.start_adc = read_rudder();
+  int8_t dir  = (target_adc > r.start_adc) ? +1 : -1;
+
+  // Show static driving screen before starting — no OLED updates inside the
+  // drive loop so nothing delays the cut-point poll.
+  oled_show_driving(r.start_adc, target_adc, dir);
+
+  unsigned long t_start = millis();
+  motor_drive(dir, 255);
+
+  while (true) {
+    int cur = read_rudder();
+
+    // Hard cut: stop the instant we cross the target ADC
+    if (dir > 0 && cur >= target_adc) break;
+    if (dir < 0 && cur <= target_adc) break;
+
+    // Safety: hard limits
+    if (cur >= (RUDDER_STBD_END - LIMIT_MARGIN)) {
+      Serial.println(F("[WARN] STBD limit guard hit"));
+      break;
+    }
+    if (cur <= (RUDDER_PORT_END + LIMIT_MARGIN)) {
+      Serial.println(F("[WARN] PORT limit guard hit"));
+      break;
+    }
+    // Safety: timeout
+    if ((unsigned long)(millis() - t_start) > 10000UL) {
+      Serial.println(F("[WARN] drive timeout"));
+      break;
+    }
+  }
+  motor_stop();
+  r.drive_ms = millis() - t_start;
+
+  // Wait for rudder to coast to a complete stop
+  r.final_adc = wait_for_stop(2000);
+  r.overshoot = r.final_adc - target_adc;  // +ve = overshot, -ve = undershot
+
+  return r;
+}
+
+// ---- Print one TSV result row to serial ----
+static void print_result_row(int run_num, const char* dir_label, const TargetRunResult& r) {
+  Serial.print(run_num);
+  Serial.print('\t');
+  Serial.print(dir_label);
+  Serial.print('\t');
+  Serial.print(r.start_adc);
+  Serial.print('\t');
+  Serial.print(r.target_adc);
+  Serial.print('\t');
+  Serial.print(r.final_adc);
+  Serial.print('\t');
+  if (r.overshoot >= 0) Serial.print('+');
+  Serial.print(r.overshoot);
+  Serial.print('\t');
+  Serial.print(r.drive_ms);
+  Serial.println();
+}
+
+// ---- Main interactive test loop ----
+//
+// Sequence: for each repeat, run all STBD targets then all PORT targets.
+// Each run: show target → wait B3 → centre → drive → show result → wait B3.
+void run_remote_target_test() {
+  const int total_runs = N_TARGETS * N_REPEATS * 2;  // STBD + PORT directions
+  int run_num = 0;
+
+  Serial.println(F("\n=== Interactive Target Test: hard-cut baseline ==="));
+  Serial.println(F("Algorithm: 255 PWM, hard cut at target ADC crossing"));
+  Serial.print  (F("Targets STBD: "));
+  for (uint8_t i = 0; i < N_TARGETS; i++) { Serial.print(STBD_TARGETS[i]); Serial.print(' '); }
+  Serial.println();
+  Serial.print  (F("Targets PORT: "));
+  for (uint8_t i = 0; i < N_TARGETS; i++) { Serial.print(PORT_TARGETS[i]); Serial.print(' '); }
+  Serial.println();
+  Serial.print  (F("Repeats: ")); Serial.println(N_REPEATS);
+  Serial.println(F(""));
+  Serial.println(F("run\tdir\tstart\ttarget\tfinal\tovershoot\tdrive_ms"));
+  Serial.println(F("---\t---\t-----\t------\t-----\t---------\t--------"));
+
+  for (uint8_t rep = 0; rep < N_REPEATS; rep++) {
+
+    // ---- STBD targets ----
+    for (uint8_t t = 0; t < N_TARGETS; t++) {
+      run_num++;
+      int target = STBD_TARGETS[t];
+
+      oled_show_waiting(target, +1, run_num, total_runs);
+      wait_for_btn3();
+
+      TargetRunResult r = drive_to_target_hard_cut(target, run_num, total_runs);
+
+      oled_show_result(r, run_num, total_runs);
+      print_result_row(run_num, "STBD", r);
+
+      // Show result until user confirms they've seen it
+      wait_for_btn3();
+    }
+
+    // ---- PORT targets ----
+    for (uint8_t t = 0; t < N_TARGETS; t++) {
+      run_num++;
+      int target = PORT_TARGETS[t];
+
+      oled_show_waiting(target, -1, run_num, total_runs);
+      wait_for_btn3();
+
+      TargetRunResult r = drive_to_target_hard_cut(target, run_num, total_runs);
+
+      oled_show_result(r, run_num, total_runs);
+      print_result_row(run_num, "PORT", r);
+
+      wait_for_btn3();
+    }
+  }
+
+  Serial.println(F("\n=== Interactive test complete ==="));
+  Serial.println(F("Re-flash motor_simple.ino when ready."));
+
+  if (oled_ok) {
+    oled.clearDisplay();
+    oled.setTextSize(1);
+    oled.setTextColor(SSD1306_WHITE);
+    oled.setCursor(0, 0);  oled.println(F("Test complete!"));
+    oled.setCursor(0, 16); oled.println(F("Re-flash"));
+    oled.setCursor(0, 24); oled.println(F("motor_simple.ino"));
+    oled.display();
+  }
+}
+
+#endif  // RUN_INTERACTIVE_TEST
+
+// ====================================================================
 // Arduino entry points
 // ====================================================================
 
@@ -766,22 +1102,43 @@ void setup() {
   pinMode(RUDDER_PIN,  INPUT);
   pinMode(PIN_CURRENT, INPUT);
 
+#ifdef RUN_INTERACTIVE_TEST
+  // OLED init (non-blocking: if absent or dead, oled_ok stays false)
+  oled_ok = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  if (oled_ok) {
+    oled.clearDisplay();
+    oled.setTextSize(1);
+    oled.setTextColor(SSD1306_WHITE);
+    oled.setCursor(0, 0);  oled.println(F("PWM Target Test"));
+    oled.setCursor(0, 12); oled.println(F("Hard-cut baseline"));
+    oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
+    oled.setCursor(0, 40); oled.println(F("press B3 to begin"));
+    oled.display();
+  }
+#endif
+
   Serial.println(F("========================================"));
+#ifdef RUN_INTERACTIVE_TEST
+  Serial.println(F("  PWM Target Test — Hard-Cut Baseline"));
+#else
   Serial.println(F("  PWM Motor-Start Threshold Test"));
+#endif
   Serial.println(F("========================================"));
-  Serial.print  (F("  DWELL_MS          = ")); Serial.println(DWELL_MS);
-  Serial.print  (F("  MOVE_THRESHOLD    = ")); Serial.println(MOVE_THRESHOLD);
-  Serial.print  (F("  RETURN_TIMEOUT_MS = ")); Serial.println(RETURN_TIMEOUT_MS);
   Serial.print  (F("  LIMIT_MARGIN      = ")); Serial.println(LIMIT_MARGIN);
-  Serial.print  (F("  MIN_TRAVEL_NEEDED = ")); Serial.println(MIN_TRAVEL_NEEDED);
+  Serial.print  (F("  RETURN_TIMEOUT_MS = ")); Serial.println(RETURN_TIMEOUT_MS);
   Serial.println(F(""));
   Serial.println(F("Ensure rudder is near mid-travel before this runs."));
+
+#ifdef RUN_INTERACTIVE_TEST
+  Serial.println(F("Waiting for B3 (GO) to start first run..."));
+  run_remote_target_test();
+#else
   Serial.println(F("Starting in 2 s..."));
   delay(2000);
-
   // Runs the extended characterisation table:
   //   coast counts, min pulse ms, pulse counts, speed (counts/s), brake ms
   run_comprehensive_table();
+#endif
 
   // Safe state
   motor_stop();
