@@ -26,17 +26,19 @@
 //   A6  = Button ladder (B3 = GO / next, same resistor divider as motor_simple.ino)
 
 // ---- Test mode selector ----
-// Define exactly one of the three modes:
-//   RUN_BURST_SWEEP_TEST  — automated burst-duration sweep (current)
+// Define exactly one of the modes:
+//   RUN_FINE_BURST_TEST   — 10–30 ms × 1 ms steps, 3 reps each, both dirs (current)
+//   RUN_BURST_SWEEP_TEST  — 24-step coarse burst-duration sweep
 //   RUN_INTERACTIVE_TEST  — manual target test with B3 GO button
 //   (neither)             — automated comprehensive table
-#define RUN_BURST_SWEEP_TEST
+#define RUN_FINE_BURST_TEST
+//#define RUN_BURST_SWEEP_TEST
 //#define RUN_INTERACTIVE_TEST
 
 #include <Arduino.h>
 
-// OLED + button hardware used by both interactive modes
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
+// OLED + button hardware used by all interactive modes
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -104,9 +106,9 @@ struct BurstResult {
 };
 
 // ====================================================================
-// OLED + button — shared by RUN_INTERACTIVE_TEST and RUN_BURST_SWEEP_TEST
+// OLED + button — shared by all interactive test modes
 // ====================================================================
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
 
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT  64
@@ -871,7 +873,122 @@ static void oled_show_centering_screen(int current_adc) {
   oled.display();
 }
 
-#endif  // RUN_INTERACTIVE_TEST || RUN_BURST_SWEEP_TEST
+#endif  // shared OLED + button block
+
+// ====================================================================
+// Fine burst test — 10–30 ms × 1 ms steps, 3 reps each direction
+// STBD: starts from PORT limit.  PORT: starts from STBD limit.
+// Single B3 press, then fully automatic.
+// ====================================================================
+#ifdef RUN_FINE_BURST_TEST
+
+static const uint8_t  FINE_REPS       = 3;
+static const uint16_t FINE_SETTLE_MS  = 800;   // extra settle after return, before each burst
+
+static void oled_show_fine_wait() {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("Fine Burst Test"));
+  oled.setCursor(0, 12); oled.print(F("10-30ms, 1ms steps"));
+  oled.setCursor(0, 24); oled.print(F("3 reps x 2 dirs"));
+  oled.setCursor(0, 36); oled.print(F("PWM=255, hard-cut"));
+  oled.setCursor(0, 54); oled.print(F("B3 = START"));
+  oled.display();
+}
+
+static void oled_show_fine_run(uint16_t bms, int8_t dir, uint8_t rep) {
+  if (!oled_ok) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("Fine Burst Test"));
+  oled.setCursor(0, 14); oled.print(dir > 0 ? F(">> STBD") : F("<< PORT"));
+  oled.setCursor(0, 28); oled.print(bms); oled.print(F(" ms  rep "));
+  oled.print(rep); oled.print(F("/")); oled.print(FINE_REPS);
+  oled.setCursor(0, 42); oled.print(F("Running..."));
+  oled.display();
+}
+
+// Run one direction's fine sweep.  start_pos is the limit the rudder returns
+// to before each burst; dir is the burst direction (+1 STBD, -1 PORT).
+static void run_fine_direction(int start_pos, int8_t dir) {
+  const char* label = (dir > 0) ? "STBD" : "PORT";
+  Serial.print(F("[INFO] "));
+  Serial.print(label);
+  Serial.print(F(" direction: start ADC="));
+  Serial.println(start_pos);
+
+  oled_show_centering_screen(read_rudder());
+  return_to_start(start_pos);
+  delay(FINE_SETTLE_MS);
+
+  for (uint16_t bms = 10; bms <= 30; bms++) {
+    int counts[FINE_REPS];
+
+    for (uint8_t rep = 0; rep < FINE_REPS; rep++) {
+      return_to_start(start_pos);
+      wait_for_stop(2000);
+      delay(FINE_SETTLE_MS);
+
+      oled_show_fine_run(bms, dir, rep + 1);
+
+      int s = read_rudder();
+      motor_drive(dir, 255);
+      delay(bms);
+      motor_stop();
+      int f = wait_for_stop(2000);
+      counts[rep] = f - s;
+    }
+
+    // Print row: burst_ms, dir, c1, c2, c3, avg (1 decimal place)
+    int sum = counts[0] + counts[1] + counts[2];
+    int avg_x10 = (sum * 10) / 3;   // truncates toward zero; fine for small integers
+    Serial.print(bms);
+    Serial.print('\t');
+    Serial.print(label);
+    for (uint8_t r = 0; r < FINE_REPS; r++) {
+      Serial.print('\t');
+      if (counts[r] >= 0) Serial.print('+');
+      Serial.print(counts[r]);
+    }
+    Serial.print('\t');
+    if (avg_x10 >= 0) Serial.print('+');
+    Serial.print(avg_x10 / 10);
+    Serial.print('.');
+    int frac = avg_x10 % 10;
+    if (frac < 0) frac = -frac;
+    Serial.println(frac);
+  }
+}
+
+void run_fine_burst_test() {
+  Serial.println(F("\n=== Fine Burst Test (10–30 ms, 1 ms steps) ==="));
+  Serial.println(F("PWM=255, hard-cut, 3 reps per step"));
+  Serial.println(F("STBD: from PORT limit.  PORT: from STBD limit."));
+
+  oled_show_fine_wait();
+  Serial.println(F("Press B3 to start..."));
+  wait_for_btn3();
+
+  Serial.println(F("\nburst_ms\tdir\tc1\tc2\tc3\tavg"));
+  Serial.println(F("--------\t---\t--\t--\t--\t---"));
+
+  // STBD direction: start at PORT limit
+  run_fine_direction(RUDDER_PORT_END + LIMIT_MARGIN, +1);
+
+  // PORT direction: start at STBD limit
+  run_fine_direction(RUDDER_STBD_END - LIMIT_MARGIN, -1);
+
+  // Park at centre
+  oled_show_centering_screen(read_rudder());
+  return_to_start(CENTRE_ADC);
+
+  Serial.println(F("\n=== Fine burst test complete ==="));
+}
+
+#endif  // RUN_FINE_BURST_TEST
 
 // ====================================================================
 // Burst sweep test — 24 burst durations x 2 directions, fully automatic
@@ -1396,14 +1513,19 @@ void setup() {
   pinMode(RUDDER_PIN,  INPUT);
   pinMode(PIN_CURRENT, INPUT);
 
-#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST)
+#if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST)
   // OLED init (non-blocking: if absent or dead, oled_ok stays false)
   oled_ok = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   if (oled_ok) {
     oled.clearDisplay();
     oled.setTextSize(1);
     oled.setTextColor(SSD1306_WHITE);
-#ifdef RUN_BURST_SWEEP_TEST
+#ifdef RUN_FINE_BURST_TEST
+    oled.setCursor(0, 0);  oled.println(F("Fine Burst Test"));
+    oled.setCursor(0, 12); oled.println(F("10-30ms  1ms steps"));
+    oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
+    oled.setCursor(0, 40); oled.println(F("press B3 to begin"));
+#elif defined(RUN_BURST_SWEEP_TEST)
     oled.setCursor(0, 0);  oled.println(F("Burst Sweep Test"));
     oled.setCursor(0, 12); oled.println(F("PWM=255 hard-cut"));
     oled.setCursor(0, 30); oled.println(F("Centre rudder then"));
@@ -1419,7 +1541,9 @@ void setup() {
 #endif
 
   Serial.println(F("========================================"));
-#ifdef RUN_BURST_SWEEP_TEST
+#ifdef RUN_FINE_BURST_TEST
+  Serial.println(F("  PWM Fine Burst Test (10-30 ms)"));
+#elif defined(RUN_BURST_SWEEP_TEST)
   Serial.println(F("  PWM Burst Sweep Test"));
 #elif defined(RUN_INTERACTIVE_TEST)
   Serial.println(F("  PWM Target Test — Hard-Cut Baseline"));
@@ -1432,7 +1556,9 @@ void setup() {
   Serial.println(F(""));
   Serial.println(F("Ensure rudder is near mid-travel before this runs."));
 
-#ifdef RUN_BURST_SWEEP_TEST
+#ifdef RUN_FINE_BURST_TEST
+  run_fine_burst_test();
+#elif defined(RUN_BURST_SWEEP_TEST)
   run_burst_sweep_test();
 #elif defined(RUN_INTERACTIVE_TEST)
   Serial.println(F("Waiting for B3 (GO) to start first run..."));
