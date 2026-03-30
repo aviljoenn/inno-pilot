@@ -213,18 +213,13 @@ const int MIN_TRAVEL_COUNTS = 360;  // 40% floor — warn user if less is availa
 // ====================================================================
 
 // Rudder ADC burst read: 2 dummy reads (S/H channel-switch settle) +
-// 6 real reads → trim min/max → average 4.  Same Stage-1 as motor_simple.ino.
+// 2 real reads → average.  4 total calls (half the original 8); sufficient for
+// the ratify real-time control loop.
 int read_rudder() {
   analogRead(RUDDER_PIN);  // dummy 1
   analogRead(RUDDER_PIN);  // dummy 2
-  uint16_t mn = 1023, mx = 0, sum = 0;
-  for (uint8_t i = 0; i < 6; i++) {
-    uint16_t r = (uint16_t)analogRead(RUDDER_PIN);
-    if (r < mn) mn = r;
-    if (r > mx) mx = r;
-    sum += r;
-  }
-  return (int)(1023 - (sum - mn - mx) / 4);  // invert: match motor_simple.ino convention (STBD=high)
+  uint16_t sum = (uint16_t)analogRead(RUDDER_PIN) + (uint16_t)analogRead(RUDDER_PIN);
+  return (int)(1023 - (sum >> 1));  // invert: STBD=high (match motor_simple.ino convention)
 }
 
 // Current ADC: average 16 samples (all on A1 after channel settle).
