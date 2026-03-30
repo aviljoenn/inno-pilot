@@ -136,9 +136,16 @@ enum ButtonID : uint8_t {
   BTN_NONE = 0,
   BTN_B1,    // value down  / left-most
   BTN_B2,    // scroll left
-  BTN_B3,    // enter (short press) / mode toggle (long press >=3 s)
+  BTN_B3,    // enter (short press) / mode cycle (long press >=3 s)
   BTN_B4,    // scroll right
   BTN_B5,    // value up / right-most
+};
+
+// Long B3 cycles: TEST -> ADJUST -> RATIFY -> TEST
+enum RctModeID : uint8_t {
+  RCT_MODE_TEST = 0,   // set target with remote POT, press B3 to run once
+  RCT_MODE_ADJUST,     // configure settings via button ladder
+  RCT_MODE_RATIFY,     // continuously chases remote POT in real time
 };
 
 // ====================================================================
@@ -1751,7 +1758,7 @@ static void oled_rct_adjust(const RctSettings& s, uint8_t idx) {
   oled.setCursor(0, 26); oled.print(F("Val: "));
   oled.print(((const uint8_t*)&s)[idx]);
   oled.setCursor(0, 40); oled.print(F("B1- B5+  B2< B4>"));
-  oled.setCursor(0, 52); oled.print(F("B3=save 3s=done"));
+  oled.setCursor(0, 52); oled.print(F("B3=save 3s=RATIFY"));
   oled.display();
 }
 
@@ -1772,7 +1779,7 @@ static void oled_rct_test_wait(int target_adc, int cur_adc, bool has_target) {
   }
   oled.setCursor(0, 24); oled.print(F("Rudder: ")); oled.print(cur_adc);
   oled.setCursor(0, 38); oled.print(F("B3=run test"));
-  oled.setCursor(0, 50); oled.print(F("3s B3=adjust mode"));
+  oled.setCursor(0, 50); oled.print(F("3s B3=ADJUST"));
   oled.display();
 }
 
@@ -1883,10 +1890,43 @@ static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
   return r;
 }
 
+static void oled_rct_ratify(int target_adc, int cur_adc, bool in_deadband, bool has_target) {
+  if (!oled_ok) return;
+  int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("RATIFY MODE"));
+  oled.setCursor(0, 12); oled.print(F("Pos: ")); oled.print(cur_adc);
+  oled.setCursor(0, 24);
+  if (has_target) {
+    int pct10 = (int)((int32_t)(target_adc - RCT_PORT_LIMIT) * 1000 / range);
+    oled.print(F("Tgt:")); oled.print(pct10 / 10); oled.print('.'); oled.print(pct10 % 10);
+    oled.print(F("% ")); oled.print(target_adc);
+  } else {
+    oled.print(F("No target"));
+  }
+  oled.setCursor(0, 38); oled.print(in_deadband ? F("[ OK ]") : F("Waiting..."));
+  oled.setCursor(0, 50); oled.print(F("3s B3=TEST mode"));
+  oled.display();
+}
+
+static void oled_rct_ratify_chasing(int target_adc) {
+  if (!oled_ok) return;
+  int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
+  int pct10 = (int)((int32_t)(target_adc - RCT_PORT_LIMIT) * 1000 / range);
+  oled.clearDisplay();
+  oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(0,  0); oled.print(F("RATIFY MODE"));
+  oled.setCursor(0, 12); oled.print(F("Chasing..."));
+  oled.setCursor(0, 24); oled.print(F("Tgt:")); oled.print(pct10 / 10); oled.print('.');
+  oled.print(pct10 % 10); oled.print(F("% ")); oled.print(target_adc);
+  oled.display();
+}
+
 // ---- Adjust mode ----
-// Blocks until a long B3 press exits back to test mode.
+// Blocks until a long B3 press; returns RCT_MODE_RATIFY to advance the mode cycle.
 // On any value change or navigation, saves to EEPROM and reports to bridge.
-static void rct_adjust_mode(RctSettings& s) {
+static RctModeID rct_adjust_mode(RctSettings& s) {
   uint8_t idx      = 0;
   uint8_t prev_idx = 0xFF;  // force initial draw
 
@@ -1928,10 +1968,10 @@ static void rct_adjust_mode(RctSettings& s) {
       }
       case BTN_B3:
         if (hold_ms >= 3000UL) {
-          // Long press: save everything and exit adjust mode
+          // Long press: save everything and advance to RATIFY mode
           rct_save(s);
           rct_report_all_settings(s);
-          return;
+          return RCT_MODE_RATIFY;
         } else {
           // Short press: save current setting and confirm to bridge
           rct_save(s);
@@ -1942,6 +1982,145 @@ static void rct_adjust_mode(RctSettings& s) {
 
       default: break;
     }
+  }
+}
+
+// ---- Ratify mode ----
+// Continuously chases the remote POT target using the same algorithm as TEST mode.
+// Updates at ~4 Hz when idle; runs rct_run_test() as needed.
+// Returns RCT_MODE_TEST when long B3 is pressed.
+static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_target) {
+  unsigned long last_oled_ms = 0;
+  unsigned long b3_down_ms   = 0;
+  bool          b3_held      = false;
+
+  while (true) {
+    // ---- Drain serial: settings updates and target frames ----
+    while (Serial.available()) {
+      if (rct_feed(Serial.read())) {
+        if (rct_rx_code == RCT_SETTING_CODE) {
+          if (rct_apply_setting(s, rct_rx_value)) rct_save(s);
+        } else if (rct_rx_code == RCT_TARGET_CODE) {
+          target_adc   = rct_pct10_to_adc(rct_rx_value);
+          has_target   = true;
+          last_oled_ms = 0;  // force immediate OLED refresh
+        }
+      }
+    }
+
+    int cur = read_rudder();
+    int err = target_adc - cur;
+
+    // ---- Non-blocking long-B3 detection to cycle back to TEST ----
+    ButtonID btn_now = rct_read_raw_button();
+    if (btn_now == BTN_B3) {
+      if (!b3_held) { b3_down_ms = millis(); b3_held = true; }
+      if ((millis() - b3_down_ms) >= 3000UL) {
+        // Long press confirmed: wait for release then return
+        while (rct_read_raw_button() == BTN_B3) { delay(10); while (Serial.available()) Serial.read(); }
+        delay(BTN_DEBOUNCE_MS);
+        return RCT_MODE_TEST;
+      }
+    } else {
+      b3_held = false;
+    }
+
+    // ---- OLED refresh at ~4 Hz ----
+    unsigned long now = millis();
+    if ((now - last_oled_ms) >= 250UL) {
+      oled_rct_ratify(target_adc, cur, abs(err) <= (int)s.deadband, has_target);
+      last_oled_ms = now;
+    }
+
+    // ---- Chase target if outside deadband ----
+    if (has_target && abs(err) > (int)s.deadband) {
+      oled_rct_ratify_chasing(target_adc);
+      RctTestResult r = rct_run_test(s, target_adc);
+      // Send results to bridge for logging (same as TEST mode)
+      rct_send_frame(RCT_RESULT_STOP_CODE,   (uint16_t)r.first_stop_adc);
+      rct_send_frame(RCT_RESULT_PULSES_CODE, (uint16_t)r.pulse_count);
+      rct_send_frame(RCT_RESULT_FINAL_CODE,  (uint16_t)r.final_adc);
+      last_oled_ms = 0;  // force OLED refresh to show new position
+    }
+
+    delay(50);
+  }
+}
+
+// ---- Test mode ----
+// Waits for remote target; short B3 runs one positioning trial; long B3 → ADJUST.
+// Returns RCT_MODE_ADJUST when long B3 is pressed.
+static RctModeID rct_test_mode(RctSettings& s, int& target_adc, bool& has_target) {
+  unsigned long last_oled_ms = 0;
+
+  while (true) {
+    // ---- Poll serial for incoming bridge frames ----
+    while (Serial.available()) {
+      if (rct_feed(Serial.read())) {
+        if (rct_rx_code == RCT_SETTING_CODE) {
+          if (rct_apply_setting(s, rct_rx_value)) rct_save(s);
+        } else if (rct_rx_code == RCT_TARGET_CODE) {
+          target_adc   = rct_pct10_to_adc(rct_rx_value);
+          has_target   = true;
+          last_oled_ms = 0;
+        }
+      }
+    }
+
+    // ---- Check for B3 button press (non-blocking peek) ----
+    if (rct_read_raw_button() == BTN_B3) {
+      delay(BTN_DEBOUNCE_MS);
+      if (rct_read_raw_button() == BTN_B3) {
+        unsigned long t0 = millis();
+        while (rct_read_raw_button() == BTN_B3) {
+          delay(10);
+          while (Serial.available()) Serial.read();
+        }
+        delay(BTN_DEBOUNCE_MS);
+        unsigned long hold_ms = millis() - t0;
+
+        if (hold_ms >= 3000UL) {
+          return RCT_MODE_ADJUST;  // long press → advance mode cycle
+
+        } else if (has_target) {
+          // Short press → run one positioning trial
+          oled_rct_running(target_adc);
+          RctTestResult r = rct_run_test(s, target_adc);
+
+          rct_send_frame(RCT_RESULT_STOP_CODE,   (uint16_t)r.first_stop_adc);
+          rct_send_frame(RCT_RESULT_PULSES_CODE, (uint16_t)r.pulse_count);
+          rct_send_frame(RCT_RESULT_FINAL_CODE,  (uint16_t)r.final_adc);
+
+          oled_rct_result(target_adc, r);
+          unsigned long t_result = millis();
+          while ((millis() - t_result) < 15000UL) {
+            while (Serial.available()) {
+              if (rct_feed(Serial.read()) && rct_rx_code == RCT_TARGET_CODE) {
+                target_adc = rct_pct10_to_adc(rct_rx_value);
+                has_target = true;
+              }
+            }
+            if (rct_read_raw_button() == BTN_B3) {
+              delay(BTN_DEBOUNCE_MS);
+              while (rct_read_raw_button() == BTN_B3) delay(10);
+              delay(BTN_DEBOUNCE_MS);
+              break;
+            }
+            delay(50);
+          }
+          last_oled_ms = 0;
+        }
+      }
+    }
+
+    // ---- Refresh test-wait OLED at ~3 Hz ----
+    unsigned long now = millis();
+    if ((now - last_oled_ms) >= 333UL) {
+      oled_rct_test_wait(target_adc, read_rudder(), has_target);
+      last_oled_ms = now;
+    }
+
+    delay(20);
   }
 }
 
@@ -1972,88 +2151,17 @@ void run_remote_control_test() {
     rct_save(s);  // write valid EEPROM for next boot
   }
 
-  // ---- Main loop: TEST mode ↔ ADJUST mode ----
-  bool has_target   = false;
-  int  target_adc   = CENTRE_ADC;  // shown on OLED until remote sends TGT
-  unsigned long last_oled_ms = 0;
+  // ---- Mode switcher: TEST → ADJUST → RATIFY → TEST (long B3 cycles) ----
+  bool       has_target = false;
+  int        target_adc = CENTRE_ADC;
+  RctModeID  mode       = RCT_MODE_TEST;
 
   while (true) {
-    // ---- Poll serial for incoming bridge frames ----
-    while (Serial.available()) {
-      if (rct_feed(Serial.read())) {
-        if (rct_rx_code == RCT_SETTING_CODE) {
-          // Pi pushed a setting update (e.g. on bridge restart)
-          if (rct_apply_setting(s, rct_rx_value)) {
-            rct_save(s);
-          }
-        } else if (rct_rx_code == RCT_TARGET_CODE) {
-          target_adc  = rct_pct10_to_adc(rct_rx_value);
-          has_target  = true;
-          last_oled_ms = 0;  // force immediate OLED refresh
-        }
-      }
+    switch (mode) {
+      case RCT_MODE_TEST:   mode = rct_test_mode  (s, target_adc, has_target); break;
+      case RCT_MODE_ADJUST: mode = rct_adjust_mode(s);                         break;
+      case RCT_MODE_RATIFY: mode = rct_ratify_mode(s, target_adc, has_target); break;
     }
-
-    // ---- Check for B3 button press (non-blocking peek) ----
-    if (rct_read_raw_button() == BTN_B3) {
-      delay(BTN_DEBOUNCE_MS);
-      if (rct_read_raw_button() == BTN_B3) {
-        // Measure hold time while button is down
-        unsigned long t0 = millis();
-        while (rct_read_raw_button() == BTN_B3) {
-          delay(10);
-          while (Serial.available()) Serial.read();  // drain while holding
-        }
-        delay(BTN_DEBOUNCE_MS);
-        unsigned long hold_ms = millis() - t0;
-
-        if (hold_ms >= 3000UL) {
-          // Long press → enter adjust mode (blocks until long-press exit)
-          rct_adjust_mode(s);
-          last_oled_ms = 0;  // force OLED refresh on return
-
-        } else if (has_target) {
-          // Short press → run positioning test
-          oled_rct_running(target_adc);
-          RctTestResult r = rct_run_test(s, target_adc);
-
-          // Report results to bridge
-          rct_send_frame(RCT_RESULT_STOP_CODE,   (uint16_t)r.first_stop_adc);
-          rct_send_frame(RCT_RESULT_PULSES_CODE, (uint16_t)r.pulse_count);
-          rct_send_frame(RCT_RESULT_FINAL_CODE,  (uint16_t)r.final_adc);
-
-          // Display result on OLED; wait for B3 dismiss or 15 s timeout
-          oled_rct_result(target_adc, r);
-          unsigned long t_result = millis();
-          while ((millis() - t_result) < 15000UL) {
-            while (Serial.available()) {
-              if (rct_feed(Serial.read()) && rct_rx_code == RCT_TARGET_CODE) {
-                target_adc = rct_pct10_to_adc(rct_rx_value);
-                has_target = true;
-              }
-            }
-            if (rct_read_raw_button() == BTN_B3) {
-              delay(BTN_DEBOUNCE_MS);
-              while (rct_read_raw_button() == BTN_B3) delay(10);
-              delay(BTN_DEBOUNCE_MS);
-              break;
-            }
-            delay(50);
-          }
-          last_oled_ms = 0;  // return to test-wait screen
-        }
-        // else: short press with no target — do nothing (OLED already shows "No target")
-      }
-    }
-
-    // ---- Refresh test-wait OLED at ~3 Hz ----
-    unsigned long now = millis();
-    if ((now - last_oled_ms) >= 333UL) {
-      oled_rct_test_wait(target_adc, read_rudder(), has_target);
-      last_oled_ms = now;
-    }
-
-    delay(20);
   }
 }
 
