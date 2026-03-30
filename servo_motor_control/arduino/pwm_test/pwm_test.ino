@@ -1104,7 +1104,7 @@ static TargetRunResult drive_to_target_speed_brake(int target_adc) {
     if (rm_state == 0) {  // RM_DRIVING (also handles fall-through from SETTLED)
       int8_t dir = (error > 0) ? +1 : (error < 0) ? -1 : 0;
 
-      if (dir == 0 || abs_error <= REMOTE_DEADBAND) {
+      if (dir == 0) {
         motor_stop();
         rm_state = 2;
         break;
