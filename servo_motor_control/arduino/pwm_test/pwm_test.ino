@@ -912,9 +912,9 @@ static void oled_show_fine_run(uint16_t bms, int8_t dir, uint8_t rep) {
 }
 
 // Run one direction's fine sweep.
-// Repositions to start_pos once before each burst_ms group, then fires
-// FINE_REPS consecutive bursts with no repositioning between reps — so
-// hydraulic slack and line pressure stay taken up in dir throughout the group.
+// Repositions to start_pos ONCE at the start, then fires all burst_ms steps
+// and all reps consecutively in dir with zero repositioning throughout —
+// so hydraulic slack and line pressure stay primed in dir for the entire run.
 static void run_fine_direction(int start_pos, int8_t dir) {
   const char* label = (dir > 0) ? "STBD" : "PORT";
   Serial.print(F("[INFO] "));
@@ -922,17 +922,17 @@ static void run_fine_direction(int start_pos, int8_t dir) {
   Serial.print(F(" direction: start ADC="));
   Serial.println(start_pos);
 
-  for (uint16_t bms = 15; bms <= 25; bms++) {
-    // Reposition once per burst_ms group, then leave hydraulics alone
-    oled_show_centering_screen(read_rudder());
-    return_to_start(start_pos);
-    wait_for_stop(2000);
-    delay(FINE_SETTLE_MS);
+  // Single reposition — then hands off, no further repositioning
+  oled_show_centering_screen(read_rudder());
+  return_to_start(start_pos);
+  wait_for_stop(2000);
+  delay(FINE_SETTLE_MS);
 
+  for (uint16_t bms = 15; bms <= 25; bms++) {
     int counts[FINE_REPS];
 
     for (uint8_t rep = 0; rep < FINE_REPS; rep++) {
-      // No repositioning between reps — preserve hydraulic state in dir
+      // No repositioning — consecutive bursts, hydraulics stay primed in dir
       oled_show_fine_run(bms, dir, rep + 1);
 
       int s = read_rudder();
