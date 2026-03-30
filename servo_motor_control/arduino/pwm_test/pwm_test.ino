@@ -1704,6 +1704,29 @@ static ButtonID rct_read_raw_button() {
   return BTN_B1;
 }
 
+// Call once per main-loop iteration.  Returns the measured loop rate (Hz),
+// updated every second.  Uses static state — valid across mode transitions.
+static uint16_t rct_tick_hz() {
+  static uint16_t      hz  = 0;
+  static uint16_t      cnt = 0;
+  static unsigned long t0  = 0;
+  cnt++;
+  unsigned long now = millis();
+  if (now - t0 >= 1000UL) {
+    hz  = cnt;
+    cnt = 0;
+    t0  = now;
+  }
+  return hz;
+}
+
+// Right-align "NNHz" on the OLED bottom row (y=56, within 128 px).
+static void oled_print_hz(uint16_t hz) {
+  uint8_t digits = (hz < 10u) ? 1u : (hz < 100u) ? 2u : (hz < 1000u) ? 3u : 4u;
+  oled.setCursor(128 - (digits + 2) * 6, 56);
+  oled.print(hz); oled.print(F("Hz"));
+}
+
 // Block until a debounced button is pressed and released.
 // *hold_ms is set to the duration the button was held.
 // Drains serial RX while waiting so the 128-byte buffer never overflows.
@@ -1762,7 +1785,7 @@ static void oled_rct_adjust(const RctSettings& s, uint8_t idx) {
   oled.display();
 }
 
-static void oled_rct_test_wait(int target_adc, int cur_adc, bool has_target) {
+static void oled_rct_test_wait(int target_adc, int cur_adc, bool has_target, uint16_t hz) {
   if (!oled_ok) return;
   oled.clearDisplay();
   oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
@@ -1780,6 +1803,7 @@ static void oled_rct_test_wait(int target_adc, int cur_adc, bool has_target) {
   oled.setCursor(0, 24); oled.print(F("Rudder: ")); oled.print(cur_adc);
   oled.setCursor(0, 38); oled.print(F("B3=run test"));
   oled.setCursor(0, 50); oled.print(F("3s B3=ADJUST"));
+  oled_print_hz(hz);
   oled.display();
 }
 
@@ -1890,7 +1914,7 @@ static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
   return r;
 }
 
-static void oled_rct_ratify(int target_adc, int cur_adc, bool in_deadband, bool has_target) {
+static void oled_rct_ratify(int target_adc, int cur_adc, bool in_deadband, bool has_target, uint16_t hz) {
   if (!oled_ok) return;
   int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
   oled.clearDisplay();
@@ -1907,10 +1931,11 @@ static void oled_rct_ratify(int target_adc, int cur_adc, bool in_deadband, bool 
   }
   oled.setCursor(0, 38); oled.print(in_deadband ? F("[ OK ]") : F("Waiting..."));
   oled.setCursor(0, 50); oled.print(F("3s B3=TEST mode"));
+  oled_print_hz(hz);
   oled.display();
 }
 
-static void oled_rct_ratify_chasing(int target_adc) {
+static void oled_rct_ratify_chasing(int target_adc, uint16_t hz) {
   if (!oled_ok) return;
   int range = RCT_STBD_LIMIT - RCT_PORT_LIMIT;
   int pct10 = (int)((int32_t)(target_adc - RCT_PORT_LIMIT) * 1000 / range);
@@ -1920,6 +1945,7 @@ static void oled_rct_ratify_chasing(int target_adc) {
   oled.setCursor(0, 12); oled.print(F("Chasing..."));
   oled.setCursor(0, 24); oled.print(F("Tgt:")); oled.print(pct10 / 10); oled.print('.');
   oled.print(pct10 % 10); oled.print(F("% ")); oled.print(target_adc);
+  oled_print_hz(hz);
   oled.display();
 }
 
@@ -2025,16 +2051,18 @@ static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_targ
       b3_held = false;
     }
 
+    uint16_t hz = rct_tick_hz();
+
     // ---- OLED refresh at ~4 Hz ----
     unsigned long now = millis();
     if ((now - last_oled_ms) >= 250UL) {
-      oled_rct_ratify(target_adc, cur, abs(err) <= (int)s.deadband, has_target);
+      oled_rct_ratify(target_adc, cur, abs(err) <= (int)s.deadband, has_target, hz);
       last_oled_ms = now;
     }
 
     // ---- Chase target if outside deadband ----
     if (has_target && abs(err) > (int)s.deadband) {
-      oled_rct_ratify_chasing(target_adc);
+      oled_rct_ratify_chasing(target_adc, hz);
       RctTestResult r = rct_run_test(s, target_adc);
       // Send results to bridge for logging (same as TEST mode)
       rct_send_frame(RCT_RESULT_STOP_CODE,   (uint16_t)r.first_stop_adc);
@@ -2116,7 +2144,7 @@ static RctModeID rct_test_mode(RctSettings& s, int& target_adc, bool& has_target
     // ---- Refresh test-wait OLED at ~3 Hz ----
     unsigned long now = millis();
     if ((now - last_oled_ms) >= 333UL) {
-      oled_rct_test_wait(target_adc, read_rudder(), has_target);
+      oled_rct_test_wait(target_adc, read_rudder(), has_target, rct_tick_hz());
       last_oled_ms = now;
     }
 
