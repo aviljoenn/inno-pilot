@@ -1869,7 +1869,12 @@ static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
       delay(s.pulse_ms);
       motor_stop();
       r.pulse_count++;
-      delay(s.pulse_delay_ms);
+      // Wait for hydraulic tail to settle before next position read.
+      // Flat delay alone is not enough — the rudder keeps drifting after motor stop,
+      // causing a premature re-pulse and oscillation around the deadband.
+      // wait_for_stop with a short settle window gives the same minimum gap as
+      // pulse_delay_ms but exits early once position is stable.
+      wait_for_stop((unsigned long)s.pulse_delay_ms + 400UL, 80);
     }
   }
   motor_stop();  // ensure stopped on exit (needed when pulse_ms=0 continuous mode)
