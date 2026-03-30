@@ -70,7 +70,7 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B5"
+INNOPILOT_VERSION   = "v1.2.0_B6"
 INNOPILOT_BUILD_NUM = 6  # increment with each push during development
 
 # ---------------------------------------------------------------------------
@@ -131,6 +131,8 @@ RCT_TARGET_CODE         = 0xF3  # Pi -> Nano: target pct×10 (0-1000; 500 = mids
 RCT_RESULT_STOP_CODE    = 0xF4  # Nano -> Pi: first_stop_adc after full-power coast
 RCT_RESULT_PULSES_CODE  = 0xF5  # Nano -> Pi: fine pulse count used to reach deadband
 RCT_RESULT_FINAL_CODE   = 0xF6  # Nano -> Pi: final_adc inside (or nearest to) deadband
+RCT_RDR_PCT_CODE        = 0xF7  # Nano -> Pi: ratify live rudder position pct×10 (0-1000)
+RCT_HZ_CODE             = 0xF8  # Nano -> Pi: ratify loop Hz (sent once per second)
 
 # RCT settings — stored on Pi as JSON, pushed to Nano on bridge startup
 RCT_SETTINGS_PATH = "/etc/inno-pilot/rct_settings.json"
@@ -1139,6 +1141,16 @@ def main() -> None:
                     log.info("RCT result: final_adc=%d", value)
                     if remote_sock is not None:
                         remote_send(remote_sock, f"RCT_FINAL {value}")
+
+                elif code == RCT_RDR_PCT_CODE:
+                    # Ratify live position: forward as RDR_PCT (0-100) for remote rudder bar
+                    if remote_sock is not None:
+                        remote_send(remote_sock, f"RDR_PCT {value / 10.0:.1f}")
+
+                elif code == RCT_HZ_CODE:
+                    # Ratify loop Hz: forward to remote for display on MODE line
+                    if remote_sock is not None:
+                        remote_send(remote_sock, f"HZ {value}")
 
         # ================================================================
         # 6. TCP remote: accept new connections / handle existing client

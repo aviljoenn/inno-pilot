@@ -1571,6 +1571,8 @@ const uint8_t RCT_TARGET_CODE         = 0xF3; // Pi->Nano: target pct×10 (0-100
 const uint8_t RCT_RESULT_STOP_CODE    = 0xF4; // Nano->Pi: first_stop_adc after coast
 const uint8_t RCT_RESULT_PULSES_CODE  = 0xF5; // Nano->Pi: fine pulse count
 const uint8_t RCT_RESULT_FINAL_CODE   = 0xF6; // Nano->Pi: final_adc
+const uint8_t RCT_RDR_PCT_CODE        = 0xF7; // Nano->Pi: current rudder position pct×10 (0-1000)
+const uint8_t RCT_HZ_CODE             = 0xF8; // Nano->Pi: ratify loop Hz (sent once per second)
 const uint8_t MANUAL_MODE_CODE        = 0xE9; // Pi->Nano: 1=enter RATIFY, 0=exit (matches bridge)
 
 // ---- EEPROM layout ----
@@ -2041,6 +2043,8 @@ static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_targ
   // Blank the OLED for the duration of ratify mode.
   if (oled_ok) { oled.clearDisplay(); oled.display(); }
 
+  uint16_t last_hz = 0;
+
   while (true) {
     // ---- Drain serial: target updates, settings, and exit trigger ----
     while (Serial.available()) {
@@ -2065,9 +2069,20 @@ static RctModeID rct_ratify_mode(RctSettings& s, int& target_adc, bool& has_targ
     int err     = target_adc - cur;
     int abs_err = abs(err);
 
+    // ---- Telemetry: position every iteration; Hz only when value changes (~1/s) ----
+    {
+      int32_t p10 = (int32_t)(cur - RCT_PORT_LIMIT) * 1000 / (RCT_STBD_LIMIT - RCT_PORT_LIMIT);
+      if (p10 <    0) p10 =    0;
+      if (p10 > 1000) p10 = 1000;
+      rct_send_frame(RCT_RDR_PCT_CODE, (uint16_t)p10);
+    }
+    uint16_t hz = rct_tick_hz();
+    if (hz != last_hz) { rct_send_frame(RCT_HZ_CODE, hz); last_hz = hz; }
+
     // ---- Zone 1: within deadband — hold position ----
     if (abs_err <= (int)s.deadband) {
       motor_stop();
+      if (s.pulse_ms > 0) delay(s.pulse_ms);  // throttle serial output to chasing rate
       continue;
     }
 

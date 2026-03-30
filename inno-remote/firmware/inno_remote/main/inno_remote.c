@@ -33,6 +33,7 @@ static volatile uint32_t g_bridge_flags       = 0;
 static volatile bool     g_warn_ap_pressed    = false;
 static volatile uint32_t g_warn_ap_pressed_ms = 0;
 static char              g_bridge_mode[16]    = "IDLE";
+static volatile int      g_bridge_hz          = 0;     // ratify loop Hz from Nano (0 = not in ratify)
 static portMUX_TYPE      g_bridge_mux         = portMUX_INITIALIZER_UNLOCKED;
 
 // Nano comms fault state forwarded by bridge (written from TCP rx callback, read in main loop)
@@ -44,7 +45,7 @@ static volatile bool g_version_mismatch = false;  // set by HELLO handler
 static char          g_ota_url[72]      = "";      // set by OTA handler; empty = no update pending
 
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v1.2.0_B5"
+#define INNOPILOT_VERSION "v1.2.0_B6"
 
 // ========================
 // OLED PINS (as built)
@@ -638,11 +639,15 @@ static void on_bridge_rx(const char *line)
         g_bridge_rdr = strtof(line + 4, NULL);
     } else if (strncmp(line, "FLAGS ", 6) == 0) {
         g_bridge_flags = (uint32_t)strtoul(line + 6, NULL, 10);
+    } else if (strncmp(line, "HZ ", 3) == 0) {
+        g_bridge_hz = (int)strtol(line + 3, NULL, 10);
     } else if (strncmp(line, "MODE ", 5) == 0) {
         portENTER_CRITICAL(&g_bridge_mux);
         strncpy(g_bridge_mode, line + 5, sizeof(g_bridge_mode) - 1);
         g_bridge_mode[sizeof(g_bridge_mode) - 1] = '\0';
         portEXIT_CRITICAL(&g_bridge_mux);
+        // Clear Hz when leaving MANUAL — Nano stops sending HZ frames in other modes
+        if (strcmp(line + 5, "MANUAL") != 0) g_bridge_hz = 0;
     } else if (strcmp(line, "WARN AP_PRESSED") == 0) {
         g_warn_ap_pressed    = true;
         g_warn_ap_pressed_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -1340,6 +1345,10 @@ void app_main(void)
             draw_centered_line_6x10("!COMMS FAULT!", Y_MODE_BASE);
         } else if (comms_disp == BRIDGE_COMMS_WARN) {
             snprintf(mode_line, sizeof(mode_line), "MODE: %s [W]", mode_str(auto_low, manual_low));
+            draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        } else if (in_manual && g_bridge_hz > 0) {
+            snprintf(mode_line, sizeof(mode_line), "MODE: %s %dHz",
+                     mode_str(auto_low, manual_low), g_bridge_hz);
             draw_centered_line_6x10(mode_line, Y_MODE_BASE);
         } else {
             snprintf(mode_line, sizeof(mode_line), "MODE: %s", mode_str(auto_low, manual_low));
