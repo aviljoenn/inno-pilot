@@ -1855,6 +1855,9 @@ static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
     int err = target_adc - cur;
     if (abs(err) <= (int)s.deadband) {
       r.in_deadband = true;
+      r.final_adc = cur;  // capture the exact reading that satisfied the deadband condition;
+                          // a fresh read_rudder() after break can differ by ±1-2 ADC counts
+                          // (noise) and misleadingly show a value outside the deadband.
       break;
     }
     int8_t pulse_dir = (err > 0) ? +1 : -1;
@@ -1869,17 +1872,14 @@ static RctTestResult rct_run_test(const RctSettings& s, int target_adc) {
       delay(s.pulse_ms);
       motor_stop();
       r.pulse_count++;
-      // Wait for hydraulic tail to settle before next position read.
-      // Flat delay alone is not enough — the rudder keeps drifting after motor stop,
-      // causing a premature re-pulse and oscillation around the deadband.
-      // wait_for_stop with a short settle window gives the same minimum gap as
-      // pulse_delay_ms but exits early once position is stable.
-      wait_for_stop((unsigned long)s.pulse_delay_ms + 400UL, 80);
+      delay(s.pulse_delay_ms);
     }
   }
   motor_stop();  // ensure stopped on exit (needed when pulse_ms=0 continuous mode)
 
-  r.final_adc = read_rudder();
+  if (!r.in_deadband) {
+    r.final_adc = read_rudder();  // cap-exit: read current position as final result
+  }
   return r;
 }
 
