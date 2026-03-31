@@ -17,7 +17,7 @@
 //   5. When done, re-flash motor_simple.ino.
 //
 // Pin wiring (same as motor_simple.ino):
-//   A2  = rudder pot (position feedback)
+//   ADS1115 A0 (I2C 0x48) = rudder pot (position feedback) — replaces Nano A2
 //   A1  = current sensor (IBT-2 analog output)
 //   D2  = HBRIDGE_RPWM (direction)
 //   D3  = HBRIDGE_LPWM (direction)
@@ -45,17 +45,24 @@
 // OLED + button hardware used by all interactive modes
 #if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST) || defined(RUN_REMOTE_CONTROL_TEST)
 #include <Wire.h>
+#include <Adafruit_ADS1X15.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #endif
 
 // ---- Pin map (must match motor_simple.ino exactly) ----
-const uint8_t RUDDER_PIN       = A2;
+// RUDDER_PIN (A2) retired — rudder feedback now read from ADS1115 A0 (I2C 0x48).
 const uint8_t PIN_CURRENT      = A1;
 const uint8_t HBRIDGE_RPWM_PIN = 2;
 const uint8_t HBRIDGE_LPWM_PIN = 3;
 const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN: R_EN + L_EN tied together
 const uint8_t CLUTCH_PIN       = 11;
+
+// ---- ADS1115 rudder ADC (I2C 0x48, channel A0, continuous mode) ----
+// GAIN_TWOTHIRDS = ±6.144 V, LSB = 0.1875 mV.  5 V pot → ~26666 counts.
+// Continuous mode at 860 SPS keeps hot-loop reads fast (no per-read wait).
+Adafruit_ADS1115 ads;
+static const int16_t ADS_5V_COUNT = 26666;  // raw counts at 5.000 V
 
 // ---- Hard rudder limits (from motor_simple.ino) ----
 const int RUDDER_PORT_END  = 1;
@@ -212,20 +219,20 @@ const int MIN_TRAVEL_COUNTS = 360;  // 40% floor — warn user if less is availa
 // Low-level helpers
 // ====================================================================
 
-// Rudder ADC burst read: 2 dummy reads (S/H channel-switch settle) +
-// 2 real reads → average.  4 total calls (half the original 8); sufficient for
-// the ratify real-time control loop.
+// Read rudder position from ADS1115 A0 (continuous mode — fetch last conversion).
+// No dummy reads needed: external ADC has no shared S/H MUX with PIN_CURRENT.
+// Returns 0–1023, inverted to match motor_simple.ino convention (STBD = high).
 int read_rudder() {
-  analogRead(RUDDER_PIN);  // dummy 1
-  analogRead(RUDDER_PIN);  // dummy 2
-  uint16_t sum = (uint16_t)analogRead(RUDDER_PIN) + (uint16_t)analogRead(RUDDER_PIN);
-  return (int)(1023 - (sum >> 1));  // invert: STBD=high (match motor_simple.ino convention)
+  int16_t raw = ads.getLastConversionResults();
+  if (raw < 0) raw = 0;                              // clamp: noise near GND
+  int scaled  = (int)((int32_t)raw * 1023 / ADS_5V_COUNT);
+  scaled      = constrain(scaled, 0, 1023);
+  return 1023 - scaled;                              // invert: STBD = high ADC value
 }
 
-// Current ADC: average 16 samples (all on A1 after channel settle).
-// Call only when not mid-dwell to avoid mixing A1/A2 reads excessively.
+// Current ADC: average 16 samples on A1.
+// No channel-settle dummy needed: rudder is now on the external ADS1115, not A2.
 int read_current_adc() {
-  analogRead(PIN_CURRENT);  // settle after possible A2 access
   uint32_t s = 0;
   for (uint8_t i = 0; i < 16; i++) s += (uint32_t)analogRead(PIN_CURRENT);
   return (int)(s >> 4);
@@ -394,17 +401,12 @@ void run_direction_test(int8_t dir) {
     uint16_t curr_cnt = 0;
     bool limit_tripped = false;
 
-    // Check limit on EVERY iteration (~416 µs/loop) so a fast motor cannot
-    // overshoot between polls.  Per-iteration pattern:
-    //   1. dummy analogRead(A2)  — settle S/H from last A1 read
-    //   2. real  analogRead(A2)  — quick limit guard (±a few counts OK here)
-    //   3. dummy analogRead(A1)  — settle S/H from A2
-    //   4. real  analogRead(A1)  — current sample
-    // Accepts minor channel-switch noise; limit margin >> noise floor.
+    // Check limit on EVERY iteration so a fast motor cannot overshoot between polls.
+    // Rudder is now on ADS1115 (continuous mode) — read_rudder() fetches the last
+    // conversion register via I2C; no dummy reads or channel-settle needed.
     while ((unsigned long)(millis() - t0) < DWELL_MS) {
-      // Quick rudder position check (A2)
-      (void)analogRead(RUDDER_PIN);                      // dummy: settle from A1
-      int a_now = (int)analogRead(RUDDER_PIN);           // real limit-guard read
+      // Quick rudder position check (ADS1115 A0)
+      int a_now = read_rudder();
       int d_fwd = (dir > 0) ? (RUDDER_STBD_END - a_now)
                              : (a_now - RUDDER_PORT_END);
       if (d_fwd < LIMIT_MARGIN) {
@@ -412,8 +414,7 @@ void run_direction_test(int8_t dir) {
         break;
       }
 
-      // Current sample (A1)
-      (void)analogRead(PIN_CURRENT);                     // dummy: settle from A2
+      // Current sample (A1) — no settle dummy needed (rudder no longer on Nano ADC)
       curr_sum += (uint32_t)analogRead(PIN_CURRENT);     // real current read
       curr_cnt++;
     }
@@ -515,12 +516,10 @@ void run_speed_sweep(int8_t dir) {
     bool limit_hit    = false;
 
     while ((unsigned long)(millis() - t0) < DWELL_MS) {
-      (void)analogRead(RUDDER_PIN);
-      int a_now = (int)analogRead(RUDDER_PIN);
+      int a_now = read_rudder();  // ADS1115 A0 continuous — no dummy reads needed
       int d_fwd = (dir > 0) ? (RUDDER_STBD_END - a_now) : (a_now - RUDDER_PORT_END);
       if (d_fwd < LIMIT_MARGIN) { limit_hit = true; break; }
-      (void)analogRead(PIN_CURRENT);
-      curr_sum += (uint32_t)analogRead(PIN_CURRENT);
+      curr_sum += (uint32_t)analogRead(PIN_CURRENT);  // A1 current — no settle needed
       curr_cnt++;
     }
     motor_stop();
@@ -2287,8 +2286,14 @@ void setup() {
   delay(600);  // allow clutch to seat fully
 
   // ADC pins
-  pinMode(RUDDER_PIN,  INPUT);
+  // RUDDER_PIN (A2) retired — rudder feedback on ADS1115 A0 via I2C.
   pinMode(PIN_CURRENT, INPUT);
+
+  // ADS1115: GAIN_TWOTHIRDS (±6.144 V) + continuous mode on channel A0.
+  // Continuous mode avoids per-read ~8 ms single-shot wait in hot loops.
+  ads.setGain(GAIN_TWOTHIRDS);
+  ads.begin(0x48);
+  ads.startADCReading(ADS1X15_REG_CONFIG_MUX_SINGLE_0, /*continuous=*/true);
 
 #if defined(RUN_INTERACTIVE_TEST) || defined(RUN_BURST_SWEEP_TEST) || defined(RUN_FINE_BURST_TEST) || defined(RUN_REMOTE_CONTROL_TEST)
   // OLED init (non-blocking: if absent or dead, oled_ok stays false)
