@@ -67,6 +67,11 @@ _sse_lock  = threading.Lock()
 # Commands flowing from browser → bridge
 _cmd_q: "queue.Queue[str]" = queue.Queue(maxsize=200)
 
+# When cleared, the bridge thread drops the TCP connection and stops reconnecting.
+# Set by default (connected); cleared when the mode toggle is moved to OFF.
+_bridge_active = threading.Event()
+_bridge_active.set()
+
 
 def _snap() -> dict:
     with _state_lock:
@@ -150,10 +155,18 @@ def bridge_client() -> None:
     """
     Persistent TCP client to inno-pilot-bridge.
     Reconnects automatically after any failure.
+    When _bridge_active is cleared (mode OFF), drops the current connection
+    and does not reconnect until the event is set again.
     Runs forever as a daemon thread.
     """
     while True:
+        # Don't attempt connection while mode is OFF
+        if not _bridge_active.is_set():
+            time.sleep(0.2)
+            continue
+
         sock: Optional[socket.socket] = None
+        intentional_disconnect = False
         try:
             log.info("Connecting to bridge %s:%d", BRIDGE_HOST, BRIDGE_PORT)
             sock = socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=5.0)
@@ -165,6 +178,12 @@ def bridge_client() -> None:
             last_ping = time.monotonic()
 
             while True:
+                # Drop connection immediately if mode switched to OFF
+                if not _bridge_active.is_set():
+                    log.info("Bridge: mode OFF — dropping TCP connection")
+                    intentional_disconnect = True
+                    break
+
                 now = time.monotonic()
                 if now - last_ping >= PING_PERIOD_S:
                     sock.sendall(b"PING\n")
@@ -199,14 +218,18 @@ def bridge_client() -> None:
                     sock.close()
                 except Exception:
                     pass
-            _update(
-                connected=False, hdg=None, cmd=None,
-                rdr=None, rdr_pct=None, ap=0,
-                mode="IDLE", comms="OK", warn=None,
-            )
-
-        log.info("Reconnecting in %ds...", RECONNECT_DELAY_S)
-        time.sleep(RECONNECT_DELAY_S)
+            if intentional_disconnect:
+                # Mode OFF — stay disconnected; state already set by _handle_command
+                log.info("Bridge disconnected (mode OFF)")
+            else:
+                # Unexpected loss — reset to IDLE and schedule reconnect
+                _update(
+                    connected=False, hdg=None, cmd=None,
+                    rdr=None, rdr_pct=None, ap=0,
+                    mode="IDLE", comms="OK", warn=None,
+                )
+                log.info("Reconnecting in %ds...", RECONNECT_DELAY_S)
+                time.sleep(RECONNECT_DELAY_S)
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +733,8 @@ function updateUI(d) {
   gConnected = !!d.connected;
   gMode      = d.mode || 'IDLE';
 
-  setConnected(gConnected);
+  // Suppress "NO BRIDGE" overlay when mode is OFF (intentional disconnect)
+  setConnected(gConnected || gMode === 'OFF');
 
   // OLED mode line
   document.getElementById('o-mode').textContent = gMode;
@@ -752,6 +776,9 @@ function updateUI(d) {
       connEl.textContent = 'CONNECTED';
       connEl.className = 'ok';
     }
+  } else if (gMode === 'OFF') {
+    connEl.textContent = 'OFFLINE';
+    connEl.className = 'warn';   // amber — intentional, not a fault
   } else {
     connEl.textContent = 'NO BRIDGE';
     connEl.className = 'crit';
@@ -843,8 +870,11 @@ function handleToggleAction(action) {
     if (gMode !== 'AP') sendCmd('BTN TOGGLE');
 
   } else if (action === 'off') {
-    if (gMode === 'AP')     sendCmd('BTN TOGGLE');   // disengage AP
-    if (gMode === 'MANUAL') sendCmd('MODE AUTO');    // exit manual
+    if (gMode === 'AP')     sendCmd('BTN TOGGLE');   // disengage AP before disconnect
+    if (gMode === 'MANUAL') sendCmd('MODE AUTO');    // exit manual before disconnect
+    // Delay gives the preceding command time to reach the bridge before the TCP
+    // connection is dropped by MODE OFF (bridge loop polls every ~100 ms).
+    setTimeout(function() { sendCmd('MODE OFF'); }, 300);
 
   } else if (action === 'manual') {
     if (gMode !== 'MANUAL') {
@@ -1018,15 +1048,41 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        tok = cmd_str.upper().split()
+
+        # ── MODE OFF: intentional TCP disconnect ──────────────────────────────
+        # Handled entirely locally — do not forward to bridge.
+        if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "OFF":
+            _bridge_active.clear()          # signal bridge thread to drop connection
+            # Drain any pending commands so nothing sneaks through after disconnect
+            while True:
+                try:
+                    _cmd_q.get_nowait()
+                except queue.Empty:
+                    break
+            _update(
+                connected=False, hdg=None, cmd=None,
+                rdr=None, rdr_pct=None, ap=0,
+                mode="OFF", comms="OK", warn=None,
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+
+        # ── Any active command: ensure bridge is (re)connected ────────────────
+        # This wakes the bridge thread if it was idle due to mode OFF.
+        _bridge_active.set()
+
         # Optimistic local state update for instant UI feedback before
         # bridge confirms via telemetry (bridge updates within ~200 ms)
-        tok = cmd_str.upper().split()
         if tok and tok[0] == "ESTOP":
             _update(mode="IDLE", ap=0)
         elif len(tok) >= 2 and tok[0] == "MODE":
             if tok[1] == "MANUAL":
                 _update(mode="MANUAL")
-            elif tok[1] in ("AUTO", "OFF"):
+            elif tok[1] == "AUTO":
                 _update(mode="IDLE")
         elif len(tok) >= 2 and tok[0] == "BTN" and tok[1] == "TOGGLE":
             with _state_lock:
