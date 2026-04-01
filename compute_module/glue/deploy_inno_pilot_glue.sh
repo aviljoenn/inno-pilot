@@ -27,6 +27,11 @@ echo "Installing inno_pilot_bridge.py -> /usr/local/bin/"
 sudo cp "$REPO_DIR/inno_pilot_bridge.py" /usr/local/bin/inno_pilot_bridge.py
 sudo chmod 755 /usr/local/bin/inno_pilot_bridge.py
 
+# Copy web remote script
+echo "Installing inno_web_remote.py -> /usr/local/bin/"
+sudo cp "$REPO_DIR/inno_web_remote.py" /usr/local/bin/inno_web_remote.py
+sudo chmod 755 /usr/local/bin/inno_web_remote.py
+
 # Copy OTA firmware binary (if committed to repo)
 OTA_BIN="$REPO_ROOT/inno-remote/firmware/inno_remote/ota/inno_remote.bin"
 OTA_DEST_DIR="/var/lib/inno-pilot/ota"
@@ -46,9 +51,10 @@ sudo chmod 755 /usr/local/sbin/inno_pilot_fix_symlink.sh
 
 # Copy systemd units
 echo "Installing systemd units -> /etc/systemd/system/"
-sudo cp "$REPO_DIR/inno-pilot-socat.service" /etc/systemd/system/inno-pilot-socat.service
-sudo cp "$REPO_DIR/inno-pilot-fixlink.service" /etc/systemd/system/inno-pilot-fixlink.service
-sudo cp "$REPO_DIR/inno-pilot-bridge.service" /etc/systemd/system/inno-pilot-bridge.service
+sudo cp "$REPO_DIR/inno-pilot-socat.service"      /etc/systemd/system/inno-pilot-socat.service
+sudo cp "$REPO_DIR/inno-pilot-fixlink.service"    /etc/systemd/system/inno-pilot-fixlink.service
+sudo cp "$REPO_DIR/inno-pilot-bridge.service"     /etc/systemd/system/inno-pilot-bridge.service
+sudo cp "$REPO_DIR/inno-pilot-web-remote.service" /etc/systemd/system/inno-pilot-web-remote.service
 
 # Reload systemd
 echo "Reloading systemd daemon..."
@@ -59,6 +65,7 @@ echo "Enabling Inno-Pilot services..."
 sudo systemctl enable inno-pilot-socat.service
 sudo systemctl enable inno-pilot-fixlink.service
 sudo systemctl enable inno-pilot-bridge.service
+sudo systemctl enable inno-pilot-web-remote.service
 
 # Ensure pypilot uses by-id name
 SERVOFILE="$HOME/.pypilot/servodevice"

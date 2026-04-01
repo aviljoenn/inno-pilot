@@ -101,9 +101,10 @@ cd ~/inno-pilot
 
 This script:
 - Installs `inno_pilot_bridge.py` → `/usr/local/bin/`
+- Installs `inno_web_remote.py` → `/usr/local/bin/`
 - Installs `inno_pilot_fix_symlink.sh` → `/usr/local/sbin/`
-- Installs 3 systemd units: `inno-pilot-socat`, `inno-pilot-fixlink`, `inno-pilot-bridge`
-- Enables all three services
+- Installs 4 systemd units: `inno-pilot-socat`, `inno-pilot-fixlink`, `inno-pilot-bridge`, `inno-pilot-web-remote`
+- Enables all four services
 - Sets `~/.pypilot/servodevice` to the stable by-id USB path
 - Creates a pypilot drop-in so pypilot starts after glue services
 
@@ -141,16 +142,28 @@ After ~60 s, SSH back in and check services:
 sudo systemctl status inno-pilot-socat
 sudo systemctl status inno-pilot-fixlink
 sudo systemctl status inno-pilot-bridge
+sudo systemctl status inno-pilot-web-remote
 sudo systemctl status pypilot
 ```
 
-All four should be `active`. Then check the bridge log for Nano comms:
+All five should be `active`. Then check the bridge log for Nano comms:
 
 ```bash
 journalctl -u inno-pilot-bridge -n 50 --no-pager
 ```
 
 Look for lines like `Nano frame OK`, servo activity, or the TCP server binding on port 8555.
+
+Check the web remote is up:
+
+```bash
+curl -s http://localhost:8888/health
+# expect: {"status": "ok", "bridge_connected": true, ...}
+```
+
+Then open **http://192.168.6.13:8888/** in any browser on the boat LAN for the
+web-based remote control UI. See [Phase 9a](#phase-9a--web-remote) below for
+details.
 
 ---
 
@@ -186,7 +199,48 @@ Allow ~5 s for the Nano to finish its boot splash before expecting normal frames
 
 ---
 
-## Phase 9 — ESP32 wireless remote firmware
+## Phase 9a — Web remote
+
+The **web remote** is a browser-based replica of the physical Inno-Remote UI that
+runs on the Pi itself and is accessible from any phone, tablet, or laptop on the
+boat LAN — no app install required.
+
+**Port:** 8888 (HTTP + Server-Sent Events)
+**URL:** `http://192.168.6.13:8888/`
+**Service:** `inno-pilot-web-remote` (auto-started by systemd after deploy)
+
+### What it provides
+
+- OLED-style display: mode, heading, AP command or rudder %, rudder position bar
+- 5 heading buttons: `<<` (−10°) `<` (−1°) `|` (AP toggle) `>` (+1°) `>>` (+10°)
+- STOP button: sends ESTOP (immediate AP disengage)
+- 3-position mode toggle: AUTO / OFF / MANUAL
+- Draggable ship's wheel for manual rudder control in MANUAL mode
+- "NO BRIDGE" overlay when the bridge TCP connection is down
+
+### Architecture
+
+```
+Browser (HTTP+SSE) <-> inno_web_remote.py (port 8888)
+                            |
+                     TCP client (port 8555)
+                            |
+                    inno-pilot-bridge
+```
+
+The web remote connects to the bridge as a single TCP client using the same
+protocol as the ESP32 handheld.  Only one TCP client is accepted by the bridge
+at a time; when the web remote is active, the ESP32 remote cannot connect.
+
+### Log
+
+```bash
+journalctl -u inno-pilot-web-remote -n 50 --no-pager
+```
+
+---
+
+## Phase 9b — ESP32 wireless remote firmware
 
 > **Note:** The ESP32 firmware currently has the Pi IP address **hardcoded**.
 > Before flashing for a new boat, update the target IP in the firmware source,
@@ -232,3 +286,5 @@ sudo reboot
 | Bridge not starting | socat PTY not ready | `systemctl status inno-pilot-socat`; check logs |
 | High CRC error rate | Noisy USB cable or buffer overflow | Check `SERIAL_RX_BUFFER_SIZE=128` was used; replace cable |
 | Remote can't connect | Wrong IP in ESP32 firmware | Rebuild firmware with correct Pi IP |
+| Web remote shows NO BRIDGE | Bridge not running or web remote started first | `systemctl restart inno-pilot-web-remote`; check bridge log |
+| Web remote 404 / no page | Service not deployed | Re-run deploy script; check `ls /usr/local/bin/inno_web_remote.py` |

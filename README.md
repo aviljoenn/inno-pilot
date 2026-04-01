@@ -97,8 +97,16 @@ Contents:
 - `inno-pilot-fixlink.service`  
   systemd oneshot that runs `inno_pilot_fix_symlink.sh` after socat has started.
 
-- `inno-pilot-bridge.service`  
+- `inno-pilot-bridge.service`
   systemd service that runs `inno_pilot_bridge.py` as a user-level daemon.
+
+- `inno_web_remote.py`
+  Browser-based Inno-Remote UI served on **port 8888**. Connects to the bridge on
+  port 8555 as a TCP client and serves a single-page web app (SSE + HTTP POST).
+  No external Python dependencies.
+
+- `inno-pilot-web-remote.service`
+  systemd unit that runs `inno_web_remote.py` after the bridge is ready.
 
 - `deploy_inno_pilot_glue.sh`  
   Deployment script that:
@@ -168,6 +176,7 @@ The compute module (e.g. Pi Zero) runs:
 - The Inno-Pilot glue that connects the Nano’s control surface/buttons to pypilot’s
   `ap.*` interface
 - A TCP server (port 8555) for the wireless remote
+- A web remote UI (port 8888) accessible from any browser on the boat LAN
 
 The wireless remote (ESP32-C3) provides:
 
