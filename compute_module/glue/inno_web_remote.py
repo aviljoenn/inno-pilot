@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B16"
+INNOPILOT_VERSION = "v1.2.0_B17"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -703,7 +703,7 @@ body{
 
   <!-- OLED display panel -->
   <div class="oled">
-    <div class="oled-title">Inno-Remote</div>
+    <div class="oled-title">Inno-Web-Remote</div>
 
     <!-- Rudder position bar -->
     <div class="rdr-bar">
