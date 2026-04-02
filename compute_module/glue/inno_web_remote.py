@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B18"
+INNOPILOT_VERSION = "v1.2.0_B19"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -805,8 +805,9 @@ function updateUI(d) {
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
 
-  // Suppress "NO BRIDGE" overlay when mode is OFF (intentional disconnect)
-  setConnected(gConnected || gMode === 'OFF');
+  // Suppress overlay when connected, when mode is OFF (intentional disconnect),
+  // or when the toggle has left OFF but the bridge hasn't reconnected yet.
+  setConnected(gConnected || gMode === 'OFF' || gTogglePos !== 'off');
 
   // OLED mode line — AUTO: show AP ON/OFF with oversized "AP"; other modes: plain label
   var modeRow = document.getElementById('oled-mode-row');
