@@ -1172,9 +1172,22 @@ def main() -> None:
             if s is tcp_server:
                 conn, addr = tcp_server.accept()
                 if remote_sock is not None:
-                    log.warning("TCP remote: rejected %s (already connected)", addr)
-                    conn.close()
-                else:
+                    # If the same IP reconnects (e.g. after OTA reboot or TCP half-close),
+                    # replace the stale socket rather than rejecting the new connection.
+                    try:
+                        curr_ip = remote_sock.getpeername()[0]
+                    except OSError:
+                        curr_ip = None
+                    if addr[0] == curr_ip:
+                        log.warning("TCP remote: %s reconnected, replacing stale connection", addr[0])
+                        handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
+                        close_remote(remote_sock)
+                        remote_buf = bytearray()
+                    else:
+                        log.warning("TCP remote: rejected %s (already connected from %s)", addr, curr_ip)
+                        conn.close()
+                        conn = None
+                if conn is not None and remote_sock is None:
                     conn.setblocking(False)
                     remote_sock = conn
                     remote_buf  = bytearray()
