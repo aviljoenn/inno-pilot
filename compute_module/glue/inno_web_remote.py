@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B17"
+INNOPILOT_VERSION = "v1.2.0_B18"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -454,13 +454,15 @@ body{
   transition:left 0.12s ease;
 }
 
-.oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px}
+/* line-height:1.5 pre-reserves height for the 1.5× AP label so layout never shifts */
+.oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px;line-height:1.5;display:flex;align-items:flex-end}
 .oled-mode b{color:#00d4ff}
 /* AP label in AUTO mode — 1.5× the surrounding text size */
-.oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;vertical-align:bottom;line-height:1}
+.oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;line-height:1}
 .oled-data{
   color:#00d4ff;
   font-size:0.76em;
+  font-weight:700;
   font-family:'Courier New',monospace;
   display:flex;
   justify-content:space-between;
@@ -501,6 +503,7 @@ body{
   left:50%;
   transform:translateX(-50%);
   font-size:0.945em;
+  font-weight:700;
   white-space:nowrap;
 }
 .ok{color:#00cc70}
