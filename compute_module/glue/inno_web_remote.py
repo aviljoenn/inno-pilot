@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B11"
+INNOPILOT_VERSION = "v1.2.0_B12"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -481,8 +481,8 @@ body{
   touch-action:manipulation;
 }
 .oled-btn:active{background:#1a3060}
-/* Bottom bar: version left, conn centred */
-.bottom-bar{
+/* Bottom row of OLED screen: version left, conn centred */
+.oled-status{
   display:flex;
   align-items:center;
   position:relative;
@@ -728,6 +728,11 @@ body{
       <button class="oled-btn" data-cmd="BTN +10">&raquo;</button>
     </div>
 
+    <div class="oled-status">
+      <span id="o-ver">---</span>
+      <span id="o-conn" class="warn">CONNECTING\u2026</span>
+    </div>
+
   </div>
 
   <!-- Physical button row -->
@@ -766,11 +771,6 @@ body{
       </svg>
     </div>
     <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in MANUAL mode</div>
-  </div>
-
-  <div class="bottom-bar">
-    <span id="o-ver">---</span>
-    <span id="o-conn" class="warn">CONNECTING\u2026</span>
   </div>
 
 </div><!-- .remote -->
