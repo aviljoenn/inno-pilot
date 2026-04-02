@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B7"
+INNOPILOT_VERSION = "v1.2.0_B8"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -507,12 +507,12 @@ body{
 }
 
 /* ── 3-position toggle switch ── */
-.toggle-assembly{display:flex;align-items:center;gap:10px}
+.toggle-assembly{display:flex;align-items:center;gap:14px;flex-direction:row-reverse}
 .toggle-track{
-  width:22px;
-  height:74px;
+  width:38px;
+  height:126px;
   background:linear-gradient(to bottom,#b8b8b8,#888888);
-  border-radius:11px;
+  border-radius:19px;
   border:2px solid #686868;
   position:relative;
   box-shadow:inset 0 2px 5px rgba(0,0,0,0.45),0 2px 4px rgba(0,0,0,0.2);
@@ -523,34 +523,34 @@ body{
 .toggle-track::before,.toggle-track::after{
   content:'';
   position:absolute;
-  left:3px;
-  right:3px;
-  height:1px;
+  left:5px;
+  right:5px;
+  height:2px;
   background:rgba(0,0,0,0.25);
 }
-.toggle-track::before{top:25px}
-.toggle-track::after{top:51px}
+.toggle-track::before{top:43px}
+.toggle-track::after{top:87px}
 
 .toggle-lever{
   position:absolute;
-  width:20px;
-  height:20px;
+  width:34px;
+  height:34px;
   border-radius:50%;
   background:radial-gradient(circle at 38% 32%,#eeeeee 0%,#bbbbbb 60%,#999999 100%);
   left:-1px;
   box-shadow:0 2px 6px rgba(0,0,0,0.55);
   transition:top .22s cubic-bezier(.34,1.56,.64,1);
-  top:27px; /* default: OFF */
+  top:46px; /* default: OFF */
 }
-.toggle-lever.pos-auto  {top:2px}
-.toggle-lever.pos-off   {top:27px}
-.toggle-lever.pos-manual{top:52px}
+.toggle-lever.pos-auto  {top:4px}
+.toggle-lever.pos-off   {top:46px}
+.toggle-lever.pos-manual{top:88px}
 
 .toggle-labels{
   display:flex;
   flex-direction:column;
   justify-content:space-between;
-  height:74px;
+  height:126px;
 }
 .tgl-lbl{
   font-size:0.7em;
