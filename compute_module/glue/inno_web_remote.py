@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B10"
+INNOPILOT_VERSION = "v1.2.0_B9"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -481,26 +481,12 @@ body{
   touch-action:manipulation;
 }
 .oled-btn:active{background:#1a3060}
-/* Version — fixed bottom-left corner */
-#o-ver-bar{
-  position:fixed;
-  bottom:6px;
-  left:8px;
+.oled-status{
+  color:#007aaa;
   font-size:0.63em;
-  font-family:'Courier New',monospace;
-  color:#5dd0f0;
+  text-align:center;
   letter-spacing:1px;
-}
-/* Connection status — fixed bottom-centre, 1.5× size */
-#o-conn-bar{
-  position:fixed;
-  bottom:6px;
-  left:50%;
-  transform:translateX(-50%);
-  font-size:0.945em;
-  font-family:'Courier New',monospace;
-  letter-spacing:1px;
-  white-space:nowrap;
+  margin-top:2px;
 }
 .ok{color:#00cc70}
 .warn{color:#ffaa00}
@@ -716,8 +702,7 @@ body{
 
     <div class="oled-data">
       <span>Head:&nbsp;<span id="o-hdg">---</span></span>
-      <span>RDR:&nbsp;<span id="o-rdr">---</span>%</span>
-      <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
+      <span><span id="o-right-pre">RDR:&nbsp;</span><span id="o-right-val">---</span><span id="o-right-suf">%</span></span>
     </div>
 
     <!-- OLED button row (same commands as physical buttons) -->
@@ -729,8 +714,9 @@ body{
       <button class="oled-btn" data-cmd="BTN +10">&raquo;</button>
     </div>
 
-    <div id="o-ver-bar">---</div>
-    <div id="o-conn-bar" class="warn">CONNECTING\u2026</div>
+    <div class="oled-status">
+      <span id="o-ver">---</span>&nbsp;|&nbsp;<span id="o-conn" class="warn">CONNECTING\u2026</span>
+    </div>
   </div>
 
   <!-- Physical button row -->
@@ -810,21 +796,31 @@ function updateUI(d) {
   // OLED mode line
   document.getElementById('o-mode').textContent = gMode;
 
-  // Heading / RDR / CMD — always displayed
+  // Heading
   document.getElementById('o-hdg').textContent =
     d.hdg != null ? d.hdg.toFixed(1) : '---';
-  document.getElementById('o-rdr').textContent =
-    d.rdr_pct != null ? d.rdr_pct.toFixed(1) : '---';
-  document.getElementById('o-cmd').textContent =
-    d.cmd != null ? d.cmd.toFixed(1) : '---';
+
+  // Right OLED field: CMD (degrees) in AP mode, RDR_PCT (%) otherwise
+  var pre = document.getElementById('o-right-pre');
+  var val = document.getElementById('o-right-val');
+  var suf = document.getElementById('o-right-suf');
+  if (gMode === 'AP' && d.cmd != null) {
+    pre.textContent = 'CMD:\u00a0';
+    val.textContent = d.cmd.toFixed(1);
+    suf.textContent = '\u00b0';
+  } else {
+    pre.textContent = 'RDR:\u00a0';
+    val.textContent = d.rdr_pct != null ? d.rdr_pct.toFixed(1) : '---';
+    suf.textContent = '%';
+  }
 
   // Rudder position bar (uses rdr_pct; falls back to 50% centre)
   var pct = d.rdr_pct != null ? Math.max(0, Math.min(100, d.rdr_pct)) : 50;
   document.getElementById('rdr-marker').style.left = pct + '%';
 
   // Version + comms status
-  document.getElementById('o-ver-bar').textContent = d.bridge_ver || d.version || '---';
-  var connEl = document.getElementById('o-conn-bar');
+  document.getElementById('o-ver').textContent = d.bridge_ver || d.version || '---';
+  var connEl = document.getElementById('o-conn');
   if (d.connected) {
     var comms = (d.comms || 'OK').toUpperCase();
     if (comms === 'CRIT') {
