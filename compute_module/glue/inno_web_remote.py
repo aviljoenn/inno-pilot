@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B12"
+INNOPILOT_VERSION = "v1.2.0_B13"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -714,18 +714,9 @@ body{
     <div class="oled-mode">MODE: <b id="o-mode">IDLE</b></div>
 
     <div class="oled-data">
-      <span>Head:&nbsp;<span id="o-hdg">---</span></span>
-      <span>RDR:&nbsp;<span id="o-rdr">---</span>%</span>
       <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
-    </div>
-
-    <!-- OLED button row (same commands as physical buttons) -->
-    <div class="oled-btns">
-      <button class="oled-btn" data-cmd="BTN -10">&laquo;</button>
-      <button class="oled-btn" data-cmd="BTN -1">&lsaquo;</button>
-      <button class="oled-btn" data-cmd="BTN TOGGLE">|</button>
-      <button class="oled-btn" data-cmd="BTN +1">&rsaquo;</button>
-      <button class="oled-btn" data-cmd="BTN +10">&raquo;</button>
+      <span>RDR:&nbsp;<span id="o-rdr">---</span>%</span>
+      <span>Head:&nbsp;<span id="o-hdg">---</span></span>
     </div>
 
     <div class="oled-status">
@@ -892,6 +883,30 @@ function setToggle(m) {
   } else {
     lever.classList.add('pos-off');
     lblO.classList.add('active');
+  }
+
+  // Physical button labels change per mode
+  var btns = [
+    document.querySelector('.hw-btn.b1'),
+    document.querySelector('.hw-btn.b2'),
+    document.querySelector('.hw-btn.b3'),
+    document.querySelector('.hw-btn.b4'),
+    document.querySelector('.hw-btn.b5'),
+  ];
+  if (m === 'AP') {
+    btns[0].textContent = '-10';
+    btns[1].textContent = '-1';
+    btns[2].textContent = 'Go';
+    btns[3].textContent = '+1';
+    btns[4].textContent = '+10';
+  } else if (m === 'MANUAL') {
+    btns[0].innerHTML = '&laquo;';
+    btns[1].innerHTML = '&lsaquo;';
+    btns[2].innerHTML = '|';
+    btns[3].innerHTML = '&rsaquo;';
+    btns[4].innerHTML = '&raquo;';
+  } else {
+    btns.forEach(function(b) { b.textContent = ''; });
   }
 }
 
