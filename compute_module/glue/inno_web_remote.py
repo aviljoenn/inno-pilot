@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B15"
+INNOPILOT_VERSION = "v1.2.0_B16"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -457,7 +457,7 @@ body{
 .oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px}
 .oled-mode b{color:#00d4ff}
 /* AP label in AUTO mode — 1.5× the surrounding text size */
-.oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;vertical-align:middle}
+.oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;vertical-align:bottom;line-height:1}
 .oled-data{
   color:#00d4ff;
   font-size:0.76em;
@@ -807,10 +807,10 @@ function updateUI(d) {
 
   // OLED mode line — AUTO: show AP ON/OFF with oversized "AP"; other modes: plain label
   var modeRow = document.getElementById('oled-mode-row');
-  if (gMode === 'AP') {
-    modeRow.innerHTML = 'MODE: <span class="ap-label">AP</span>\u00a0' + (gApOn ? 'ON' : 'OFF');
+  if (gMode === 'AP' && gApOn) {
+    modeRow.innerHTML = 'MODE: <span class="ap-label">AP</span>\u00a0ON';
   } else {
-    modeRow.innerHTML = 'MODE: <b id="o-mode">' + gMode + '</b>';
+    modeRow.innerHTML = 'MODE: <b id="o-mode">' + (gMode || 'IDLE') + '</b>';
   }
 
   // Heading / RDR / CMD — always displayed
