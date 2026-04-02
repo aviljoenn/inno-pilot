@@ -5,7 +5,7 @@ Before=pypilot.service
 
 [Service]
 Type=simple
-User=aviljoen
+User=innopilot
 Group=dialout
 ExecStart=/usr/local/bin/inno_pilot_bridge.py
 Restart=always
