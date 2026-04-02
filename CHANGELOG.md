@@ -2,9 +2,14 @@
 
 All notable changes to the Inno-Pilot system are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
-Version applies to all three components (Bridge, Nano, Remote) simultaneously.
+Version applies to all three components (Bridge, Nano, Remote) simultaneously and the version of all components must always match regardless if a change was made in a component or not.
 
 ## [Unreleased]
+
+## [v1.2.0_B20] — 2026-04-02 — Version sync across all components
+
+### Changed
+- **All**: Synchronised version to `v1.2.0_B20` across Bridge, Nano (motor_simple.ino), and ESP32 Remote — Bridge was at B15, Nano and Remote were at B7
 
 ## [v1.2.0_B1] — 2026-03-27 — OTA Update Pipeline + Version Reset
 

@@ -12,7 +12,7 @@ Audience: Claude Code (and other AI coding agents) working in this repository.
 ### Comments
 - **Do NOT remove existing Python comments** unless they are wrong or dangerously misleading.
 - If a comment must change: prefer **fixing** it (or expanding it) rather than deleting it.
-- Adding comments to improve human readability is welcome. Keep them practical.
+- Adding comments to improve human readability is mandatory. Keep them practical.
 
 ### Python
 - Prefer **clear, explicit code** over cleverness.
@@ -27,7 +27,9 @@ Audience: Claude Code (and other AI coding agents) working in this repository.
 - If touching IO pins, power, ADC scaling, or interrupts: **explain assumptions** in the PR.
 
 ### Testing of code
-- Testing for code is considered done if the code compiles without errors.
+- Code must be compiled, started and executed at the least.
+- Attempt must be made to automatically simulate user inputs where possible.
+- If automatically simulating user inputs is not possible, the user must be guided and prompted on what to do to complete testing.
 
 ---
 
@@ -44,6 +46,7 @@ A PR is "done" when it includes:
 - A clear summary + rationale
 - Tests/build steps run (or why not)
 - Any new/changed docs needed (README/docs)
+- Release notes updated
 
 ---
 
@@ -80,7 +83,10 @@ Before adding new tooling, check what the repo already uses:
 
 **Rule:** If you can't build firmware due to missing toolchain/board config, state that clearly in the PR and keep changes conservative.
 
-> **Pi Zero (192.168.6.13):** `arduino-cli` (v1.4.0) is installed at `/usr/local/bin/arduino-cli`
+> **Facts about the Inno-Pilot Raspberry Pi** 
+> Every Inno-Pilot constructed may use different hardware types, E.g. Pi5, Pi Zero, Arduino nano, Pi Pico etc.
+> Every Inno-Pilot constructed may be on different IP subnets with different IP addresses
+> `arduino-cli` is installed at `/usr/local/bin/arduino-cli`
 > with the `arduino:avr` core. The Nano is on `/dev/ttyUSB0`.
 > Compile: `arduino-cli compile --fqbn arduino:avr:nano --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .`
 > Upload:  `arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
@@ -97,6 +103,7 @@ When asked to implement something:
 3) Update docs/comments where it prevents future mistakes.
 4) Run the best available checks/tests.
 5) Open PR with a high-signal description.
+6) Check all components of inno-remote that might be versioned, like the nano sketch, the bridge, inno-remote and inno-web-remote. Keep the version numbers of all those components in sync and push/flash the same version number to all components.
 
 ---
 
@@ -109,10 +116,6 @@ When asked to implement something:
 
 **How**
 - Key implementation notes (include hardware assumptions if any)
-
-**Verification**
-- Commands run + results
-- If not run: explain why + risk
 
 **Notes / Follow-ups**
 - Any TODOs, edge cases, or recommended next steps
