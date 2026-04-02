@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B9"
+INNOPILOT_VERSION = "v1.2.0_B10"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -481,12 +481,28 @@ body{
   touch-action:manipulation;
 }
 .oled-btn:active{background:#1a3060}
-.oled-status{
-  color:#007aaa;
+/* Version pinned to absolute bottom-left of screen */
+#o-ver{
+  position:fixed;
+  bottom:6px;
+  left:8px;
   font-size:0.63em;
-  text-align:center;
+  font-family:'Courier New',monospace;
+  color:#6ee0ff;
   letter-spacing:1px;
-  margin-top:2px;
+  pointer-events:none;
+}
+/* Connection status pinned to bottom-centre of screen, 1.5× size */
+#o-conn{
+  position:fixed;
+  bottom:4px;
+  left:50%;
+  transform:translateX(-50%);
+  font-size:0.945em;
+  font-family:'Courier New',monospace;
+  letter-spacing:1px;
+  white-space:nowrap;
+  pointer-events:none;
 }
 .ok{color:#00cc70}
 .warn{color:#ffaa00}
@@ -702,7 +718,8 @@ body{
 
     <div class="oled-data">
       <span>Head:&nbsp;<span id="o-hdg">---</span></span>
-      <span><span id="o-right-pre">RDR:&nbsp;</span><span id="o-right-val">---</span><span id="o-right-suf">%</span></span>
+      <span>RDR:&nbsp;<span id="o-rdr">---</span>%</span>
+      <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
     </div>
 
     <!-- OLED button row (same commands as physical buttons) -->
@@ -714,9 +731,6 @@ body{
       <button class="oled-btn" data-cmd="BTN +10">&raquo;</button>
     </div>
 
-    <div class="oled-status">
-      <span id="o-ver">---</span>&nbsp;|&nbsp;<span id="o-conn" class="warn">CONNECTING\u2026</span>
-    </div>
   </div>
 
   <!-- Physical button row -->
@@ -796,23 +810,13 @@ function updateUI(d) {
   // OLED mode line
   document.getElementById('o-mode').textContent = gMode;
 
-  // Heading
+  // Heading / RDR / CMD — always displayed
   document.getElementById('o-hdg').textContent =
     d.hdg != null ? d.hdg.toFixed(1) : '---';
-
-  // Right OLED field: CMD (degrees) in AP mode, RDR_PCT (%) otherwise
-  var pre = document.getElementById('o-right-pre');
-  var val = document.getElementById('o-right-val');
-  var suf = document.getElementById('o-right-suf');
-  if (gMode === 'AP' && d.cmd != null) {
-    pre.textContent = 'CMD:\u00a0';
-    val.textContent = d.cmd.toFixed(1);
-    suf.textContent = '\u00b0';
-  } else {
-    pre.textContent = 'RDR:\u00a0';
-    val.textContent = d.rdr_pct != null ? d.rdr_pct.toFixed(1) : '---';
-    suf.textContent = '%';
-  }
+  document.getElementById('o-rdr').textContent =
+    d.rdr_pct != null ? d.rdr_pct.toFixed(1) : '---';
+  document.getElementById('o-cmd').textContent =
+    d.cmd != null ? d.cmd.toFixed(1) : '---';
 
   // Rudder position bar (uses rdr_pct; falls back to 50% centre)
   var pct = d.rdr_pct != null ? Math.max(0, Math.min(100, d.rdr_pct)) : 50;
@@ -1015,6 +1019,8 @@ setInterval(function() {
   if (d) d.textContent = '\u25cf'.repeat(dotN);
 }, 550);
 </script>
+  <span id="o-ver">---</span>
+  <span id="o-conn" class="warn">CONNECTING\u2026</span>
 </body>
 </html>""".replace("$$WHEEL_SVG$$", _WHEEL_SVG)
 
