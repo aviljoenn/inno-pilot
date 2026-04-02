@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B8"
+INNOPILOT_VERSION = "v1.2.0_B9"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -259,19 +259,76 @@ def _make_wheel_svg() -> str:
         kx = 100 + 80 * math.cos(a)
         ky = 100 + 80 * math.sin(a)
 
-        # Spoke — layered for wood-grain depth
-        parts.append(
-            f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
-            f'stroke="#2A1408" stroke-width="9" stroke-linecap="round"/>'
-        )
-        parts.append(
-            f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
-            f'stroke="#8B5E3C" stroke-width="5.5" stroke-linecap="round"/>'
-        )
-        parts.append(
-            f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
-            f'stroke="#C09060" stroke-width="2" stroke-linecap="round"/>'
-        )
+        if i == 6:
+            # ── King spoke: Turk's Head rope-woven appearance ──
+            # Dark shadow base
+            parts.append(
+                f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#1A0C04" stroke-width="11" stroke-linecap="round"/>'
+            )
+            # Rope base (manila/cream)
+            parts.append(
+                f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#C8922A" stroke-width="7" stroke-linecap="round"/>'
+            )
+            # Woven Turk's Head strand pattern — alternating X crossings along the spoke.
+            # King spoke is vertical: (100,78) → (100,27), length 51 px.
+            # 7 crossings spaced every 7 px give seamless tiling (strand half-height = 3.5 px).
+            rw = 3.5   # half-width  of strand from spoke centre
+            rh = 3.5   # half-height of each crossing
+            s_dark = "#6B4010"   # shadow side of strand
+            s_mid  = "#D4A050"   # lit side of strand
+            s_hi   = "#F0D090"   # specular highlight
+            for step in range(7):
+                yc = 30.5 + step * 7.0
+                if step % 2 == 0:
+                    # "\" strand lies on top of "/" strand
+                    parts.append(
+                        f'<line x1="{100+rw:.1f}" y1="{yc-rh:.1f}" '
+                        f'x2="{100-rw:.1f}" y2="{yc+rh:.1f}" '
+                        f'stroke="{s_dark}" stroke-width="2.5" stroke-linecap="round"/>'
+                    )
+                    parts.append(
+                        f'<line x1="{100-rw:.1f}" y1="{yc-rh:.1f}" '
+                        f'x2="{100+rw:.1f}" y2="{yc+rh:.1f}" '
+                        f'stroke="{s_mid}" stroke-width="2.5" stroke-linecap="round"/>'
+                    )
+                    parts.append(
+                        f'<line x1="{100-rw+0.5:.1f}" y1="{yc-rh+0.5:.1f}" '
+                        f'x2="{100+rw-1.0:.1f}" y2="{yc+rh-1.0:.1f}" '
+                        f'stroke="{s_hi}" stroke-width="0.9" stroke-linecap="round" opacity="0.65"/>'
+                    )
+                else:
+                    # "/" strand lies on top of "\" strand
+                    parts.append(
+                        f'<line x1="{100-rw:.1f}" y1="{yc-rh:.1f}" '
+                        f'x2="{100+rw:.1f}" y2="{yc+rh:.1f}" '
+                        f'stroke="{s_dark}" stroke-width="2.5" stroke-linecap="round"/>'
+                    )
+                    parts.append(
+                        f'<line x1="{100+rw:.1f}" y1="{yc-rh:.1f}" '
+                        f'x2="{100-rw:.1f}" y2="{yc+rh:.1f}" '
+                        f'stroke="{s_mid}" stroke-width="2.5" stroke-linecap="round"/>'
+                    )
+                    parts.append(
+                        f'<line x1="{100+rw-0.5:.1f}" y1="{yc-rh+0.5:.1f}" '
+                        f'x2="{100-rw+1.0:.1f}" y2="{yc+rh-1.0:.1f}" '
+                        f'stroke="{s_hi}" stroke-width="0.9" stroke-linecap="round" opacity="0.65"/>'
+                    )
+        else:
+            # Normal spoke — layered for wood-grain depth
+            parts.append(
+                f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#2A1408" stroke-width="9" stroke-linecap="round"/>'
+            )
+            parts.append(
+                f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#8B5E3C" stroke-width="5.5" stroke-linecap="round"/>'
+            )
+            parts.append(
+                f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
+                f'stroke="#C09060" stroke-width="2" stroke-linecap="round"/>'
+            )
 
         # Handle knob
         parts.append(
