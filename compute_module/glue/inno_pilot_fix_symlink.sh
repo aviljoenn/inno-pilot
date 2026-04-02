@@ -48,3 +48,13 @@ fi
 # Now point BYID at the PTY
 echo "Inno-Pilot: linking $BYID -> $PTY"
 ln -sf "$PTY" "$BYID"
+
+# Transfer PTY slave ownership to the bridge user so non-root processes can open them.
+# Linux devpts access control allows only root or the PTY master creator's uid to open
+# the slave; since socat runs as root the slaves default to root-owned, which blocks
+# the innopilot user.  Chowning here (fixlink runs as root) transfers ownership after
+# socat has created and linked the devices.
+BRIDGE_USER="innopilot"
+PTY_BRIDGE="/dev/ttyINNOPILOT_BRIDGE"
+echo "Inno-Pilot: chown $BRIDGE_USER on PTY slaves"
+chown "$BRIDGE_USER" "$PTY" "$PTY_BRIDGE" || echo "Inno-Pilot: chown failed (non-fatal)"
