@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B19"
+INNOPILOT_VERSION = "v1.2.0_B20"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -784,6 +784,10 @@ var isDragging = false;
 var prevPtrAngle = null;
 var lastRudSend  = 0;
 var MAX_DEG = 150;       // ±150° maps 0..100% rudder
+var gManualRudPct = 50.0;  // commanded rudder % in MANUAL mode (0–100%)
+var gRdrPct       = null;  // latest rdr_pct from bridge telemetry
+var gJogTimer     = null;  // setInterval handle for hold-jog repeat
+var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
@@ -804,6 +808,7 @@ function updateUI(d) {
   gConnected = !!d.connected;
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
+  gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
 
   // Suppress overlay when connected, when mode is OFF (intentional disconnect),
   // or when the toggle has left OFF but the bridge hasn't reconnected yet.
@@ -924,13 +929,85 @@ function setToggle(m) {
   }
 }
 
+// ── Manual-mode jog helpers ───────────────────────────────────────────────
+// jogRudder: adjust gManualRudPct by deltaPct, sync wheel visual, send RUD.
+function jogRudder(deltaPct) {
+  gManualRudPct = Math.max(0, Math.min(100, gManualRudPct + deltaPct));
+  wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
+  wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
+  document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
+  sendCmd('RUD ' + gManualRudPct.toFixed(1));
+}
+
+// startJog: immediate first jog, then after 300 ms hold delay repeat at intervalMs.
+function startJog(deltaPct, intervalMs) {
+  stopJog();
+  jogRudder(deltaPct);
+  gJogHoldTimer = setTimeout(function() {
+    gJogHoldTimer = null;
+    gJogTimer = setInterval(function() {
+      if (gMode !== 'MANUAL') { stopJog(); return; }
+      // Stop repeating when the limit is already reached
+      var next = gManualRudPct + deltaPct;
+      if (next < 0 || next > 100) { stopJog(); return; }
+      jogRudder(deltaPct);
+    }, intervalMs);
+  }, 300);
+}
+
+function stopJog() {
+  if (gJogTimer     !== null) { clearInterval(gJogTimer);     gJogTimer     = null; }
+  if (gJogHoldTimer !== null) { clearTimeout(gJogHoldTimer);  gJogHoldTimer = null; }
+}
+
 // ── Button wiring ─────────────────────────────────────────────────────────
-document.querySelectorAll('[data-cmd]').forEach(function(el) {
-  el.addEventListener('click', function() { sendCmd(el.dataset.cmd); });
-  el.addEventListener('touchstart', function(e) {
-    e.preventDefault(); sendCmd(el.dataset.cmd);
-  }, {passive: false});
-});
+// MANUAL mode: B1=port 10% jog (hold=continuous), B2=port 1° jog (hold=500ms),
+//              B3=centre rudder, B4=stbd 1° (hold=500ms), B5=stbd 10% (hold=continuous).
+// AUTO/IDLE mode: send BTN commands as before.
+(function() {
+  var btnCfg = [
+    { cls: 'b1', cmd: 'BTN -10',     delta: -10, interval: 200 },
+    { cls: 'b2', cmd: 'BTN -1',      delta: -1,  interval: 500 },
+    { cls: 'b3', cmd: 'BTN TOGGLE',  delta: null },
+    { cls: 'b4', cmd: 'BTN +1',      delta: 1,   interval: 500 },
+    { cls: 'b5', cmd: 'BTN +10',     delta: 10,  interval: 200 },
+  ];
+
+  btnCfg.forEach(function(cfg) {
+    var el = document.querySelector('.hw-btn.' + cfg.cls);
+    if (!el) return;
+
+    function onPress() {
+      if (gMode === 'MANUAL') {
+        if (cfg.delta === null) {
+          // B3: centre rudder immediately
+          stopJog();
+          gManualRudPct = 50.0;
+          wheelAngle    = 0;
+          wheelSvg.style.transform = 'rotate(0deg)';
+          document.getElementById('wheel-pct').textContent = '50';
+          sendCmd('RUD 50.0');
+        } else {
+          startJog(cfg.delta, cfg.interval);
+        }
+      } else {
+        sendCmd(cfg.cmd);
+      }
+    }
+
+    function onRelease() {
+      // Only stop jog for directional buttons; centre has no hold behaviour
+      if (gMode === 'MANUAL' && cfg.delta !== null) stopJog();
+    }
+
+    el.addEventListener('mousedown',   function(e) { e.preventDefault(); onPress(); });
+    el.addEventListener('mouseup',     onRelease);
+    el.addEventListener('mouseleave',  onRelease);
+    el.addEventListener('touchstart',  function(e) { e.preventDefault(); onPress(); }, {passive: false});
+    el.addEventListener('touchend',    onRelease);
+    el.addEventListener('touchcancel', onRelease);
+  });
+}());
 
 document.getElementById('stop-btn').addEventListener('click', function() {
   sendCmd('ESTOP');
@@ -974,10 +1051,11 @@ function handleToggleAction(action) {
     gTogglePos = 'manual';
     if (gMode !== 'MANUAL') {
       sendCmd('MODE MANUAL');
-      // Reset wheel to midships on entering manual
-      wheelAngle = 0;
-      document.getElementById('wheel-svg').style.transform = 'rotate(0deg)';
-      document.getElementById('wheel-pct').textContent = '50';
+      // Initialise commanded position from actual rudder (or midships if unknown)
+      gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
+      wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
+      document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
+      document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
     }
   }
 }
@@ -1014,6 +1092,7 @@ function wheelMove(cx, cy) {
   wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
 
   var pct = (wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;
+  gManualRudPct = pct;  // keep button jog state in sync with wheel drag
   document.getElementById('wheel-pct').textContent = Math.round(pct);
 
   // Send RUD at max 5 Hz
