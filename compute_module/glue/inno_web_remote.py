@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B14"
+INNOPILOT_VERSION = "v1.2.0_B15"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -411,7 +411,7 @@ body{
 }
 .oled-title{
   color:#00d4ff;
-  font-size:2.4em;
+  font-size:1.2em;
   font-weight:700;
   text-align:center;
   letter-spacing:3px;
@@ -454,13 +454,13 @@ body{
   transition:left 0.12s ease;
 }
 
-.oled-mode{color:#ccc;font-size:1.6em;letter-spacing:1px}
+.oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px}
 .oled-mode b{color:#00d4ff}
 /* AP label in AUTO mode — 1.5× the surrounding text size */
 .oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;vertical-align:middle}
 .oled-data{
   color:#00d4ff;
-  font-size:1.52em;
+  font-size:0.76em;
   font-family:'Courier New',monospace;
   display:flex;
   justify-content:space-between;
@@ -476,7 +476,7 @@ body{
   color:#7aabcc;
   border:1px solid #1e3850;
   border-radius:3px;
-  font-size:1.4em;
+  font-size:0.7em;
   padding:2px 7px;
   cursor:pointer;
   font-family:'Courier New',monospace;
@@ -493,14 +493,14 @@ body{
   margin-top:2px;
 }
 #o-ver{
-  font-size:1.26em;
+  font-size:0.63em;
   color:#6ee0ff;
 }
 #o-conn{
   position:absolute;
   left:50%;
   transform:translateX(-50%);
-  font-size:1.89em;
+  font-size:0.945em;
   white-space:nowrap;
 }
 .ok{color:#00cc70}
@@ -774,7 +774,8 @@ body{
 // ── Shared state ──────────────────────────────────────────────────────────
 var gMode      = 'IDLE';
 var gConnected = false;
-var gApOn      = false;   // true when AP is actually engaged (d.ap === 1)
+var gApOn      = false;      // true when AP is actually engaged (d.ap === 1)
+var gTogglePos = 'off';      // physical toggle position: 'auto' | 'off' | 'manual'
 var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DEG
 var isDragging = false;
 var prevPtrAngle = null;
@@ -847,8 +848,8 @@ function updateUI(d) {
     connEl.className = 'crit';
   }
 
-  // 3-position toggle
-  setToggle(gMode);
+  // 3-position toggle — driven by physical position, not bridge mode
+  setToggle(gTogglePos);
 
   // Wheel active state + position sync
   var ww = document.getElementById('wheel-wrap');
@@ -883,10 +884,10 @@ function setToggle(m) {
   lblO.classList.remove('active');
   lblM.classList.remove('active');
 
-  if (m === 'AP') {
+  if (m === 'auto') {
     lever.classList.add('pos-auto');
     lblA.classList.add('active');
-  } else if (m === 'MANUAL') {
+  } else if (m === 'manual') {
     lever.classList.add('pos-manual');
     lblM.classList.add('active');
   } else {
@@ -894,7 +895,7 @@ function setToggle(m) {
     lblO.classList.add('active');
   }
 
-  // Physical button labels change per mode
+  // Physical button labels — always shown when toggle is in AUTO or MANUAL position
   var btns = [
     document.querySelector('.hw-btn.b1'),
     document.querySelector('.hw-btn.b2'),
@@ -902,13 +903,13 @@ function setToggle(m) {
     document.querySelector('.hw-btn.b4'),
     document.querySelector('.hw-btn.b5'),
   ];
-  if (m === 'AP') {
+  if (m === 'auto') {
     btns[0].textContent = '-10';
     btns[1].textContent = '-1';
     btns[2].textContent = 'Go';
     btns[3].textContent = '+1';
     btns[4].textContent = '+10';
-  } else if (m === 'MANUAL') {
+  } else if (m === 'manual') {
     btns[0].innerHTML = '&laquo;';
     btns[1].innerHTML = '&lsaquo;';
     btns[2].innerHTML = '|';
@@ -954,16 +955,19 @@ document.getElementById('toggle-track').addEventListener('click', function(e) {
 function handleToggleAction(action) {
   if (action === 'auto') {
     // Enter AUTO-ready state; AP starts OFF.  User presses Go to engage/disengage AP.
+    gTogglePos = 'auto';
     if (gMode !== 'AP') sendCmd('MODE AUTO');
 
   } else if (action === 'off') {
-    if (gMode === 'AP' && gApOn) sendCmd('BTN TOGGLE');  // disengage AP before disconnect
-    if (gMode === 'MANUAL')      sendCmd('MODE AUTO');   // exit manual before disconnect
+    if (gApOn)               sendCmd('BTN TOGGLE');  // disengage AP before disconnect
+    if (gTogglePos === 'manual') sendCmd('MODE AUTO');   // exit manual before disconnect
+    gTogglePos = 'off';
     // Delay gives the preceding command time to reach the bridge before the TCP
     // connection is dropped by MODE OFF (bridge loop polls every ~100 ms).
     setTimeout(function() { sendCmd('MODE OFF'); }, 300);
 
   } else if (action === 'manual') {
+    gTogglePos = 'manual';
     if (gMode !== 'MANUAL') {
       sendCmd('MODE MANUAL');
       // Reset wheel to midships on entering manual
