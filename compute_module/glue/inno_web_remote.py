@@ -39,7 +39,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B10"
+INNOPILOT_VERSION = "v1.2.0_B11"
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -481,28 +481,25 @@ body{
   touch-action:manipulation;
 }
 .oled-btn:active{background:#1a3060}
-/* Version pinned to absolute bottom-left of screen */
-#o-ver{
-  position:fixed;
-  bottom:6px;
-  left:8px;
-  font-size:0.63em;
+/* Bottom bar: version left, conn centred */
+.bottom-bar{
+  display:flex;
+  align-items:center;
+  position:relative;
   font-family:'Courier New',monospace;
-  color:#6ee0ff;
   letter-spacing:1px;
-  pointer-events:none;
+  margin-top:2px;
 }
-/* Connection status pinned to bottom-centre of screen, 1.5× size */
+#o-ver{
+  font-size:0.63em;
+  color:#6ee0ff;
+}
 #o-conn{
-  position:fixed;
-  bottom:4px;
+  position:absolute;
   left:50%;
   transform:translateX(-50%);
   font-size:0.945em;
-  font-family:'Courier New',monospace;
-  letter-spacing:1px;
   white-space:nowrap;
-  pointer-events:none;
 }
 .ok{color:#00cc70}
 .warn{color:#ffaa00}
@@ -771,6 +768,11 @@ body{
     <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in MANUAL mode</div>
   </div>
 
+  <div class="bottom-bar">
+    <span id="o-ver">---</span>
+    <span id="o-conn" class="warn">CONNECTING\u2026</span>
+  </div>
+
 </div><!-- .remote -->
 
 <script>
@@ -1019,8 +1021,6 @@ setInterval(function() {
   if (d) d.textContent = '\u25cf'.repeat(dotN);
 }, 550);
 </script>
-  <span id="o-ver">---</span>
-  <span id="o-conn" class="warn">CONNECTING\u2026</span>
 </body>
 </html>""".replace("$$WHEEL_SVG$$", _WHEEL_SVG)
 
