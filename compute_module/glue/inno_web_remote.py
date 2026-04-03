@@ -16,6 +16,7 @@ Usage:
 import json
 import logging
 import math
+import os
 import queue
 import socket
 import threading
@@ -39,7 +40,81 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B20"
+INNOPILOT_VERSION = "v1.2.0_B21"
+
+# ---------------------------------------------------------------------------
+# Settings persistence — /var/lib/inno-pilot/settings.json
+# ---------------------------------------------------------------------------
+SETTINGS_FILE = "/var/lib/inno-pilot/settings.json"
+
+_DEFAULT_SETTINGS: dict = {
+    "network": {
+        "ip_mode": "dhcp",          # "dhcp" or "static"
+        "ip":      "",
+        "mask":    "255.255.255.0",
+        "gateway": "",
+        "dns1":    "8.8.8.8",
+        "dns2":    "8.8.4.4",
+    },
+    "wifi": {
+        "ssid": "",
+        "key":  "",
+    },
+    "vessel": {
+        "name":             "",
+        "type":             "sail",  # "sail" or "power"
+        "rudder_range_deg": 35,      # full rudder throw each side (degrees)
+    },
+    "features": {
+        "limit_switches":         False,
+        "temp_sensor":            False,
+        "pi_voltage_sensor":      False,
+        "battery_voltage_sensor": False,
+        "current_sensor":         False,
+    },
+    "autopilot": {
+        "deadband_pct":           3.0,
+        "pgain":                  1.0,  # proportional heading gain
+        "off_course_alarm_deg":   20,   # degrees off-course before alert
+        "rudder_limit_port_pct":  0,    # software port stop (%)
+        "rudder_limit_stbd_pct":  100,  # software stbd stop (%)
+    },
+    "safety": {
+        "auto_disengage_on_fault":  True,
+        "comms_warn_threshold_pct": 10,  # CRC error rate % for WARN
+        "comms_crit_threshold_pct": 25,  # CRC error rate % for CRIT
+    },
+}
+
+
+def _load_settings() -> dict:
+    """Return settings from file merged over built-in defaults."""
+    import copy
+    s = copy.deepcopy(_DEFAULT_SETTINGS)
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE) as fh:
+                saved = json.load(fh)
+            for sec, vals in saved.items():
+                if isinstance(s.get(sec), dict) and isinstance(vals, dict):
+                    s[sec].update(vals)
+                else:
+                    s[sec] = vals
+        except Exception as exc:
+            log.warning("Settings load failed: %s", exc)
+    return s
+
+
+def _persist_settings(settings: dict) -> None:
+    """Write settings dict to file, creating parent dirs if needed."""
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        with open(SETTINGS_FILE, "w") as fh:
+            json.dump(settings, fh, indent=2)
+        log.info("Settings saved \u2192 %s", SETTINGS_FILE)
+    except Exception as exc:
+        log.error("Settings save failed: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Shared state — written by bridge thread, read by HTTP handlers
@@ -691,6 +766,110 @@ body{
 @media(max-width:350px){
   .remote{width:100vw;border-radius:0;padding:10px 8px 16px}
 }
+
+/* ── Gear / settings button ─────────────────────────────────────────── */
+.settings-footer{display:flex;justify-content:flex-start;padding:0 4px 2px}
+.gear-btn{
+  width:38px;height:38px;border-radius:50%;
+  background:#111;border:1.5px solid #333;
+  color:#fff;font-size:1.3em;line-height:1;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 3px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.07);
+  transition:transform .1s,background .15s,border-color .15s;
+  touch-action:manipulation;
+}
+.gear-btn:active{transform:scale(.88)}
+.gear-btn.settings-open{
+  background:#0d2a40;border-color:#00bfff;color:#00d4ff;
+  box-shadow:0 0 8px rgba(0,191,255,.45),0 3px 8px rgba(0,0,0,.4);
+}
+
+/* ── Settings warning toast ─────────────────────────────────────────── */
+.sw-toast{
+  position:fixed;top:50%;left:50%;
+  transform:translate(-50%,-50%) scale(.85);
+  background:rgba(155,50,0,.97);color:#fff;
+  padding:11px 20px;border-radius:9px;
+  font-size:.88em;font-weight:700;text-align:center;line-height:1.5;
+  opacity:0;pointer-events:none;z-index:500;
+  transition:opacity .18s,transform .18s;
+  box-shadow:0 6px 24px rgba(0,0,0,.7);
+}
+.sw-toast.visible{opacity:1;transform:translate(-50%,-50%) scale(1)}
+
+/* ── Settings overlay panel ─────────────────────────────────────────── */
+.sov{
+  position:fixed;inset:0;background:rgba(4,6,22,.92);
+  display:flex;align-items:center;justify-content:center;
+  z-index:400;
+  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+}
+.sov.hidden{display:none}
+.spanel{
+  background:linear-gradient(170deg,#0e1226,#080b18);
+  border:1px solid #1e2a50;border-radius:13px;
+  box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 0 1px rgba(0,191,255,.08);
+  width:318px;max-width:96vw;max-height:88vh;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.shdr{
+  background:linear-gradient(90deg,#0c1830,#101e40);
+  border-bottom:1px solid #1a2840;
+  padding:9px 14px 7px;flex-shrink:0;
+}
+.shdr-title{
+  color:#00d4ff;font-size:1.0em;font-weight:700;
+  letter-spacing:3px;text-shadow:0 0 10px rgba(0,191,255,.4);
+  display:block;
+}
+.shdr-hint{
+  color:#354860;font-size:.62em;font-family:'Courier New',monospace;
+  letter-spacing:.5px;margin-top:2px;display:block;
+}
+.sbody{overflow-y:auto;padding:6px 12px 10px;flex:1;overscroll-behavior:contain}
+.ss-title{
+  color:#3090b8;font-size:.68em;font-weight:700;letter-spacing:2px;
+  margin:12px 0 4px;padding-bottom:3px;border-bottom:1px solid #152030;
+}
+.ss-title:first-child{margin-top:4px}
+.sf-row{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:5px 5px;border-radius:5px;border:1px solid transparent;gap:6px;
+  transition:border-color .13s,background .13s;
+}
+.sf-row.focused{
+  background:rgba(0,80,160,.20);border-color:#0080c0;
+  box-shadow:0 0 7px rgba(0,128,192,.28);
+}
+.sf-row.sf-hidden{display:none}
+.sf-lbl{color:#90a8c0;font-size:.76em;min-width:108px;flex-shrink:0}
+.sf-eval{
+  color:#00d4ff;font-size:.8em;font-family:'Courier New',monospace;
+  font-weight:700;min-width:64px;text-align:right;
+}
+.sf-inp{
+  background:#080f20;border:1px solid #1e3450;border-radius:4px;
+  color:#00d4ff;font-family:'Courier New',monospace;font-size:.79em;
+  padding:3px 6px;width:130px;outline:none;
+}
+.sf-inp:focus{border-color:#0090d0;box-shadow:0 0 5px rgba(0,144,208,.35)}
+.sf-bool{display:flex;gap:4px}
+.sf-bb{
+  padding:3px 9px;border-radius:4px;border:1px solid #1e3450;
+  background:#080f20;color:#4a6a80;font-size:.72em;font-weight:700;
+  cursor:pointer;touch-action:manipulation;font-family:'Courier New',monospace;
+  transition:background .1s,color .1s,border-color .1s;
+}
+.sf-bb.bb-on {background:#082010;border-color:#00a030;color:#00cc50}
+.sf-bb.bb-off{background:#200808;border-color:#a02020;color:#cc3030}
+.sftr{border-top:1px solid #152030;padding:7px 12px;display:flex;gap:8px;flex-shrink:0}
+.sftr-btn{
+  flex:1;padding:7px 0;border-radius:6px;border:none;
+  font-size:.8em;font-weight:700;cursor:pointer;letter-spacing:1.5px;
+  touch-action:manipulation;
+}
+.sftr-btn.sv {background:linear-gradient(180deg,#0d4020,#061808);color:#00cc50;border:1px solid #0a4020}
+.sftr-btn.cx {background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
 </style>
 </head>
 <body>
@@ -769,7 +948,158 @@ body{
     <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in MANUAL mode</div>
   </div>
 
+  <!-- Settings gear button — only active while toggle is in OFF position -->
+  <div class="settings-footer">
+    <button class="gear-btn" id="gear-btn" title="Settings (OFF mode only)">&#9881;</button>
+  </div>
+
 </div><!-- .remote -->
+
+<!-- Settings warning toast -->
+<div class="sw-toast" id="sw-toast">Settings only<br>available in OFF mode</div>
+
+<!-- Settings overlay -->
+<div class="sov hidden" id="sov">
+  <div class="spanel">
+    <div class="shdr">
+      <span class="shdr-title">&#9881; SETTINGS</span>
+      <span class="shdr-hint">B1=OFF &nbsp;B2=PREV &nbsp;B3=SET(save) &nbsp;B4=NEXT &nbsp;B5=ON</span>
+    </div>
+    <div class="sbody" id="sbody">
+
+      <div class="ss-title">NETWORK</div>
+      <div class="sf-row" data-sfid="ip_mode">
+        <span class="sf-lbl">IP Mode</span>
+        <span class="sf-eval" id="sf-ip_mode">DHCP</span>
+      </div>
+      <div class="sf-row sf-hidden" data-sfid="ip">
+        <span class="sf-lbl">IP Address</span>
+        <input class="sf-inp" type="text" id="sf-ip" placeholder="192.168.x.x">
+      </div>
+      <div class="sf-row sf-hidden" data-sfid="mask">
+        <span class="sf-lbl">Subnet Mask</span>
+        <input class="sf-inp" type="text" id="sf-mask" placeholder="255.255.255.0">
+      </div>
+      <div class="sf-row sf-hidden" data-sfid="gateway">
+        <span class="sf-lbl">Gateway</span>
+        <input class="sf-inp" type="text" id="sf-gateway" placeholder="192.168.x.1">
+      </div>
+      <div class="sf-row sf-hidden" data-sfid="dns1">
+        <span class="sf-lbl">DNS 1</span>
+        <input class="sf-inp" type="text" id="sf-dns1" placeholder="8.8.8.8">
+      </div>
+      <div class="sf-row sf-hidden" data-sfid="dns2">
+        <span class="sf-lbl">DNS 2</span>
+        <input class="sf-inp" type="text" id="sf-dns2" placeholder="8.8.4.4">
+      </div>
+
+      <div class="ss-title">WI-FI</div>
+      <div class="sf-row" data-sfid="ssid">
+        <span class="sf-lbl">SSID</span>
+        <input class="sf-inp" type="text" id="sf-ssid" placeholder="Network name">
+      </div>
+      <div class="sf-row" data-sfid="key">
+        <span class="sf-lbl">Password</span>
+        <input class="sf-inp" type="password" id="sf-key" placeholder="Wi-Fi key">
+      </div>
+
+      <div class="ss-title">VESSEL</div>
+      <div class="sf-row" data-sfid="name">
+        <span class="sf-lbl">Boat Name</span>
+        <input class="sf-inp" type="text" id="sf-name" placeholder="My Boat">
+      </div>
+      <div class="sf-row" data-sfid="type">
+        <span class="sf-lbl">Vessel Type</span>
+        <span class="sf-eval" id="sf-type">SAIL</span>
+      </div>
+      <div class="sf-row" data-sfid="rudder_range_deg">
+        <span class="sf-lbl">Rudder Range (&#176;)</span>
+        <input class="sf-inp" type="number" id="sf-rudder_range_deg" min="10" max="60" step="1">
+      </div>
+
+      <div class="ss-title">CONNECTIONS &amp; FEATURES</div>
+      <div class="sf-row" data-sfid="limit_switches">
+        <span class="sf-lbl">Limit Switches</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="limit_switches" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="limit_switches" data-bval="false">OFF</button>
+        </div>
+      </div>
+      <div class="sf-row" data-sfid="temp_sensor">
+        <span class="sf-lbl">Temp Sensor</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="temp_sensor" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="temp_sensor" data-bval="false">OFF</button>
+        </div>
+      </div>
+      <div class="sf-row" data-sfid="pi_voltage_sensor">
+        <span class="sf-lbl">Pi Voltage</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="pi_voltage_sensor" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="pi_voltage_sensor" data-bval="false">OFF</button>
+        </div>
+      </div>
+      <div class="sf-row" data-sfid="battery_voltage_sensor">
+        <span class="sf-lbl">Battery Voltage</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="battery_voltage_sensor" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="battery_voltage_sensor" data-bval="false">OFF</button>
+        </div>
+      </div>
+      <div class="sf-row" data-sfid="current_sensor">
+        <span class="sf-lbl">Current Sensor</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="current_sensor" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="current_sensor" data-bval="false">OFF</button>
+        </div>
+      </div>
+
+      <div class="ss-title">AUTOPILOT</div>
+      <div class="sf-row" data-sfid="deadband_pct">
+        <span class="sf-lbl">Deadband (%)</span>
+        <input class="sf-inp" type="number" id="sf-deadband_pct" min="0.5" max="20" step="0.5">
+      </div>
+      <div class="sf-row" data-sfid="pgain">
+        <span class="sf-lbl">P-Gain</span>
+        <input class="sf-inp" type="number" id="sf-pgain" min="0.1" max="5.0" step="0.1">
+      </div>
+      <div class="sf-row" data-sfid="off_course_alarm_deg">
+        <span class="sf-lbl">Off-Course Alarm (&#176;)</span>
+        <input class="sf-inp" type="number" id="sf-off_course_alarm_deg" min="5" max="90" step="1">
+      </div>
+      <div class="sf-row" data-sfid="rudder_limit_port_pct">
+        <span class="sf-lbl">Port Limit (%)</span>
+        <input class="sf-inp" type="number" id="sf-rudder_limit_port_pct" min="0" max="45" step="1">
+      </div>
+      <div class="sf-row" data-sfid="rudder_limit_stbd_pct">
+        <span class="sf-lbl">Stbd Limit (%)</span>
+        <input class="sf-inp" type="number" id="sf-rudder_limit_stbd_pct" min="55" max="100" step="1">
+      </div>
+
+      <div class="ss-title">SAFETY</div>
+      <div class="sf-row" data-sfid="auto_disengage_on_fault">
+        <span class="sf-lbl">Auto-Disengage</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="auto_disengage_on_fault" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="auto_disengage_on_fault" data-bval="false">OFF</button>
+        </div>
+      </div>
+      <div class="sf-row" data-sfid="comms_warn_threshold_pct">
+        <span class="sf-lbl">Comms WARN (%)</span>
+        <input class="sf-inp" type="number" id="sf-comms_warn_threshold_pct" min="1" max="50" step="1">
+      </div>
+      <div class="sf-row" data-sfid="comms_crit_threshold_pct">
+        <span class="sf-lbl">Comms CRIT (%)</span>
+        <input class="sf-inp" type="number" id="sf-comms_crit_threshold_pct" min="5" max="90" step="1">
+      </div>
+
+    </div><!-- .sbody -->
+    <div class="sftr">
+      <button class="sftr-btn sv"  id="sov-save">SAVE</button>
+      <button class="sftr-btn cx" id="sov-cancel">CANCEL</button>
+    </div>
+  </div><!-- .spanel -->
+</div><!-- .sov -->
 
 <script>
 'use strict';
@@ -788,6 +1118,9 @@ var gManualRudPct = 50.0;  // commanded rudder % in MANUAL mode (0–100%)
 var gRdrPct       = null;  // latest rdr_pct from bridge telemetry
 var gJogTimer     = null;  // setInterval handle for hold-jog repeat
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
+var gSettings     = {};    // settings loaded from /settings endpoint
+var gSettingsOpen = false; // true while settings panel is visible
+var gSfIdx        = 0;     // currently focused field index (in visible list)
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
@@ -927,6 +1260,14 @@ function setToggle(m) {
   } else {
     btns.forEach(function(b) { b.textContent = ''; });
   }
+  // When settings panel is open, override button labels regardless of mode
+  if (gSettingsOpen) {
+    btns[0].textContent = 'OFF';
+    btns[1].textContent = 'PREV';
+    btns[2].textContent = 'SET';
+    btns[3].textContent = 'NEXT';
+    btns[4].textContent = 'ON';
+  }
 }
 
 // ── Manual-mode jog helpers ───────────────────────────────────────────────
@@ -978,6 +1319,7 @@ function stopJog() {
     if (!el) return;
 
     function onPress() {
+      if (gSettingsOpen) { handleSettingsBtn(cfg.cls); return; }
       if (gMode === 'MANUAL') {
         if (cfg.delta === null) {
           // B3: centre rudder immediately
@@ -1124,6 +1466,225 @@ window.addEventListener('touchmove', function(e) {
 }, {passive: false});
 window.addEventListener('touchend', function() { wheelEnd(); });
 
+// ── Settings panel ───────────────────────────────────────────────────────────
+// Field registry — drives population, B-button navigation, and bool/enum control.
+// type: 'text'|'password'|'number'|'bool'|'enum'
+// onVal/offVal: stored value for B5=ON / B1=OFF on enum fields.
+// dep: {id, val} — field hidden unless named field equals val.
+var SF = [
+  // Network
+  {id:'ip_mode', sec:'network', type:'enum',     onVal:'static', offVal:'dhcp'},
+  {id:'ip',      sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
+  {id:'mask',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
+  {id:'gateway', sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
+  {id:'dns1',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
+  {id:'dns2',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
+  // Wi-Fi
+  {id:'ssid',    sec:'wifi',    type:'text'},
+  {id:'key',     sec:'wifi',    type:'password'},
+  // Vessel
+  {id:'name',             sec:'vessel',   type:'text'},
+  {id:'type',             sec:'vessel',   type:'enum',   onVal:'sail', offVal:'power'},
+  {id:'rudder_range_deg', sec:'vessel',   type:'number'},
+  // Features
+  {id:'limit_switches',         sec:'features', type:'bool'},
+  {id:'temp_sensor',            sec:'features', type:'bool'},
+  {id:'pi_voltage_sensor',      sec:'features', type:'bool'},
+  {id:'battery_voltage_sensor', sec:'features', type:'bool'},
+  {id:'current_sensor',         sec:'features', type:'bool'},
+  // Autopilot
+  {id:'deadband_pct',           sec:'autopilot', type:'number'},
+  {id:'pgain',                  sec:'autopilot', type:'number'},
+  {id:'off_course_alarm_deg',   sec:'autopilot', type:'number'},
+  {id:'rudder_limit_port_pct',  sec:'autopilot', type:'number'},
+  {id:'rudder_limit_stbd_pct',  sec:'autopilot', type:'number'},
+  // Safety
+  {id:'auto_disengage_on_fault',  sec:'safety', type:'bool'},
+  {id:'comms_warn_threshold_pct', sec:'safety', type:'number'},
+  {id:'comms_crit_threshold_pct', sec:'safety', type:'number'},
+];
+
+function sfGet(f) { return (gSettings[f.sec] || {})[f.id]; }
+function sfSet(f, v) {
+  if (!gSettings[f.sec]) gSettings[f.sec] = {};
+  gSettings[f.sec][f.id] = v;
+}
+
+// Returns visible (non-hidden) field list, honouring dep conditions.
+function sfVisibleList() {
+  return SF.filter(function(f) {
+    if (!f.dep) return true;
+    var d = SF.find(function(x) { return x.id === f.dep.id; });
+    return d && String(sfGet(d)) === f.dep.val;
+  });
+}
+
+// Show/hide rows for fields with dep conditions.
+function sfSyncVisibility() {
+  SF.forEach(function(f) {
+    if (!f.dep) return;
+    var d = SF.find(function(x) { return x.id === f.dep.id; });
+    var show = d && String(sfGet(d)) === f.dep.val;
+    var row = document.querySelector('.sf-row[data-sfid="' + f.id + '"]');
+    if (row) row.classList.toggle('sf-hidden', !show);
+  });
+}
+
+// Render ON/OFF button styles for a bool field.
+function sfBoolRender(fid, isOn) {
+  document.querySelectorAll('.sf-bb[data-boolid="' + fid + '"]').forEach(function(b) {
+    b.classList.remove('bb-on', 'bb-off');
+    if (b.dataset.bval === 'true'  &&  isOn) b.classList.add('bb-on');
+    if (b.dataset.bval === 'false' && !isOn) b.classList.add('bb-off');
+  });
+}
+
+// Populate all controls from gSettings.
+function sfApplyToUI() {
+  SF.forEach(function(f) {
+    var v = sfGet(f);
+    if (v === undefined || v === null) return;
+    if (f.type === 'bool') {
+      sfBoolRender(f.id, !!v);
+    } else if (f.type === 'enum') {
+      var el = document.getElementById('sf-' + f.id);
+      if (el) el.textContent = String(v).toUpperCase();
+    } else {
+      var el = document.getElementById('sf-' + f.id);
+      if (el) el.value = v;
+    }
+  });
+}
+
+// Read text/number/password inputs back into gSettings.
+// (bool and enum values are written directly to gSettings on interaction.)
+function sfCollect() {
+  SF.forEach(function(f) {
+    if (f.type === 'bool' || f.type === 'enum') return;
+    var el = document.getElementById('sf-' + f.id);
+    if (!el) return;
+    if (!gSettings[f.sec]) gSettings[f.sec] = {};
+    gSettings[f.sec][f.id] = (f.type === 'number') ? (parseFloat(el.value) || 0) : el.value;
+  });
+}
+
+// Move focus indicator to the field at index idx in the visible list.
+function sfFocus(idx) {
+  document.querySelectorAll('.sf-row').forEach(function(r) { r.classList.remove('focused'); });
+  var vis = sfVisibleList();
+  if (idx < 0 || idx >= vis.length) return;
+  gSfIdx = idx;
+  var row = document.querySelector('.sf-row[data-sfid="' + vis[idx].id + '"]');
+  if (row) {
+    row.classList.add('focused');
+    row.scrollIntoView({behavior:'smooth', block:'nearest'});
+  }
+}
+
+function sfNav(dir) {
+  var vis = sfVisibleList();
+  sfFocus(Math.max(0, Math.min(vis.length - 1, gSfIdx + dir)));
+}
+
+// B5=ON / B1=OFF: act on the currently focused field.
+function sfToggle(isOn) {
+  var vis = sfVisibleList();
+  if (gSfIdx < 0 || gSfIdx >= vis.length) return;
+  var f = vis[gSfIdx];
+  if (f.type === 'bool') {
+    sfSet(f, isOn);
+    sfBoolRender(f.id, isOn);
+  } else if (f.type === 'enum') {
+    var nv = isOn ? f.onVal : f.offVal;
+    sfSet(f, nv);
+    var el = document.getElementById('sf-' + f.id);
+    if (el) el.textContent = nv.toUpperCase();
+    sfSyncVisibility();
+    sfFocus(gSfIdx); // re-highlight after visibility may have changed
+  }
+}
+
+function openSettings() {
+  if (gTogglePos !== 'off') {
+    // Flash warning — settings only accessible in OFF mode
+    var t = document.getElementById('sw-toast');
+    t.classList.add('visible');
+    setTimeout(function() { t.classList.remove('visible'); }, 2200);
+    return;
+  }
+  gSettingsOpen = true;
+  document.getElementById('gear-btn').classList.add('settings-open');
+  document.getElementById('sov').classList.remove('hidden');
+  setToggle('off'); // re-renders buttons (override inside setToggle shows settings labels)
+  fetch('/settings')
+    .then(function(r) { return r.json(); })
+    .then(function(s) {
+      gSettings = s;
+      sfApplyToUI();
+      sfSyncVisibility();
+      gSfIdx = 0;
+      sfFocus(0);
+    })
+    .catch(function() {});
+}
+
+function closeSettings(save) {
+  if (save) {
+    sfCollect();
+    fetch('/settings', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(gSettings)
+    }).catch(function() {});
+  }
+  gSettingsOpen = false;
+  document.getElementById('gear-btn').classList.remove('settings-open');
+  document.getElementById('sov').classList.add('hidden');
+  setToggle('off'); // restore button labels (empty in OFF mode, since gSettingsOpen is now false)
+}
+
+// Physical button dispatch while settings panel is open.
+function handleSettingsBtn(cls) {
+  switch (cls) {
+    case 'b1': sfToggle(false);      break; // OFF
+    case 'b2': sfNav(-1);            break; // PREV
+    case 'b3': closeSettings(true);  break; // SET = save + close
+    case 'b4': sfNav(1);             break; // NEXT
+    case 'b5': sfToggle(true);       break; // ON
+  }
+}
+
+// Settings event wiring
+document.getElementById('gear-btn').addEventListener('click', openSettings);
+document.getElementById('gear-btn').addEventListener('touchstart', function(e) {
+  e.preventDefault(); openSettings();
+}, {passive:false});
+document.getElementById('sov-save').addEventListener('click',   function() { closeSettings(true); });
+document.getElementById('sov-cancel').addEventListener('click', function() { closeSettings(false); });
+
+// Bool buttons: direct click updates gSettings immediately
+document.querySelectorAll('.sf-bb').forEach(function(b) {
+  b.addEventListener('click', function() {
+    var fid = b.dataset.boolid;
+    var val = b.dataset.bval === 'true';
+    var f = SF.find(function(x) { return x.id === fid; });
+    if (f) { sfSet(f, val); sfBoolRender(fid, val); }
+  });
+});
+
+// Field row click: move virtual focus to that field
+document.querySelectorAll('.sf-row').forEach(function(row) {
+  row.addEventListener('click', function() {
+    var fid = row.dataset.sfid;
+    var vis = sfVisibleList();
+    var idx = -1;
+    for (var i = 0; i < vis.length; i++) {
+      if (vis[i].id === fid) { idx = i; break; }
+    }
+    if (idx >= 0) sfFocus(idx);
+  });
+});
+
 // ── No-bridge overlay animation ───────────────────────────────────────────
 var dotN = 1;
 setInterval(function() {
@@ -1151,12 +1712,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_sse()
         elif self.path == "/health":
             self._serve_health()
+        elif self.path == "/settings":
+            self._serve_settings()
         else:
             self.send_error(404)
 
     def do_POST(self):
         if self.path == "/command":
             self._handle_command()
+        elif self.path == "/settings":
+            self._handle_settings_post()
         else:
             self.send_error(404)
 
@@ -1293,6 +1858,36 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    # ---- GET /settings ----
+
+    def _serve_settings(self) -> None:
+        body = json.dumps(_load_settings()).encode()
+        self.send_response(200)
+        self.send_header("Content-Type",   "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control",  "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- POST /settings ----
+
+    def _handle_settings_post(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length) if length else b""
+        try:
+            settings = json.loads(body)
+            if not isinstance(settings, dict):
+                raise ValueError("expected JSON object")
+            _persist_settings(settings)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        except Exception as exc:
+            log.warning("Settings POST rejected: %s", exc)
+            self.send_response(400)
+            self.end_headers()
 
 
 # ---------------------------------------------------------------------------
