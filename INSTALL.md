@@ -22,7 +22,7 @@ Flash steps:
 3. In Advanced Options (gear icon):
    - Set hostname (e.g. `autopilotzero`).
    - Enable SSH (password auth).
-   - Set user `aviljoen`, password `Metsys01`.
+   - Set user `innopilot`, password `innopilot123`.
    - Configure Wi-Fi if needed.
 4. Write to SD card.
 
@@ -33,7 +33,7 @@ Flash steps:
 SSH in once the Pi is on the network:
 
 ```bash
-ssh aviljoen@<pi-ip>
+ssh innopilot@<pi-ip>
 ```
 
 Update and install required packages:

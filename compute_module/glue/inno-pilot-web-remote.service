@@ -5,7 +5,7 @@ Wants=inno-pilot-bridge.service
 
 [Service]
 Type=simple
-User=aviljoen
+User=innopilot
 ExecStart=/usr/local/bin/inno_web_remote.py
 Restart=always
 RestartSec=3

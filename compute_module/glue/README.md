@@ -54,7 +54,7 @@ transparent bridge in the middle that adds Inno-Pilot control head + wireless re
   systemd oneshot to run `inno_pilot_fix_symlink.sh` after socat starts.
 
 - `inno-pilot-bridge.service`  
-  systemd unit to run `inno_pilot_bridge.py` as user `aviljoen` (group `dialout`).
+  systemd unit to run `inno_pilot_bridge.py` as user `innopilot` (group `dialout`).
 
 - `deploy_inno_pilot_bridge.sh`  
   Deployment helper that copies scripts into `/usr/local/bin` and

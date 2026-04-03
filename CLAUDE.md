@@ -103,7 +103,7 @@ When asked to implement something:
 3) Update docs/comments where it prevents future mistakes.
 4) Run the best available checks/tests.
 5) Open PR with a high-signal description.
-6) Check all components of inno-remote that might be versioned, like the nano sketch, the bridge, inno-remote and inno-web-remote. Keep the version numbers of all those components in sync and push/flash the same version number to all components.
+6) Check all components of inno-remote that might be versioned, like the nano sketch, the bridge, updated OTA binary that also lands at /var/lib/inno-pilot/ota/ on the Pi, inno-remote and inno-web-remote. Keep the version numbers of all those components in sync and push/flash the same version number to all components.
 
 ---
 
