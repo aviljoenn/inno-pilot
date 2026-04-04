@@ -963,7 +963,7 @@ body{
   <div class="spanel">
     <div class="shdr">
       <span class="shdr-title">&#9881; SETTINGS</span>
-      <span class="shdr-hint">B1=OFF &nbsp;B2=PREV &nbsp;B3=SET(save) &nbsp;B4=NEXT &nbsp;B5=ON</span>
+      <span class="shdr-hint">Tap a field to edit &nbsp;&bull;&nbsp; SAVE to apply</span>
     </div>
     <div class="sbody" id="sbody">
 
@@ -1120,7 +1120,6 @@ var gJogTimer     = null;  // setInterval handle for hold-jog repeat
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
 var gSettingsOpen = false; // true while settings panel is visible
-var gSfIdx        = 0;     // currently focused field index (in visible list)
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
@@ -1260,14 +1259,6 @@ function setToggle(m) {
   } else {
     btns.forEach(function(b) { b.textContent = ''; });
   }
-  // When settings panel is open, override button labels regardless of mode
-  if (gSettingsOpen) {
-    btns[0].textContent = 'OFF';
-    btns[1].textContent = 'PREV';
-    btns[2].textContent = 'SET';
-    btns[3].textContent = 'NEXT';
-    btns[4].textContent = 'ON';
-  }
 }
 
 // ── Manual-mode jog helpers ───────────────────────────────────────────────
@@ -1319,7 +1310,6 @@ function stopJog() {
     if (!el) return;
 
     function onPress() {
-      if (gSettingsOpen) { handleSettingsBtn(cfg.cls); return; }
       if (gMode === 'MANUAL') {
         if (cfg.delta === null) {
           // B3: centre rudder immediately
@@ -1469,7 +1459,7 @@ window.addEventListener('touchend', function() { wheelEnd(); });
 // ── Settings panel ───────────────────────────────────────────────────────────
 // Field registry — drives population, B-button navigation, and bool/enum control.
 // type: 'text'|'password'|'number'|'bool'|'enum'
-// onVal/offVal: stored value for B5=ON / B1=OFF on enum fields.
+// onVal/offVal: stored value toggled by tapping the enum field.
 // dep: {id, val} — field hidden unless named field equals val.
 var SF = [
   // Network
@@ -1568,41 +1558,6 @@ function sfCollect() {
   });
 }
 
-// Move focus indicator to the field at index idx in the visible list.
-function sfFocus(idx) {
-  document.querySelectorAll('.sf-row').forEach(function(r) { r.classList.remove('focused'); });
-  var vis = sfVisibleList();
-  if (idx < 0 || idx >= vis.length) return;
-  gSfIdx = idx;
-  var row = document.querySelector('.sf-row[data-sfid="' + vis[idx].id + '"]');
-  if (row) {
-    row.classList.add('focused');
-    row.scrollIntoView({behavior:'smooth', block:'nearest'});
-  }
-}
-
-function sfNav(dir) {
-  var vis = sfVisibleList();
-  sfFocus(Math.max(0, Math.min(vis.length - 1, gSfIdx + dir)));
-}
-
-// B5=ON / B1=OFF: act on the currently focused field.
-function sfToggle(isOn) {
-  var vis = sfVisibleList();
-  if (gSfIdx < 0 || gSfIdx >= vis.length) return;
-  var f = vis[gSfIdx];
-  if (f.type === 'bool') {
-    sfSet(f, isOn);
-    sfBoolRender(f.id, isOn);
-  } else if (f.type === 'enum') {
-    var nv = isOn ? f.onVal : f.offVal;
-    sfSet(f, nv);
-    var el = document.getElementById('sf-' + f.id);
-    if (el) el.textContent = nv.toUpperCase();
-    sfSyncVisibility();
-    sfFocus(gSfIdx); // re-highlight after visibility may have changed
-  }
-}
 
 function openSettings() {
   if (gTogglePos !== 'off') {
@@ -1622,8 +1577,6 @@ function openSettings() {
       gSettings = s;
       sfApplyToUI();
       sfSyncVisibility();
-      gSfIdx = 0;
-      sfFocus(0);
     })
     .catch(function() {});
 }
@@ -1641,17 +1594,6 @@ function closeSettings(save) {
   document.getElementById('gear-btn').classList.remove('settings-open');
   document.getElementById('sov').classList.add('hidden');
   setToggle('off'); // restore button labels (empty in OFF mode, since gSettingsOpen is now false)
-}
-
-// Physical button dispatch while settings panel is open.
-function handleSettingsBtn(cls) {
-  switch (cls) {
-    case 'b1': sfToggle(false);      break; // OFF
-    case 'b2': sfNav(-1);            break; // PREV
-    case 'b3': closeSettings(true);  break; // SET = save + close
-    case 'b4': sfNav(1);             break; // NEXT
-    case 'b5': sfToggle(true);       break; // ON
-  }
 }
 
 // Settings event wiring
@@ -1672,16 +1614,28 @@ document.querySelectorAll('.sf-bb').forEach(function(b) {
   });
 });
 
-// Field row click: move virtual focus to that field
+// Field row click: focus the input for text/number/password fields
 document.querySelectorAll('.sf-row').forEach(function(row) {
-  row.addEventListener('click', function() {
+  row.addEventListener('click', function(e) {
+    var inp = row.querySelector('.sf-inp');
+    if (inp && e.target !== inp) inp.focus();
+  });
+});
+// Enum field: tap the displayed value to toggle between the two options
+document.querySelectorAll('.sf-eval').forEach(function(el) {
+  el.style.cursor = 'pointer';
+  el.addEventListener('click', function(e) {
+    e.stopPropagation();
+    var row = el.parentElement;
+    while (row && !row.classList.contains('sf-row')) { row = row.parentElement; }
+    if (!row) return;
     var fid = row.dataset.sfid;
-    var vis = sfVisibleList();
-    var idx = -1;
-    for (var i = 0; i < vis.length; i++) {
-      if (vis[i].id === fid) { idx = i; break; }
-    }
-    if (idx >= 0) sfFocus(idx);
+    var f = SF.find(function(x) { return x.id === fid; });
+    if (!f || f.type !== 'enum') return;
+    var nv = (sfGet(f) === f.onVal) ? f.offVal : f.onVal;
+    sfSet(f, nv);
+    el.textContent = nv.toUpperCase();
+    sfSyncVisibility();
   });
 });
 
