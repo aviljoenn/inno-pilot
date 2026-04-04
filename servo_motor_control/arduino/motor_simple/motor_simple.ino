@@ -122,7 +122,7 @@ const uint8_t PORT_LIMIT_PIN   = 7;
 const uint8_t STBD_LIMIT_PIN   = 8;
 
 const float ADC_VREF              = 5.00f;
-const float VOLTAGE_SCALE         = 5.156f;
+const float VOLTAGE_SCALE         = 3.323f; // Change to 3.323f for .12 and 5.156f for .13
 
 // New sensor calibration from ADC readings:
 // @ 0 A  : ADC = 430 -> V0 ≈ 2.103 V
