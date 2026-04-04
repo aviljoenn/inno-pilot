@@ -6,6 +6,8 @@
 // - Sends periodic FLAGS and RUDDER frames with the same framing
 // - Drives IBT-2 H-bridge + clutch based on COMMAND / DISENGAGE
 // - Obeys limit switches + rudder pot min/max
+// - B26: MOTOR_REASON_CODE diagnostic — sent once when D9 goes LOW→HIGH, encodes which
+//        code branch activated the motor plus key state variables for root-cause tracing.
 
 #include <Arduino.h>
 #include <stdint.h>
@@ -21,8 +23,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B25";
-const uint16_t INNOPILOT_BUILD_NUM = 25;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B26";
+const uint16_t INNOPILOT_BUILD_NUM = 26;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -60,6 +62,32 @@ const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
 // value bits: [2]=D9/EN(PWM)  [1]=D3/LPWM  [0]=D2/RPWM
 // Sent every time any of these three pins changes after update_motor_from_command().
 const uint8_t PIN_STATE_CODE = 0xE1;
+
+// Nano->Bridge: motor activation reason (B26 diagnostic).
+// Sent ONCE when D9 transitions LOW->HIGH (motor first starts).
+// value bits [3:0]: reason code
+//   1 = manual_override (physical button jog on Nano)
+//   2 = delta_jog (stale COMMAND: !ap_active && command_recent && |delta|>DEADBAND)
+//   3 = ap_active (autopilot COMMAND driving motor)
+//   4 = remote_manual RM_DRIVING (TCP remote manual mode, driving)
+//   5 = remote_manual RM_BRAKING (TCP remote manual mode, reverse-brake pulse)
+// value bit 4: ap_enabled_remote at time of activation
+// value bit 5: command_recent at time of activation
+// value bit 6: pi_alive at time of activation
+// value bit 7: manual_override (physical button state) at time of activation
+// value bits [15:8]: last_command_val >> 3  (≈0-250; 125 = neutral 1000; map back: ×8)
+const uint8_t MOTOR_REASON_CODE = 0xEE;
+
+// Reason codes for MOTOR_REASON_CODE
+const uint8_t MRSN_MANUAL_PHYS = 1;  // manual_override=true (physical button)
+const uint8_t MRSN_DELTA_JOG   = 2;  // stale command delta path
+const uint8_t MRSN_AP          = 3;  // ap_active autopilot drive
+const uint8_t MRSN_RM_DRIVE    = 4;  // remote manual RM_DRIVING
+const uint8_t MRSN_RM_BRAKE    = 5;  // remote manual RM_BRAKING
+
+// Pending reason value: set by update_motor_from_command() before each activation,
+// consumed by loop() when D9 transitions LOW->HIGH.
+uint16_t g_motor_reason = 0;
 
 // Bridge->Nano: feature enable bitmask (0xEF)
 // Sent by bridge on startup and on every settings change.
@@ -1163,6 +1191,16 @@ void update_motor_from_command() {
   bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
   bool ap_active = ap_enabled_remote && pi_alive;
   bool command_recent = (now - last_command_ms <= PI_OFFLINE_TIMEOUT_MS);
+
+// Helper: build g_motor_reason value for MOTOR_REASON_CODE diagnostic frame.
+// Encodes the activation branch + key state flags + approx last_command_val.
+#define SET_MOTOR_REASON(rsn) \
+  g_motor_reason = (uint16_t)((rsn) \
+    | (ap_enabled_remote ? 0x10 : 0) \
+    | (command_recent    ? 0x20 : 0) \
+    | (pi_alive          ? 0x40 : 0) \
+    | (manual_override   ? 0x80 : 0)) \
+    | ((uint16_t)((last_command_val >> 3) & 0xFF) << 8)
   bool pilot_limits_ok = pi_alive &&
                          pilot_rudder_valid &&
                          pilot_port_lim_valid &&
@@ -1412,6 +1450,7 @@ void update_motor_from_command() {
           rm_state          = RM_BRAKING;
 
           // Set H-bridge to brake direction at full duty
+          SET_MOTOR_REASON(MRSN_RM_BRAKE);  // B26: record activation reason
           if (rm_brake_dir > 0) {
             digitalWrite(HBRIDGE_RPWM_PIN, LOW);
             digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
@@ -1424,6 +1463,7 @@ void update_motor_from_command() {
         }
 
         // Not yet at brake point — drive toward target at full duty
+        SET_MOTOR_REASON(MRSN_RM_DRIVE);  // B26: record activation reason
         if (dir > 0) {
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
@@ -1463,10 +1503,13 @@ void update_motor_from_command() {
 
     if (manual_jog_dir > 0) {
       // STBD: increase ADC
+      // Record activation reason: distinguish physical-button from delta-jog
+      SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
     } else if (manual_jog_dir < 0) {
       // PORT: decrease ADC
+      SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
     } else {
@@ -1536,6 +1579,7 @@ void update_motor_from_command() {
   }
 
   // Direction: delta > 0 => STBD (increase ADC), delta < 0 => PORT (decrease ADC)
+  SET_MOTOR_REASON(MRSN_AP);  // B26: record activation reason (autopilot path)
   if (delta > 0) {
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
@@ -2154,12 +2198,20 @@ if (!ap_engaged && !remote_manual_active) {
   // transitions and direction without needing external instrumentation.
   // digitalRead() on D9 works correctly here because we only ever write
   // analogWrite(D9, 0) or analogWrite(D9, 255) (MIN_DUTY == MAX_DUTY == 255).
+  // B26: also send MOTOR_REASON_CODE once when D9 transitions LOW->HIGH.
   {
     static uint8_t last_pin_state = 0xFF;  // 0xFF = invalid sentinel, forces first send
     uint8_t ps = (uint8_t)((digitalRead(HBRIDGE_PWM_PIN)  ? 0x04 : 0)
                           | (digitalRead(HBRIDGE_LPWM_PIN) ? 0x02 : 0)
                           | (digitalRead(HBRIDGE_RPWM_PIN) ? 0x01 : 0));
     if (ps != last_pin_state) {
+      // On D9 LOW->HIGH transition: send reason code before pin-state frame
+      // so the bridge receives the cause before the effect.
+      bool d9_was_off = (last_pin_state != 0xFF) && !(last_pin_state & 0x04);
+      bool d9_now_on  = (ps & 0x04);
+      if (d9_was_off && d9_now_on) {
+        send_frame(MOTOR_REASON_CODE, g_motor_reason);
+      }
       send_frame(PIN_STATE_CODE, ps);
       last_pin_state = ps;
     }

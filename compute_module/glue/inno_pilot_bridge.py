@@ -72,8 +72,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B25"
-INNOPILOT_BUILD_NUM = 25  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B26"
+INNOPILOT_BUILD_NUM = 26  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -109,6 +109,12 @@ WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
 # Nano -> Bridge telemetry / events
 PIN_STATE_CODE    = 0xE1  # H-bridge pin state change: bits [2]=D9/EN, [1]=D3/LPWM, [0]=D2/RPWM
 BUTTON_EVENT_CODE = 0xE0
+
+# B26: motor activation reason diagnostic — sent once when D9 goes LOW→HIGH
+MOTOR_REASON_CODE = 0xEE
+# reason field (bits [3:0] of value):
+_MRSN = {1: "manual_phys(btn)", 2: "delta_jog(stale_cmd)", 3: "ap_active",
+         4: "rm_driving", 5: "rm_braking"}
 BTN_EVT_MINUS10   = 1
 BTN_EVT_MINUS1    = 2
 BTN_EVT_TOGGLE    = 3
@@ -1258,6 +1264,23 @@ def main() -> None:
                     log.debug(
                         "Nano motor pins: D2(RPWM)=%d D3(LPWM)=%d D9(EN)=%d  [%s]",
                         d2, d3, d9, direction,
+                    )
+
+                elif code == MOTOR_REASON_CODE:
+                    # B26: one-shot diagnostic sent when D9 goes LOW→HIGH.
+                    # Decodes which branch activated the motor + key state at that moment.
+                    reason_id   = value & 0x0F
+                    ap_en       = bool(value & 0x10)
+                    cmd_recent  = bool(value & 0x20)
+                    pi_alive_f  = bool(value & 0x40)
+                    man_ov      = bool(value & 0x80)
+                    cmd_approx  = ((value >> 8) & 0xFF) * 8  # approx last_command_val
+                    reason_str  = _MRSN.get(reason_id, f"unknown({reason_id})")
+                    log.debug(
+                        "MOTOR START reason=%s  ap_en=%d cmd_recent=%d pi_alive=%d "
+                        "manual_ov=%d  last_cmd≈%d (delta≈%+d)",
+                        reason_str, ap_en, cmd_recent, pi_alive_f, man_ov,
+                        cmd_approx, cmd_approx - 1000,
                     )
 
                 elif code == FLAGS_CODE:
