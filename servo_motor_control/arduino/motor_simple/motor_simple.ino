@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B24";
-const uint16_t INNOPILOT_BUILD_NUM = 24;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B25";
+const uint16_t INNOPILOT_BUILD_NUM = 25;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -55,6 +55,11 @@ const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote n
 const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
 // Nano->Bridge: buzzer state reporting
 const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
+
+// Nano->Bridge: H-bridge pin state change (diagnostic, on-change only)
+// value bits: [2]=D9/EN(PWM)  [1]=D3/LPWM  [0]=D2/RPWM
+// Sent every time any of these three pins changes after update_motor_from_command().
+const uint8_t PIN_STATE_CODE = 0xE1;
 
 // Bridge->Nano: feature enable bitmask (0xEF)
 // Sent by bridge on startup and on every settings change.
@@ -2143,6 +2148,22 @@ if (!ap_engaged && !remote_manual_active) {
 
   // --- Motor + clutch control with limit logic ---
   update_motor_from_command();
+
+  // ---- H-bridge pin-state telemetry (on-change, debug diagnostics) ----
+  // Sent whenever D2/D3/D9 change — lets the bridge log exact motor on/off
+  // transitions and direction without needing external instrumentation.
+  // digitalRead() on D9 works correctly here because we only ever write
+  // analogWrite(D9, 0) or analogWrite(D9, 255) (MIN_DUTY == MAX_DUTY == 255).
+  {
+    static uint8_t last_pin_state = 0xFF;  // 0xFF = invalid sentinel, forces first send
+    uint8_t ps = (uint8_t)((digitalRead(HBRIDGE_PWM_PIN)  ? 0x04 : 0)
+                          | (digitalRead(HBRIDGE_LPWM_PIN) ? 0x02 : 0)
+                          | (digitalRead(HBRIDGE_RPWM_PIN) ? 0x01 : 0));
+    if (ps != last_pin_state) {
+      send_frame(PIN_STATE_CODE, ps);
+      last_pin_state = ps;
+    }
+  }
 
   // Collect one settled A2 sample into the running average.  Placed here so
   // update_motor_from_command() uses the previous iteration's published value

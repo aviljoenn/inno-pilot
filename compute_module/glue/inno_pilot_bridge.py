@@ -72,8 +72,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B24"
-INNOPILOT_BUILD_NUM = 24  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B25"
+INNOPILOT_BUILD_NUM = 25  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -107,6 +107,7 @@ WARN_AP_PRESSED  = 1   # AP toggle rejected during MANUAL: 1-beep + 5s OLED flas
 WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
 
 # Nano -> Bridge telemetry / events
+PIN_STATE_CODE    = 0xE1  # H-bridge pin state change: bits [2]=D9/EN, [1]=D3/LPWM, [0]=D2/RPWM
 BUTTON_EVENT_CODE = 0xE0
 BTN_EVT_MINUS10   = 1
 BTN_EVT_MINUS1    = 2
@@ -1244,6 +1245,20 @@ def main() -> None:
 
                     except Exception as e:
                         log.error("Button event error: %s", e)
+
+                elif code == PIN_STATE_CODE:
+                    # H-bridge pin state change from Nano (D2/D3/D9)
+                    d2 = bool(value & 0x01)   # D2  RPWM  (stbd direction)
+                    d3 = bool(value & 0x02)   # D3  LPWM  (port direction)
+                    d9 = bool(value & 0x04)   # D9  EN/PWM (motor enabled)
+                    if d9:
+                        direction = "STBD" if d2 else ("PORT" if d3 else "EN-only?")
+                    else:
+                        direction = "STOP"
+                    log.debug(
+                        "Nano motor pins: D2(RPWM)=%d D3(LPWM)=%d D9(EN)=%d  [%s]",
+                        d2, d3, d9, direction,
+                    )
 
                 elif code == FLAGS_CODE:
                     # Parse comms fault bits (bridge-side detection plane)
