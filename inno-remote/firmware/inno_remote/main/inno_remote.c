@@ -45,7 +45,7 @@ static volatile bool g_version_mismatch = false;  // set by HELLO handler
 static char          g_ota_url[72]      = "";      // set by OTA handler; empty = no update pending
 
 // ---- Inno-Pilot version (must match bridge + Nano firmware) ----
-#define INNOPILOT_VERSION "v1.2.0_B21"
+#define INNOPILOT_VERSION "v1.2.0_B22"
 
 // ========================
 // OLED PINS (as built)

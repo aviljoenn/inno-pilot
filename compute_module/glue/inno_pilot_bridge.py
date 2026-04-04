@@ -72,8 +72,8 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B21"
-INNOPILOT_BUILD_NUM = 21  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B22"
+INNOPILOT_BUILD_NUM = 22  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -119,6 +119,14 @@ BTN_EVT_STOP      = 6
 BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
 COMMS_DIAG_CODE       = 0xEC  # Nano->Bridge: comms diagnostics (lo=err_window_sum, hi=crit_consec_s)
 COMMS_ERR_DETAIL_CODE = 0xED  # Nano->Bridge: error detail (lo=corrupt code, hi=rx_crc)
+
+# Bridge -> Nano: feature enable bitmask (0xEF)
+FEATURES_CODE             = 0xEF  # Bridge->Nano: uint8 feature bitmask (sent on startup + settings change)
+FEATURE_LIMIT_SWITCHES    = 0x01  # use D7/D8 NC limit switches
+FEATURE_TEMP_SENSOR       = 0x02  # DS18B20 temperature fault detection
+FEATURE_PI_VOLTAGE        = 0x04  # A3 Pi supply voltage fault detection
+FEATURE_BATTERY_VOLTAGE   = 0x08  # A0 main Vin over/under-voltage fault detection
+FEATURE_CURRENT_SENSOR    = 0x10  # A1 motor current telemetry
 
 # Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
 FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
@@ -594,17 +602,41 @@ def _persist_pilot_settings(settings: dict) -> None:
         log.error("Pilot settings save failed: %s", exc)
 
 
-def _apply_pilot_settings(settings: dict) -> None:
+def send_features_to_nano(nano: serial.Serial, settings: dict) -> None:
+    """Build feature bitmask from pilot settings and send FEATURES_CODE to Nano.
+
+    Called at startup (after the 1-second Nano settle delay) and on every
+    SETTINGS SET command so the Nano immediately reflects the new feature config.
+    """
+    feats = settings.get("features", {})
+    mask: int = 0
+    if feats.get("limit_switches",         False): mask |= FEATURE_LIMIT_SWITCHES
+    if feats.get("temp_sensor",            False): mask |= FEATURE_TEMP_SENSOR
+    if feats.get("pi_voltage_sensor",      False): mask |= FEATURE_PI_VOLTAGE
+    if feats.get("battery_voltage_sensor", False): mask |= FEATURE_BATTERY_VOLTAGE
+    if feats.get("current_sensor",         False): mask |= FEATURE_CURRENT_SENSOR
+    send_nano_frame(nano, FEATURES_CODE, mask)
+    log.info(
+        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s)",
+        mask,
+        bool(mask & FEATURE_LIMIT_SWITCHES),
+        bool(mask & FEATURE_TEMP_SENSOR),
+        bool(mask & FEATURE_PI_VOLTAGE),
+        bool(mask & FEATURE_BATTERY_VOLTAGE),
+        bool(mask & FEATURE_CURRENT_SENSOR),
+    )
+
+
+def _apply_pilot_settings(settings: dict, nano: "serial.Serial | None" = None) -> None:
     """Apply settings that the bridge uses at runtime.
 
-    Called once at startup and on every SETTINGS SET command.
-    Currently applies the deadband value (sent to any connected remote
-    via the next telemetry push; caller must issue DB via remote_send
-    on new remote connections).
+    Called once at startup (nano=None, features sent separately after settle delay)
+    and on every SETTINGS SET command (nano provided, features sent immediately).
     """
     db = settings.get("autopilot", {}).get("deadband_pct", 3.0)
     log.debug("Pilot settings applied: deadband=%.1f%%", db)
-    # Future: push comms thresholds, vessel type, feature enables, etc.
+    if nano is not None:
+        send_features_to_nano(nano, settings)
 
 
 # ===========================================================================
@@ -900,7 +932,7 @@ def process_remote_line(
                     else:
                         _pilot_settings[sec] = vals
                 _persist_pilot_settings(_pilot_settings)
-                _apply_pilot_settings(_pilot_settings)
+                _apply_pilot_settings(_pilot_settings, nano=nano)
                 remote_send(remote_sock, "SETTINGS OK")
                 log.info("SETTINGS SET: saved and applied")
             except Exception as exc:
@@ -951,6 +983,8 @@ def main() -> None:
     # Safety: ensure Nano is not stuck in ratify mode from a previous run.
     send_nano_frame(nano, MANUAL_MODE_CODE, 0)
     push_rct_settings_to_nano(nano, rct_settings)
+    # Push feature enables to Nano so it knows which sensors/alarms are active.
+    send_features_to_nano(nano, _pilot_settings)
 
     nano_buf  = bytearray()
     pilot_buf = bytearray()

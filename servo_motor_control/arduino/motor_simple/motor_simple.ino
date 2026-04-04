@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B21";
-const uint16_t INNOPILOT_BUILD_NUM = 21;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B22";
+const uint16_t INNOPILOT_BUILD_NUM = 22;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -55,6 +55,15 @@ const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote n
 const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
 // Nano->Bridge: buzzer state reporting
 const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
+
+// Bridge->Nano: feature enable bitmask (0xEF)
+// Sent by bridge on startup and on every settings change.
+const uint8_t FEATURES_CODE          = 0xEF; // Bridge->Nano: uint8 feature bitmask
+const uint8_t FEATURE_LIMIT_SWITCHES  = 0x01; // use D7/D8 NC limit switches
+const uint8_t FEATURE_TEMP_SENSOR     = 0x02; // DS18B20 overtemp fault detection
+const uint8_t FEATURE_PI_VOLTAGE      = 0x04; // A3 Pi supply voltage fault detection
+const uint8_t FEATURE_BATTERY_VOLTAGE = 0x08; // A0 main Vin over/under-voltage faults
+const uint8_t FEATURE_CURRENT_SENSOR  = 0x10; // A1 current sensor telemetry
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -218,10 +227,10 @@ const int RUDDER_CENTRE_TOL    = 5;
 // Rudder angle display range (approx ±40°)
 const float RUDDER_RANGE_DEG = 40.0f;
 
-// Enable/disable physical limit switches on D7/D8. (Optional)
-// true  -> use NC limit switches on PORT_LIMIT_PIN / STBD_LIMIT_PIN.
-// false -> ignore switch pins, use only pot-based soft limits.
-const bool LIMIT_SWITCHES_ACTIVE = false;
+// Feature enable flags — set by bridge via FEATURES_CODE on startup and on settings change.
+// Default 0x00: all features OFF until bridge configures them.
+// Safe-start behaviour: no limit-switch reads, no sensor fault alarms before bridge connects.
+uint8_t feature_flags = 0x00;
 
 // ---- Command codes (same as motor.ino) ----
 enum commands {
@@ -1117,17 +1126,17 @@ void service_rudder_adc() {
 }
 
 // ---- Limit logic helpers ----
-// V2: if LIMIT_SWITCHES_ACTIVE is false, ignore the switch pins completely.
+// Reads the NC limit switch pins only when the feature is enabled by the bridge.
 bool port_limit_switch_hit() {
-  if (!LIMIT_SWITCHES_ACTIVE) {
-    return false;
+  if (!(feature_flags & FEATURE_LIMIT_SWITCHES)) {
+    return false;  // feature disabled: use pot-based soft limits only
   }
   // NC -> GND, so HIGH = open/tripped/broken
   return digitalRead(PORT_LIMIT_PIN) == HIGH;
 }
 
 bool stbd_limit_switch_hit() {
-  if (!LIMIT_SWITCHES_ACTIVE) {
+  if (!(feature_flags & FEATURE_LIMIT_SWITCHES)) {
     return false;
   }
   return digitalRead(STBD_LIMIT_PIN) == HIGH;
@@ -1649,7 +1658,20 @@ void process_packet() {
       bridge_build_valid = true;
       break;
 
-    
+    case FEATURES_CODE: {
+      // Bridge configures which sensors/alarms are active.
+      uint8_t new_flags = (uint8_t)(value & 0xFF);
+      bool limit_was_off = !(feature_flags & FEATURE_LIMIT_SWITCHES);
+      bool limit_now_on  = (new_flags & FEATURE_LIMIT_SWITCHES);
+      feature_flags = new_flags;
+      // Configure limit switch pins the first time they are enabled.
+      if (limit_was_off && limit_now_on) {
+        pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
+        pinMode(STBD_LIMIT_PIN, INPUT_PULLUP);
+      }
+      break;
+    }
+
     default:
       // Unhandled commands ignored for now
       break;
@@ -1674,11 +1696,9 @@ void setup() {
   pinMode(CLUTCH_PIN, OUTPUT);
   digitalWrite(CLUTCH_PIN, LOW);    // clutch disengaged (active-HIGH)
 
-  // Limits
-  if (LIMIT_SWITCHES_ACTIVE) {
-    pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
-    pinMode(STBD_LIMIT_PIN, INPUT_PULLUP);
-  }
+  // Limit switch pins: configured when FEATURES_CODE arrives from bridge.
+  // At boot feature_flags=0x00 so these pins are not activated yet.
+  // See FEATURES_CODE handling in process_packet() for runtime enable.
 
   pinMode(PTM_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -1726,7 +1746,10 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  temp_service(now);
+  // DS18B20 temperature service (feature-gated)
+  if (feature_flags & FEATURE_TEMP_SENSOR) {
+    temp_service(now);
+  }
   if (!oled_ok && (now - oled_last_init_ms >= OLED_INIT_RETRY_MS)) {
     oled_last_init_ms = now;
     oled_try_init(false);
@@ -1740,14 +1763,32 @@ void loop() {
   static unsigned long last_pi_ms = 0;
   if (now - last_pi_ms >= 200) {
     last_pi_ms = now;
-    pi_voltage_v = read_pi_voltage_v();
-    pi_overvolt_fault = (pi_voltage_v > PI_VOLT_HIGH_FAULT);
-    pi_undervolt_fault = (pi_voltage_v < PI_VOLT_LOW_FAULT);
-    pi_fault = pi_overvolt_fault || pi_undervolt_fault;
-    vin_v = read_voltage_v();
-    vin_low_fault  = (vin_v < VIN_LOW_FAULT_V);
-    vin_high_fault = (vin_v > VIN_HIGH_FAULT_V);
-    // Reset silence once all faults clear so next occurrence re-triggers alarm
+
+    // Pi supply voltage fault detection (feature-gated)
+    if (feature_flags & FEATURE_PI_VOLTAGE) {
+      pi_voltage_v       = read_pi_voltage_v();
+      pi_overvolt_fault  = (pi_voltage_v > PI_VOLT_HIGH_FAULT);
+      pi_undervolt_fault = (pi_voltage_v < PI_VOLT_LOW_FAULT);
+      pi_fault           = pi_overvolt_fault || pi_undervolt_fault;
+    } else {
+      // Feature disabled: suppress all Pi voltage faults
+      pi_overvolt_fault  = false;
+      pi_undervolt_fault = false;
+      pi_fault           = false;
+    }
+
+    // Main supply (Vin) voltage fault detection (feature-gated)
+    if (feature_flags & FEATURE_BATTERY_VOLTAGE) {
+      vin_v          = read_voltage_v();
+      vin_low_fault  = (vin_v < VIN_LOW_FAULT_V);
+      vin_high_fault = (vin_v > VIN_HIGH_FAULT_V);
+    } else {
+      // Feature disabled: suppress Vin over/under-voltage faults
+      vin_low_fault  = false;
+      vin_high_fault = false;
+    }
+
+    // Reset fault silence latch once all active faults have cleared
     if (!pi_fault && !(flags & OVERTEMP_FAULT) && !vin_low_fault && !vin_high_fault) {
       pi_fault_alarm_silenced = false;
     }
@@ -1862,9 +1903,12 @@ if (!ap_engaged && !remote_manual_active) {
   }
 }
 
+  // Overtemp fault detection (feature-gated — only when temp sensor is enabled)
   bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
-  if (temp_valid && temp_c > MAX_CONTROLLER_TEMP_C) {
+  if ((feature_flags & FEATURE_TEMP_SENSOR) && temp_valid && temp_c > MAX_CONTROLLER_TEMP_C) {
     flags |= OVERTEMP_FAULT;
+  } else if (!(feature_flags & FEATURE_TEMP_SENSOR)) {
+    flags &= ~OVERTEMP_FAULT;  // feature disabled: suppress overtemp fault
   } else {
     flags &= ~OVERTEMP_FAULT;
   }
@@ -2027,7 +2071,8 @@ if (!ap_engaged && !remote_manual_active) {
     last_rudder_ms = now;
   }
 
-  if (now - last_current_ms >= CURRENT_PERIOD_MS) {
+  // Current sensor telemetry (feature-gated)
+  if ((feature_flags & FEATURE_CURRENT_SENSOR) && (now - last_current_ms >= CURRENT_PERIOD_MS)) {
     float current_a = read_current_a();
     int scaled = (int)(current_a * 100.0f + 0.5f);
     if (scaled < 0) {
@@ -2051,9 +2096,10 @@ if (!ap_engaged && !remote_manual_active) {
     last_voltage_ms = now;
   }
 
-  if (now - last_temp_ms >= TEMP_PERIOD_SEND_MS) {
-    bool temp_valid = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
-    if (temp_valid) {
+  // Temperature sensor telemetry (feature-gated)
+  if ((feature_flags & FEATURE_TEMP_SENSOR) && (now - last_temp_ms >= TEMP_PERIOD_SEND_MS)) {
+    bool temp_valid_send = (temp_c == temp_c) && (temp_c > -55.0f) && (temp_c < 125.0f);
+    if (temp_valid_send) {
       int scaled = (int)(temp_c * 100.0f + 0.5f);
       if (scaled < 0) {
         scaled = 0;
