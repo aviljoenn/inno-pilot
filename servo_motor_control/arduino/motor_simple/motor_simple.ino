@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B22";
-const uint16_t INNOPILOT_BUILD_NUM = 22;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B23";
+const uint16_t INNOPILOT_BUILD_NUM = 23;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -1583,6 +1583,14 @@ void process_packet() {
           ap_display_override_until_ms = 0;
         }
       }
+      // Reset stale command so the delta-based manual-jog check in
+      // update_motor_from_command() cannot trigger from the last AP command.
+      // Without this, a non-neutral last_command_val + command_recent=true
+      // causes the clutch to engage and the motor to run for up to 5 s after
+      // AP is disengaged, even though ap_display shows HAND (bug: motor steers
+      // when remote is set to OFF).
+      last_command_val = 1000;   // neutral — delta = 0 < DEADBAND
+      last_command_ms  = 0;      // command_recent = false immediately
       break;
 
     case RESET_CODE:
