@@ -21,8 +21,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B23";
-const uint16_t INNOPILOT_BUILD_NUM = 23;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B24";
+const uint16_t INNOPILOT_BUILD_NUM = 24;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -447,6 +447,12 @@ void handle_button(ButtonID b) {
     case BTN_B3: { // AP On or Off (optimistic local UI, remote truth follows)
       ap_display = !ap_display;
       ap_display_override_until_ms = millis() + 2000UL; // 2s grace for remote confirm
+      if (!ap_display) {
+        // Toggling AP off — cut motor immediately, don't wait for bridge DISENGAGE.
+        // When DISENGAGE arrives within the override window, ap_enabled_remote
+        // is already false so the display block is a no-op; override expires normally.
+        ap_enabled_remote = false;
+      }
       show_overlay(ap_display ? "AP: ON" : "AP: OFF");
       send_button_event(BTN_EVT_TOGGLE);
       break;
@@ -1836,6 +1842,7 @@ void loop() {
     } else {
       // Full emergency stop
       flags &= ~ENGAGED;
+      ap_enabled_remote      = false;  // stop motor immediately — don't wait for bridge DISENGAGE
       last_command_val       = 1000;
       remote_manual_active   = false;
       steer_loss_active      = false;
