@@ -284,12 +284,18 @@ enum commands {
 };
 
 // ---- Forward declarations ----
+// Explicit declarations are required for functions called before they are defined.
+// arduino-cli normally auto-generates these via ctags, but ctags may not be
+// available on all build hosts (e.g. aarch64 Pi 5 after a fresh install).
 uint16_t read_rudder_scaled();
 int read_rudder_adc();
 void service_rudder_adc();
 bool port_limit_switch_hit();
 bool stbd_limit_switch_hit();
 bool oled_try_init(bool allow_blocking_splash);
+void send_frame(uint8_t code, uint16_t value);
+void show_overlay(const char *text);
+void send_button_event(uint16_t ev);
 
 // ---- Result codes ----
 enum results {
