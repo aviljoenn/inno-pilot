@@ -24,6 +24,8 @@ Mode state machine (BridgeState.mode):
     MODE AUTO   (TCP)        -> MANUAL -> IDLE
     TCP disconnect in MANUAL -> MANUAL -> IDLE + WARN_STEER_LOSS to Nano
 """
+import copy
+import json
 import logging
 import logging.handlers
 import os
@@ -136,6 +138,54 @@ RCT_HZ_CODE             = 0xF8  # Nano -> Pi: ratify loop Hz (sent once per seco
 
 # RCT settings — stored on Pi as JSON, pushed to Nano on bridge startup
 RCT_SETTINGS_PATH = "/etc/inno-pilot/rct_settings.json"
+
+# ---------------------------------------------------------------------------
+# Pilot settings — user-configurable parameters, owned by bridge
+# ---------------------------------------------------------------------------
+PILOT_SETTINGS_PATH = "/var/lib/inno-pilot/settings.json"
+
+_DEFAULT_PILOT_SETTINGS: dict = {
+    "network": {
+        "ip_mode": "dhcp",
+        "ip":      "",
+        "mask":    "255.255.255.0",
+        "gateway": "",
+        "dns1":    "8.8.8.8",
+        "dns2":    "8.8.4.4",
+    },
+    "wifi": {
+        "ssid": "",
+        "key":  "",
+    },
+    "vessel": {
+        "name":             "",
+        "type":             "sail",
+        "rudder_range_deg": 35,
+    },
+    "features": {
+        "limit_switches":         False,
+        "temp_sensor":            False,
+        "pi_voltage_sensor":      False,
+        "battery_voltage_sensor": False,
+        "current_sensor":         False,
+    },
+    "autopilot": {
+        "deadband_pct":           3.0,
+        "pgain":                  1.0,
+        "off_course_alarm_deg":   20,
+        "rudder_limit_port_pct":  0,
+        "rudder_limit_stbd_pct":  100,
+    },
+    "safety": {
+        "auto_disengage_on_fault":  True,
+        "comms_warn_threshold_pct": 10,
+        "comms_crit_threshold_pct": 25,
+    },
+}
+
+# In-memory pilot settings — loaded at startup, updated on SETTINGS SET.
+# Only accessed from the main thread; no locking required.
+_pilot_settings: dict = {}
 
 # Ordered list of setting keys (index must match Nano's RCT_SETTING_NAMES order)
 _RCT_KEYS = [
@@ -474,7 +524,6 @@ def enc_deg10_i16(deg: float) -> int:
 
 def load_or_create_rct_settings() -> dict:
     """Load RCT settings from JSON, creating the file with defaults if absent."""
-    import json
     if os.path.isfile(RCT_SETTINGS_PATH):
         try:
             with open(RCT_SETTINGS_PATH) as fh:
@@ -495,7 +544,6 @@ def load_or_create_rct_settings() -> dict:
 
 def _save_rct_settings(settings: dict) -> None:
     """Write RCT settings dict to JSON (creates parent dir if needed)."""
-    import json
     os.makedirs(os.path.dirname(RCT_SETTINGS_PATH), exist_ok=True)
     with open(RCT_SETTINGS_PATH, "w") as fh:
         json.dump(settings, fh, indent=2)
@@ -512,6 +560,51 @@ def push_rct_settings_to_nano(nano: "serial.Serial", settings: dict) -> None:
         val = max(0, min(255, int(settings.get(key, _RCT_DEFAULTS[key]))))
         send_nano_frame(nano, RCT_SETTING_CODE, (idx << 8) | val)
     log.info("RCT settings pushed to Nano (%d frames)", len(_RCT_KEYS))
+
+
+# ===========================================================================
+# Pilot settings helpers
+# ===========================================================================
+
+def load_pilot_settings() -> dict:
+    """Return pilot settings from file, merged over built-in defaults."""
+    s = copy.deepcopy(_DEFAULT_PILOT_SETTINGS)
+    if os.path.isfile(PILOT_SETTINGS_PATH):
+        try:
+            with open(PILOT_SETTINGS_PATH) as fh:
+                saved = json.load(fh)
+            for sec, vals in saved.items():
+                if isinstance(s.get(sec), dict) and isinstance(vals, dict):
+                    s[sec].update(vals)
+                else:
+                    s[sec] = vals
+        except Exception as exc:
+            log.warning("Pilot settings load failed (%s) — using defaults", exc)
+    return s
+
+
+def _persist_pilot_settings(settings: dict) -> None:
+    """Write pilot settings to file, creating parent dirs if needed."""
+    try:
+        os.makedirs(os.path.dirname(PILOT_SETTINGS_PATH), exist_ok=True)
+        with open(PILOT_SETTINGS_PATH, "w") as fh:
+            json.dump(settings, fh, indent=2)
+        log.info("Pilot settings saved \u2192 %s", PILOT_SETTINGS_PATH)
+    except Exception as exc:
+        log.error("Pilot settings save failed: %s", exc)
+
+
+def _apply_pilot_settings(settings: dict) -> None:
+    """Apply settings that the bridge uses at runtime.
+
+    Called once at startup and on every SETTINGS SET command.
+    Currently applies the deadband value (sent to any connected remote
+    via the next telemetry push; caller must issue DB via remote_send
+    on new remote connections).
+    """
+    db = settings.get("autopilot", {}).get("deadband_pct", 3.0)
+    log.debug("Pilot settings applied: deadband=%.1f%%", db)
+    # Future: push comms thresholds, vessel type, feature enables, etc.
 
 
 # ===========================================================================
@@ -658,6 +751,9 @@ def process_remote_line(
         else:
             log.info("Remote version: %s (match)", remote_ver)
         remote_send(remote_sock, f"HELLO {INNOPILOT_VERSION}")
+        # Send current deadband so remote/web-remote shows the live value
+        db_pct = _pilot_settings.get("autopilot", {}).get("deadband_pct", 3.0)
+        remote_send(remote_sock, f"DB {db_pct:.1f}")
         # Offer OTA if remote is behind and firmware binary is available
         if remote_ver != INNOPILOT_VERSION and os.path.isfile(OTA_FIRMWARE_PATH):
             ota_url = f"http://{OTA_SERVER_HOST}:{OTA_HTTP_PORT}/{OTA_FIRMWARE_FILE}"
@@ -779,6 +875,40 @@ def process_remote_line(
         send_nano_frame(nano, RCT_TARGET_CODE, target_0_1000)
         log.info("Remote TGT %.1f%% -> RCT_TARGET_CODE %d", pct, target_0_1000)
 
+    elif cmd == "SETTINGS":
+        sub = parts[1].upper() if len(parts) > 1 else ""
+
+        if sub == "GET":
+            # Reply with the full in-memory settings as compact single-line JSON
+            body = json.dumps(_pilot_settings, separators=(",", ":"), ensure_ascii=True)
+            remote_send(remote_sock, f"SETTINGS {body}")
+            log.debug("SETTINGS GET handled (%d bytes)", len(body))
+
+        elif sub == "SET":
+            # Everything after "SETTINGS SET " is the JSON payload.
+            # Split at most twice so spaces inside JSON strings are preserved.
+            raw_parts = line.strip().split(None, 2)
+            json_str = raw_parts[2] if len(raw_parts) >= 3 else ""
+            try:
+                new_settings = json.loads(json_str)
+                if not isinstance(new_settings, dict):
+                    raise ValueError("expected JSON object")
+                # Merge into in-memory settings section by section
+                for sec, vals in new_settings.items():
+                    if isinstance(_pilot_settings.get(sec), dict) and isinstance(vals, dict):
+                        _pilot_settings[sec].update(vals)
+                    else:
+                        _pilot_settings[sec] = vals
+                _persist_pilot_settings(_pilot_settings)
+                _apply_pilot_settings(_pilot_settings)
+                remote_send(remote_sock, "SETTINGS OK")
+                log.info("SETTINGS SET: saved and applied")
+            except Exception as exc:
+                log.warning("SETTINGS SET failed: %s", exc)
+                remote_send(remote_sock, "SETTINGS ERR")
+        else:
+            log.warning("Remote SETTINGS: unknown sub-command '%s'", sub)
+
     else:
         log.warning("Remote: unknown command '%s', ignored", cmd)
 
@@ -807,6 +937,11 @@ def main() -> None:
     nano_port = find_nano_port()
     nano  = open_serial_no_reset(nano_port, BAUD, timeout=0.01)
     pilot = open_serial_no_reset(PILOT_PORT, BAUD, timeout=0.01)
+
+    # Load pilot settings (user-configurable parameters).
+    _pilot_settings.update(load_pilot_settings())
+    _apply_pilot_settings(_pilot_settings)
+    log.info("Pilot settings loaded from %s", PILOT_SETTINGS_PATH)
 
     # Load RCT settings and push to Nano.  Production motor_simple.ino ignores
     # these frames; the remote_control_test sketch uses them.  We delay 1 s so

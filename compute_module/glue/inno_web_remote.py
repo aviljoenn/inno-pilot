@@ -142,6 +142,12 @@ _sse_lock  = threading.Lock()
 # Commands flowing from browser → bridge
 _cmd_q: "queue.Queue[str]" = queue.Queue(maxsize=200)
 
+# Responses to SETTINGS GET / SETTINGS SET received from the bridge.
+# HTTP handler drains this queue before issuing a request, then waits up to
+# SETTINGS_TIMEOUT_S for the bridge to reply.  Maxsize=4 catches stale replies.
+_settings_resp_q: "queue.Queue[Optional[dict]]" = queue.Queue(maxsize=4)
+SETTINGS_TIMEOUT_S = 4.0
+
 # When cleared, the bridge thread drops the TCP connection and stops reconnecting.
 # Set by default (connected); cleared when the mode toggle is moved to OFF.
 _bridge_active = threading.Event()
@@ -221,6 +227,28 @@ def _parse_bridge_line(line: str) -> None:
 
     elif c == "WARN":
         _update(warn=(parts[1] if len(parts) > 1 else None))
+
+    elif c == "SETTINGS":
+        # Response to SETTINGS GET: "SETTINGS <json>"
+        # Response to SETTINGS SET: "SETTINGS OK" or "SETTINGS ERR"
+        if len(parts) < 2:
+            return
+        sub = parts[1].upper()
+        if sub in ("OK", "ERR"):
+            # Ack for a SET command — signal waiting HTTP handler
+            try:
+                _settings_resp_q.put_nowait({"_ack": sub})
+            except queue.Full:
+                pass
+        else:
+            # Must be JSON payload (SETTINGS GET response).
+            # The entire remainder of the line (after "SETTINGS ") is JSON.
+            json_str = line[len("SETTINGS "):].strip()
+            try:
+                data = json.loads(json_str)
+                _settings_resp_q.put_nowait(data)
+            except (json.JSONDecodeError, queue.Full) as exc:
+                log.warning("SETTINGS response parse error: %s", exc)
 
     else:
         log.debug("Bridge unknown: %s", line)
@@ -1816,7 +1844,41 @@ class _Handler(BaseHTTPRequestHandler):
     # ---- GET /settings ----
 
     def _serve_settings(self) -> None:
-        body = json.dumps(_load_settings()).encode()
+        """Fetch current settings from the bridge via TCP.
+
+        Sends SETTINGS GET through the command queue and waits for the bridge
+        to reply with SETTINGS <json>.  Falls back to the local settings file
+        when the bridge is not connected or the response times out.
+        """
+        # Drain any stale responses from a previous request
+        while True:
+            try:
+                _settings_resp_q.get_nowait()
+            except queue.Empty:
+                break
+
+        data: Optional[dict] = None
+        if _snap()["connected"]:
+            try:
+                _cmd_q.put_nowait("SETTINGS GET")
+            except queue.Full:
+                log.warning("Settings GET: cmd_q full, falling back to file")
+            else:
+                try:
+                    resp = _settings_resp_q.get(timeout=SETTINGS_TIMEOUT_S)
+                    # If it's a dict without an _ack key it's the GET response
+                    if isinstance(resp, dict) and "_ack" not in resp:
+                        data = resp
+                        log.debug("Settings fetched from bridge (%d keys)", len(resp))
+                    else:
+                        log.warning("Settings GET: unexpected response %s", resp)
+                except queue.Empty:
+                    log.warning("Settings GET: bridge timed out, using local file")
+
+        if data is None:
+            data = _load_settings()
+
+        body = json.dumps(data).encode()
         self.send_response(200)
         self.send_header("Content-Type",   "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -1827,21 +1889,56 @@ class _Handler(BaseHTTPRequestHandler):
     # ---- POST /settings ----
 
     def _handle_settings_post(self) -> None:
+        """Send new settings to the bridge via TCP; bridge saves and applies them.
+
+        Falls back to writing the local settings file when not connected.
+        """
         length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length) if length else b""
+        raw    = self.rfile.read(length) if length else b""
         try:
-            settings = json.loads(body)
+            settings = json.loads(raw)
             if not isinstance(settings, dict):
                 raise ValueError("expected JSON object")
-            _persist_settings(settings)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
         except Exception as exc:
-            log.warning("Settings POST rejected: %s", exc)
+            log.warning("Settings POST: bad request — %s", exc)
             self.send_response(400)
             self.end_headers()
+            return
+
+        saved_via_bridge = False
+        if _snap()["connected"]:
+            # Drain stale responses
+            while True:
+                try:
+                    _settings_resp_q.get_nowait()
+                except queue.Empty:
+                    break
+
+            # Compact JSON — must be a single line (no embedded newlines)
+            json_line = json.dumps(settings, separators=(",", ":"), ensure_ascii=True)
+            try:
+                _cmd_q.put_nowait(f"SETTINGS SET {json_line}")
+            except queue.Full:
+                log.warning("Settings POST: cmd_q full, falling back to file")
+            else:
+                try:
+                    resp = _settings_resp_q.get(timeout=SETTINGS_TIMEOUT_S)
+                    if isinstance(resp, dict) and resp.get("_ack") == "OK":
+                        saved_via_bridge = True
+                        log.debug("Settings saved via bridge")
+                    else:
+                        log.warning("Settings POST: bridge replied %s", resp)
+                except queue.Empty:
+                    log.warning("Settings POST: bridge timed out, falling back to file")
+
+        if not saved_via_bridge:
+            # Bridge unavailable — write local file so settings survive reconnect
+            _persist_settings(settings)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
 
 
 # ---------------------------------------------------------------------------
