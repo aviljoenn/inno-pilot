@@ -34,23 +34,23 @@ NANO_BOOT_WAIT_S=6    # seconds to wait for Nano to finish its setup() splash af
 BRIDGE_SETTLE_S=3     # seconds to let the bridge stabilise before starting pypilot
 # ----------------------------------------------------------
 
-# --------------- arduino-cli invocation ---------------
-# Pi .12 (Pi5): arduino:avr core lives under /root/.arduino15; must use sudo.
-# Pi .13 (Pi Zero): core lives under innopilot's own ~/.arduino15; no sudo needed.
-# Auto-detect: if the current user's arduino-cli can see the arduino:avr core,
-# use it directly; otherwise fall back to sudo.
-if "$ARDUINO_CLI" core list 2>/dev/null | grep -q "arduino:avr"; then
-    ARDUINO=("$ARDUINO_CLI")
-    log "arduino-cli invocation: $ARDUINO_CLI (user core)"
-else
-    ARDUINO=(sudo "$ARDUINO_CLI")
-    log "arduino-cli invocation: sudo $ARDUINO_CLI (root core — Pi .12 path)"
-fi
-# ------------------------------------------------------
-
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 die()  { echo "[ERROR] $*" >&2; exit 1; }
 info() { echo; echo ">>> $*"; echo; }
+
+# --------------- arduino-cli invocation ---------------
+# Pi .12 (Pi5): arduino:avr core lives under /root/.arduino15; must use sudo.
+# Pi .13 (Pi Zero): core lives under innopilot's own ~/.arduino15; no sudo needed.
+# Detect by checking the core hardware directory on disk — avoids triggering a
+# network index download (which would hang silently and OOM the Pi).
+if [ -d "$HOME/.arduino15/packages/arduino/hardware/avr" ]; then
+    ARDUINO=("$ARDUINO_CLI")
+    log "arduino-cli: using user core (~/.arduino15)"
+else
+    ARDUINO=(sudo "$ARDUINO_CLI")
+    log "arduino-cli: user core absent, falling back to sudo (root core)"
+fi
+# ------------------------------------------------------
 
 # Guard: refuse to run on the dev workstation
 case "$(uname -m)" in
