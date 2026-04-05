@@ -8,6 +8,8 @@
 // - Obeys limit switches + rudder pot min/max
 // - B26: MOTOR_REASON_CODE diagnostic — sent once when D9 goes LOW→HIGH, encodes which
 //        code branch activated the motor plus key state variables for root-cause tracing.
+// - B27: FEATURE_ON_BOARD_BUTTONS (0x20) — gate button ADC read behind this flag to
+//        prevent floating A6 crosstalk from falsely activating motor in HAND mode.
 
 #include <Arduino.h>
 #include <stdint.h>
@@ -23,7 +25,7 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B26";
+const char INNOPILOT_VERSION[] = "v1.2.0_B27";
 const uint16_t INNOPILOT_BUILD_NUM = 26;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
@@ -97,6 +99,7 @@ const uint8_t FEATURE_TEMP_SENSOR     = 0x02; // DS18B20 overtemp fault detectio
 const uint8_t FEATURE_PI_VOLTAGE      = 0x04; // A3 Pi supply voltage fault detection
 const uint8_t FEATURE_BATTERY_VOLTAGE = 0x08; // A0 main Vin over/under-voltage faults
 const uint8_t FEATURE_CURRENT_SENSOR  = 0x10; // A1 current sensor telemetry
+const uint8_t FEATURE_ON_BOARD_BUTTONS = 0x20; // physical button ladder on A6 is wired
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -1922,8 +1925,17 @@ static ButtonID last_raw_button    = BTN_NONE;
 static unsigned long btn_last_change_ms = 0;
 const unsigned long BUTTON_DEBOUNCE_MS = 60UL;
 
-int btn_adc = analogRead(BUTTON_ADC_PIN);
-ButtonID raw_b = decode_button_from_adc(btn_adc);
+// Only read the button ladder when the feature is enabled.
+// When FEATURE_ON_BOARD_BUTTONS is OFF (no buttons wired), A6 floats and
+// ADC crosstalk from the preceding A2 rudder read causes false BTN_B1/B2
+// detections that falsely activate the motor in HAND mode (bug fixed B27).
+ButtonID raw_b;
+if (feature_flags & FEATURE_ON_BOARD_BUTTONS) {
+  int btn_adc = analogRead(BUTTON_ADC_PIN);
+  raw_b = decode_button_from_adc(btn_adc);
+} else {
+  raw_b = BTN_NONE;  // no buttons wired — skip floating A6 read
+}
 
 if (raw_b != last_raw_button) {
   last_raw_button = raw_b;

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(plink:*)",
+      "Bash(git tag:*)",
+      "Bash(ssh:*)",
+      "Bash(find /c/gitsrc/inno-pilot/inno-remote -type f -name *.cpp -o -name *.ino)",
+      "Bash(source ~/esp-idf-env.sh)",
+      "Bash(idf.py build:*)",
+      "Bash(pscp -pw innopilot123 \"C:/gitsrc/inno-pilot/inno-remote/firmware/inno_remote/build/inno_remote.bin\" innopilot@192.168.6.13:/tmp/inno_remote_b6.bin)",
+      "Bash(pscp -pw innopilot123 \"C:\\\\gitsrc\\\\inno-pilot\\\\servo_motor_control\\\\arduino\\\\ads_oled_test\\\\ads_oled_test.ino\" \"innopilot@192.168.6.13:/home/innopilot/ads_oled_test/ads_oled_test.ino\")"
+    ]
+  }
+}

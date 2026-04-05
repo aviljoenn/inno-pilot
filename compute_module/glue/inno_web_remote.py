@@ -40,7 +40,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B26"
+INNOPILOT_VERSION = "v1.2.0_B27"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -71,6 +71,7 @@ _DEFAULT_SETTINGS: dict = {
         "pi_voltage_sensor":      False,
         "battery_voltage_sensor": False,
         "current_sensor":         False,
+        "on_board_buttons":       False,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -1079,6 +1080,13 @@ body{
         <div class="sf-bool">
           <button class="sf-bb" data-boolid="current_sensor" data-bval="true">ON</button>
           <button class="sf-bb" data-boolid="current_sensor" data-bval="false">OFF</button>
+        </div>
+      </div>
+      <div class="sf-row" data-sfid="on_board_buttons">
+        <span class="sf-lbl">On-Board Buttons</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="on_board_buttons" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="on_board_buttons" data-bval="false">OFF</button>
         </div>
       </div>
 

@@ -6,6 +6,24 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B27] — 2026-04-05 — Fix: motor activates in HAND mode on units without buttons
+
+### Fixed
+- **Nano**: Motor falsely activated in HAND mode when helm moved by hand on units with no
+  physical buttons wired (e.g. .12 / Pi5 boat). Root cause: floating A6 pin combined with
+  ADC S/H crosstalk from the preceding A2 rudder read caused `decode_button_from_adc()` to
+  return BTN_B1, setting `manual_override=true` and driving the motor STBD (confirmed via
+  MOTOR_REASON_CODE = `manual_phys(btn)` with `manual_ov=1`).
+
+### Added
+- **Nano**: `FEATURE_ON_BOARD_BUTTONS` (0x20) — when this feature flag is OFF, the Nano
+  skips `analogRead(A6)` entirely and forces `raw_b = BTN_NONE`, eliminating the floating
+  pin false-positive. Default OFF so units without buttons are safe out of the box.
+- **Bridge**: `FEATURE_ON_BOARD_BUTTONS` constant and `on_board_buttons` settings key;
+  included in `send_features_to_nano()` and logged at startup.
+- **Web Remote**: "On-Board Buttons" ON/OFF toggle in SETTINGS → CONNECTIONS & FEATURES.
+  Set ON for the .13 unit (has buttons), leave OFF for the .12 unit (no buttons).
+
 ## [v1.2.0_B20] — 2026-04-02 — Version sync across all components
 
 ### Changed

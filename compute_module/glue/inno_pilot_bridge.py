@@ -72,7 +72,7 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B26"
+INNOPILOT_VERSION   = "v1.2.0_B27"
 INNOPILOT_BUILD_NUM = 26  # increment with each push during development
 
 # ---------------------------------------------------------------------------
@@ -134,6 +134,7 @@ FEATURE_TEMP_SENSOR       = 0x02  # DS18B20 temperature fault detection
 FEATURE_PI_VOLTAGE        = 0x04  # A3 Pi supply voltage fault detection
 FEATURE_BATTERY_VOLTAGE   = 0x08  # A0 main Vin over/under-voltage fault detection
 FEATURE_CURRENT_SENSOR    = 0x10  # A1 motor current telemetry
+FEATURE_ON_BOARD_BUTTONS  = 0x20  # physical button ladder on A6 is wired
 
 # Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
 FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
@@ -183,6 +184,7 @@ _DEFAULT_PILOT_SETTINGS: dict = {
         "pi_voltage_sensor":      False,
         "battery_voltage_sensor": False,
         "current_sensor":         False,
+        "on_board_buttons":       False,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -622,15 +624,17 @@ def send_features_to_nano(nano: serial.Serial, settings: dict) -> None:
     if feats.get("pi_voltage_sensor",      False): mask |= FEATURE_PI_VOLTAGE
     if feats.get("battery_voltage_sensor", False): mask |= FEATURE_BATTERY_VOLTAGE
     if feats.get("current_sensor",         False): mask |= FEATURE_CURRENT_SENSOR
+    if feats.get("on_board_buttons",       False): mask |= FEATURE_ON_BOARD_BUTTONS
     send_nano_frame(nano, FEATURES_CODE, mask)
     log.info(
-        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s)",
+        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s btn=%s)",
         mask,
         bool(mask & FEATURE_LIMIT_SWITCHES),
         bool(mask & FEATURE_TEMP_SENSOR),
         bool(mask & FEATURE_PI_VOLTAGE),
         bool(mask & FEATURE_BATTERY_VOLTAGE),
         bool(mask & FEATURE_CURRENT_SENSOR),
+        bool(mask & FEATURE_ON_BOARD_BUTTONS),
     )
 
 
