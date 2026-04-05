@@ -784,6 +784,7 @@ body{
   justify-content:center;
   gap:14px;
   z-index:200;
+  pointer-events:none;
   -webkit-backdrop-filter:blur(5px);
   backdrop-filter:blur(5px);
 }
@@ -1548,9 +1549,10 @@ function updateUI(d) {
   gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
   if (d.ui_mode) gTogglePos = d.ui_mode;
 
-  // Suppress overlay when connected, when mode is OFF (intentional disconnect),
-  // or when the toggle has left OFF but the bridge hasn't reconnected yet.
-  setConnected(gConnected || gMode === 'OFF' || gTogglePos !== 'off');
+  // Suppress overlay when connected, or when disconnect is intentional (OFF).
+  // This also handles occasional mode/ui-mode desync by treating the selector
+  // position as authoritative for intentional offline state.
+  setConnected(gConnected || gMode === 'OFF' || gTogglePos === 'off');
 
   // OLED mode line — AUTO: show AP ON/OFF with oversized "AP"; other modes: plain label
   var modeRow = document.getElementById('oled-mode-row');
