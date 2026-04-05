@@ -277,6 +277,18 @@ def _handle_control_owner_disconnect(client_id: str) -> None:
         log.warning("Could not enqueue ESTOP after REMOTE owner disconnect")
 
 
+def _clear_control_owner_if_not_manual(mode: str) -> None:
+    """Drop stale REMOTE owner lock whenever bridge leaves MANUAL mode."""
+    if not CONTROL_LOCK_ENABLED or mode == "MANUAL":
+        return
+    with _control_lock:
+        global _control_owner
+        if _control_owner is None:
+            return
+        log.info("Bridge mode=%s, clearing REMOTE owner %s", mode, _control_owner)
+        _control_owner = None
+
+
 # ---------------------------------------------------------------------------
 # Bridge TCP client — reconnecting, runs in a daemon thread
 # ---------------------------------------------------------------------------
@@ -303,7 +315,9 @@ def _parse_bridge_line(line: str) -> None:
     elif c == "MODE":
         # Bridge sends MODE IDLE|AP|MANUAL every telemetry cycle
         if len(parts) > 1:
-            _update(mode=parts[1].upper())
+            mode = parts[1].upper()
+            _clear_control_owner_if_not_manual(mode)
+            _update(mode=mode)
 
     elif c in ("HDG", "CMD", "RDR", "DB"):
         try:
@@ -1938,14 +1952,20 @@ class _Handler(BaseHTTPRequestHandler):
         tok = cmd_str.upper().split()
         client_id = self._client_id()
         is_estop = bool(tok and tok[0] == "ESTOP")
+        wants_remote_takeover = len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "MANUAL"
+        with _state_lock:
+            in_remote_mode = (_state.get("mode") == "MANUAL")
+        enforce_lock = CONTROL_LOCK_ENABLED and not is_estop and (in_remote_mode or wants_remote_takeover)
 
         # ESTOP is intentionally always allowed (safety critical), even if
         # another browser currently holds the control token.
-        if CONTROL_LOCK_ENABLED and not is_estop:
+        # Control lock is only enforced in active REMOTE mode, or when a
+        # browser explicitly requests MODE MANUAL (takeover attempt).
+        if enforce_lock:
             acq = _control_acquire(client_id)
             if not acq.get("ok", False):
                 owner_id = str(acq.get("owner") or "")
-                if owner_id:
+                if owner_id and wants_remote_takeover:
                     owner_event = _snap()
                     owner_event["takeover_seq"] = int(time.time() * 1000)
                     _notify_client(owner_id, owner_event)
@@ -1960,6 +1980,7 @@ class _Handler(BaseHTTPRequestHandler):
         # ── MODE OFF: intentional TCP disconnect ──────────────────────────────
         # Handled entirely locally — do not forward to bridge.
         if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "OFF":
+            _control_release(client_id, force=True)
             _bridge_active.clear()          # signal bridge thread to drop connection
             # Drain any pending commands so nothing sneaks through after disconnect
             while True:
@@ -1979,6 +2000,7 @@ class _Handler(BaseHTTPRequestHandler):
         # Re-enables the bridge thread without forwarding any mode command to
         # the bridge itself.  Bridge stays in IDLE; web remote observes only.
         if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "ON":
+            _control_release(client_id, force=True)
             _bridge_active.set()          # wake bridge thread if idle (was mode OFF)
             _update(ui_mode="on")
             self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
@@ -1996,6 +2018,7 @@ class _Handler(BaseHTTPRequestHandler):
             if tok[1] == "MANUAL":
                 _update(mode="MANUAL", ui_mode="remote")
             elif tok[1] == "AUTO":
+                _control_release(client_id, force=True)
                 _update(mode="IDLE", ui_mode="auto")
         elif len(tok) >= 2 and tok[0] == "BTN" and tok[1] == "TOGGLE":
             with _state_lock:
