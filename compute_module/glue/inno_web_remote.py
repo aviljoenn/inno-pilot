@@ -16,8 +16,6 @@ Environment overrides:
     INNO_WEB_PORT     HTTP/SSE listen port (default: 8888)
     INNO_BRIDGE_HOST  Bridge host (default: 127.0.0.1)
     INNO_BRIDGE_PORT  Bridge TCP port (default: 8555)
-    INNO_CONTROL_LOCK Enable single-controller lock (default: 1)
-    INNO_WEB_MASTER   Allow this instance to send steering/mode commands (default: 1)
 """
 
 import json
@@ -42,14 +40,12 @@ log = logging.getLogger("web-remote")
 # Configuration
 # ---------------------------------------------------------------------------
 WEB_PORT          = int(os.getenv("INNO_WEB_PORT", "8888"))
-# NOTE: bridge currently supports a single active remote TCP client at a time.
 BRIDGE_HOST       = os.getenv("INNO_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_PORT       = int(os.getenv("INNO_BRIDGE_PORT", "8555"))
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
-# Multi-browser command arbitration (single REMOTE owner lock)
-CONTROL_LOCK_ENABLED = os.getenv("INNO_CONTROL_LOCK", "1").strip() not in ("0", "false", "False")
-INSTANCE_IS_MASTER = os.getenv("INNO_WEB_MASTER", "1").strip() not in ("0", "false", "False")
+# Multi-browser command arbitration has been removed: every connected
+# browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
 INNOPILOT_VERSION = "v1.2.0_B29"
 
@@ -145,7 +141,6 @@ _state: dict = {
     "bridge_ver": None,
     "version":    INNOPILOT_VERSION,
     "ui_mode":    "on",     # web remote selector state: auto | remote | on | off
-    "is_master":  INSTANCE_IS_MASTER,
 }
 _state_lock = threading.Lock()
 
@@ -166,10 +161,6 @@ SETTINGS_TIMEOUT_S = 4.0
 # Set by default (connected); cleared when the mode toggle is moved to OFF.
 _bridge_active = threading.Event()
 _bridge_active.set()
-
-# Control-token state (single controller).
-_control_lock = threading.Lock()
-_control_owner: Optional[str] = None
 
 
 def _snap() -> dict:
@@ -198,114 +189,12 @@ def _broadcast(snap: dict) -> None:
             log.debug("SSE: dropped slow client")
 
 
-def _notify_client(client_id: str, event: dict) -> None:
-    """Push one SSE event to a specific client id (best-effort)."""
-    with _sse_lock:
-        for sub in _sse_subs:
-            if sub["id"] != client_id:
-                continue
-            try:
-                sub["q"].put_nowait(event)
-            except queue.Full:
-                log.debug("SSE: takeover notice dropped for slow client %s", client_id)
-            break
 
 
-def _control_snapshot(client_id: Optional[str] = None) -> dict:
-    """Return current control-token status."""
-    with _control_lock:
-        owner = _control_owner
-    return {
-        "enabled": CONTROL_LOCK_ENABLED,
-        "owner": owner,
-        "is_owner": bool(owner and client_id and owner == client_id),
-    }
 
 
-def _control_acquire(client_id: str, force: bool = False) -> dict:
-    """Acquire control lock for this client."""
-    with _control_lock:
-        global _control_owner
-        if _control_owner is None or _control_owner == client_id or force:
-            prev_owner = _control_owner
-            _control_owner = client_id
-            if prev_owner and prev_owner != client_id:
-                log.warning("Control takeover: %s -> %s", prev_owner, client_id)
-            ok = True
-        else:
-            ok = False
-    snap = _control_snapshot(client_id)
-    if ok:
-        return {"ok": True, **snap}
-    return {"ok": False, "reason": "owned", **snap}
 
 
-def _control_release(client_id: str, force: bool = False) -> dict:
-    """Release lock if owner (or if forced)."""
-    with _control_lock:
-        global _control_owner
-        if _control_owner is None:
-            ok = True
-            reason = None
-        elif force or _control_owner == client_id:
-            log.info("Control released by %s (owner was %s)", client_id, _control_owner)
-            _control_owner = None
-            ok = True
-            reason = None
-        else:
-            ok = False
-            reason = "not_owner"
-    snap = _control_snapshot(client_id)
-    if ok:
-        return {"ok": True, **snap}
-    return {"ok": False, "reason": reason, **snap}
-
-
-def _requires_master(tok: list[str]) -> bool:
-    """Return True when command mutates steering/mode state."""
-    if not tok:
-        return False
-    if tok[0] in ("MODE", "BTN", "RUD"):
-        return True
-    if len(tok) >= 2 and tok[0] == "SETTINGS" and tok[1] == "SET":
-        return True
-    return False
-
-
-def _handle_control_owner_disconnect(client_id: str) -> None:
-    """Handle complete TCP loss of an SSE client that owns REMOTE control."""
-    if not CONTROL_LOCK_ENABLED:
-        return
-    with _control_lock:
-        global _control_owner
-        if _control_owner != client_id:
-            return
-        _control_owner = None
-    log.warning("REMOTE owner disconnected (%s): forcing ON observer + ESTOP", client_id)
-    # Broadcast warning to every web remote and return all UI toggles to ON.
-    _update(warn="REMOTE_LINK_LOST", ui_mode="on", mode="IDLE", ap=0)
-    # Safety: force immediate bridge ESTOP so attached buzzers can alert.
-    try:
-        _cmd_q.put_nowait("ESTOP")
-    except queue.Full:
-        log.warning("Could not enqueue ESTOP after REMOTE owner disconnect")
-
-
-def _clear_control_owner_if_not_manual(mode: str) -> None:
-    """Drop stale REMOTE owner lock whenever bridge leaves MANUAL mode."""
-    if not CONTROL_LOCK_ENABLED or mode == "MANUAL":
-        return
-    with _control_lock:
-        global _control_owner
-        if _control_owner is None:
-            return
-        log.info("Bridge mode=%s, clearing REMOTE owner %s", mode, _control_owner)
-        _control_owner = None
-
-
-# ---------------------------------------------------------------------------
-# Bridge TCP client — reconnecting, runs in a daemon thread
-# ---------------------------------------------------------------------------
 
 def _parse_bridge_line(line: str) -> None:
     """Parse one telemetry line received from the bridge."""
@@ -330,7 +219,6 @@ def _parse_bridge_line(line: str) -> None:
         # Bridge sends MODE IDLE|AP|MANUAL every telemetry cycle
         if len(parts) > 1:
             mode = parts[1].upper()
-            _clear_control_owner_if_not_manual(mode)
             _update(mode=mode)
 
     elif c in ("HDG", "CMD", "RDR", "DB"):
@@ -926,12 +814,6 @@ body{
   box-shadow:0 6px 24px rgba(0,0,0,.7);
 }
 .sw-toast.visible{opacity:1;transform:translate(-50%,-50%) scale(1)}
-.sw-toast.occupied{
-  background:rgba(0,70,155,.97);
-}
-.sw-toast.attempted{
-  background:rgba(150,60,0,.97);
-}
 
 /* ── Settings overlay panel ─────────────────────────────────────────── */
 .sov{
@@ -1097,8 +979,6 @@ body{
 
 <!-- Settings warning toast -->
 <div class="sw-toast" id="sw-toast">Settings only<br>available in OFF mode</div>
-<div class="sw-toast occupied" id="remote-occupied-toast">REMOTE Control Occupied.</div>
-<div class="sw-toast attempted" id="takeover-attempted-toast">REMOTE Take-Over Attempted!</div>
 
 <!-- Settings overlay -->
 <div class="sov hidden" id="sov">
@@ -1269,22 +1149,9 @@ var gJogTimer     = null;  // setInterval handle for hold-jog repeat
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
 var gSettingsOpen = false; // true while settings panel is visible
-var gRemoteOccupiedTimer = null;
-var gTakeoverAttemptedTimer = null;
-var gLastTakeoverSeq = 0;
-var gIsMaster = true;
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
-  var parts = String(cmd || '').trim().toUpperCase().split(/\\s+/);
-  var isMutating = parts.length && (parts[0] === 'MODE' || parts[0] === 'BTN' || parts[0] === 'RUD');
-  if (!gIsMaster && isMutating) {
-    return Promise.resolve({
-      ok: false,
-      status: 403,
-      body: {ok: false, error: 'read_only_instance'}
-    });
-  }
   return fetch('/command', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1298,45 +1165,6 @@ function sendCmd(cmd) {
   });
 }
 
-function flashRemoteOccupied() {
-  var t = document.getElementById('remote-occupied-toast');
-  if (!t) return;
-  if (gRemoteOccupiedTimer) {
-    clearInterval(gRemoteOccupiedTimer);
-    gRemoteOccupiedTimer = null;
-  }
-  var count = 0;
-  t.classList.remove('visible');
-  gRemoteOccupiedTimer = setInterval(function() {
-    count += 1;
-    t.classList.toggle('visible');
-    if (count >= 10) {
-      clearInterval(gRemoteOccupiedTimer);
-      gRemoteOccupiedTimer = null;
-      t.classList.remove('visible');
-    }
-  }, 500);
-}
-
-function flashTakeoverAttempted() {
-  var t = document.getElementById('takeover-attempted-toast');
-  if (!t) return;
-  if (gTakeoverAttemptedTimer) {
-    clearInterval(gTakeoverAttemptedTimer);
-    gTakeoverAttemptedTimer = null;
-  }
-  var count = 0;
-  t.classList.remove('visible');
-  gTakeoverAttemptedTimer = setInterval(function() {
-    count += 1;
-    t.classList.toggle('visible');
-    if (count >= 10) {
-      clearInterval(gTakeoverAttemptedTimer);
-      gTakeoverAttemptedTimer = null;
-      t.classList.remove('visible');
-    }
-  }, 500);
-}
 
 // ── SSE subscription ──────────────────────────────────────────────────────
 var es = new EventSource('/events');
@@ -1345,16 +1173,11 @@ es.onerror   = function()  { setConnected(false); };
 
 // ── UI updater ────────────────────────────────────────────────────────────
 function updateUI(d) {
-  if (typeof d.is_master === 'boolean') gIsMaster = d.is_master;
   gConnected = !!d.connected;
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
   gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
   if (d.ui_mode) gTogglePos = d.ui_mode;
-  if (d.takeover_seq && d.takeover_seq !== gLastTakeoverSeq) {
-    gLastTakeoverSeq = d.takeover_seq;
-    flashTakeoverAttempted();
-  }
 
   // Suppress overlay when connected, when mode is OFF (intentional disconnect),
   // or when the toggle has left OFF but the bridge hasn't reconnected yet.
@@ -1558,8 +1381,6 @@ document.querySelectorAll('.mode-radio').forEach(function(el) {
 });
 
 function handleToggleAction(action) {
-  if (!gIsMaster) return;
-
   if (action === 'auto') {
     // Enter AUTO-ready state; AP starts OFF.  User presses Go to engage/disengage AP.
     gTogglePos = 'auto';
@@ -1589,10 +1410,6 @@ function handleToggleAction(action) {
       return;
     }
     sendCmd('MODE MANUAL').then(function(res) {
-      if (res.status === 423) {
-        flashRemoteOccupied();
-        return;
-      }
       if (!res.ok) return;
       gTogglePos = 'remote';
       // Initialise commanded position from actual rudder (or midships if unknown)
@@ -1879,8 +1696,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_sse()
         elif self.path == "/health":
             self._serve_health()
-        elif self.path == "/control":
-            self._serve_control()
         elif self.path == "/settings":
             self._serve_settings()
         else:
@@ -1889,12 +1704,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/command":
             self._handle_command()
-        elif self.path == "/control/acquire":
-            self._handle_control_acquire()
-        elif self.path == "/control/release":
-            self._handle_control_release()
-        elif self.path == "/control/heartbeat":
-            self._handle_control_heartbeat()
         elif self.path == "/settings":
             self._handle_settings_post()
         else:
@@ -1967,7 +1776,6 @@ class _Handler(BaseHTTPRequestHandler):
                     _sse_subs.remove(sub)
                 except ValueError:
                     pass
-            _handle_control_owner_disconnect(client_id)
 
     # ---- POST /command ----
 
@@ -1982,45 +1790,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         tok = cmd_str.upper().split()
-        client_id = self._client_id()
-        if not INSTANCE_IS_MASTER and _requires_master(tok):
-            self._send_json(403, {
-                "ok": False,
-                "error": "read_only_instance",
-                "message": "This inno-web-remote instance is configured as non-master.",
-                "control": _control_snapshot(client_id),
-            })
-            return
-        is_estop = bool(tok and tok[0] == "ESTOP")
-        wants_remote_takeover = len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "MANUAL"
-        with _state_lock:
-            in_remote_mode = (_state.get("mode") == "MANUAL")
-        enforce_lock = CONTROL_LOCK_ENABLED and not is_estop and (in_remote_mode or wants_remote_takeover)
-
-        # ESTOP is intentionally always allowed (safety critical), even if
-        # another browser currently holds the control token.
-        # Control lock is only enforced in active REMOTE mode, or when a
-        # browser explicitly requests MODE MANUAL (takeover attempt).
-        if enforce_lock:
-            acq = _control_acquire(client_id)
-            if not acq.get("ok", False):
-                owner_id = str(acq.get("owner") or "")
-                if owner_id and wants_remote_takeover:
-                    owner_event = _snap()
-                    owner_event["takeover_seq"] = int(time.time() * 1000)
-                    _notify_client(owner_id, owner_event)
-                self._send_json(423, {
-                    "ok": False,
-                    "error": "control_locked",
-                    "message": "REMOTE Control Occupied.",
-                    "control": acq,
-                })
-                return
 
         # ── MODE OFF: intentional TCP disconnect ──────────────────────────────
         # Handled entirely locally — do not forward to bridge.
         if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "OFF":
-            _control_release(client_id, force=True)
             _bridge_active.clear()          # signal bridge thread to drop connection
             # Drain any pending commands so nothing sneaks through after disconnect
             while True:
@@ -2033,17 +1806,16 @@ class _Handler(BaseHTTPRequestHandler):
                 rdr=None, rdr_pct=None, ap=0,
                 mode="OFF", comms="OK", warn=None, ui_mode="off",
             )
-            self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
+            self._send_json(200, {"ok": True})
             return
 
-        # ── MODE ON: observer mode — reconnect without taking control ─────────
+        # ── MODE ON: reconnect and resume live sync ────────────────────────────
         # Re-enables the bridge thread without forwarding any mode command to
-        # the bridge itself.  Bridge stays in IDLE; web remote observes only.
+        # the bridge itself.
         if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "ON":
-            _control_release(client_id, force=True)
             _bridge_active.set()          # wake bridge thread if idle (was mode OFF)
             _update(ui_mode="on")
-            self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
+            self._send_json(200, {"ok": True})
             return
 
         # ── Any active command: ensure bridge is (re)connected ────────────────
@@ -2058,7 +1830,6 @@ class _Handler(BaseHTTPRequestHandler):
             if tok[1] == "MANUAL":
                 _update(mode="MANUAL", ui_mode="remote")
             elif tok[1] == "AUTO":
-                _control_release(client_id, force=True)
                 _update(mode="IDLE", ui_mode="auto")
         elif len(tok) >= 2 and tok[0] == "BTN" and tok[1] == "TOGGLE":
             with _state_lock:
@@ -2076,39 +1847,7 @@ class _Handler(BaseHTTPRequestHandler):
         except queue.Full:
             log.warning("Command queue full, dropping: %s", cmd_str)
 
-        self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
-
-    # ---- GET /control ----
-
-    def _serve_control(self) -> None:
-        self._send_json(200, _control_snapshot(self._client_id()))
-
-    # ---- POST /control/acquire ----
-
-    def _handle_control_acquire(self) -> None:
-        if not CONTROL_LOCK_ENABLED:
-            self._send_json(200, {"ok": True, "enabled": False})
-            return
-        result = _control_acquire(self._client_id())
-        self._send_json(200 if result.get("ok") else 423, result)
-
-    # ---- POST /control/release ----
-
-    def _handle_control_release(self) -> None:
-        if not CONTROL_LOCK_ENABLED:
-            self._send_json(200, {"ok": True, "enabled": False})
-            return
-        result = _control_release(self._client_id())
-        self._send_json(200 if result.get("ok") else 403, result)
-
-    # ---- POST /control/heartbeat ----
-
-    def _handle_control_heartbeat(self) -> None:
-        if not CONTROL_LOCK_ENABLED:
-            self._send_json(200, {"ok": True, "enabled": False})
-            return
-        result = _control_acquire(self._client_id())
-        self._send_json(200 if result.get("ok") else 423, result)
+        self._send_json(200, {"ok": True})
 
     # ---- GET /health ----
 
@@ -2118,8 +1857,6 @@ class _Handler(BaseHTTPRequestHandler):
             "status":           "ok",
             "bridge_connected": snap["connected"],
             "mode":             snap["mode"],
-            "is_master":        INSTANCE_IS_MASTER,
-            "control":          _control_snapshot(self._client_id()),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type",   "application/json")
