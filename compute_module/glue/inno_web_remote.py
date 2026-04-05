@@ -449,8 +449,13 @@ def bridge_client() -> None:
             if intentional_disconnect:
                 # Mode OFF — stay disconnected; state already set by _handle_command
                 log.info("Bridge disconnected (mode OFF)")
+            elif not _bridge_active.is_set():
+                # OFF may have been requested while the socket was already down.
+                # Preserve OFF state and stay idle until MODE ON/active command.
+                _update(connected=False)
+                log.info("Bridge idle (mode OFF)")
             else:
-                # Unexpected loss — reset to IDLE and schedule reconnect
+                # Unexpected loss while active — reset to IDLE and schedule reconnect
                 _update(
                     connected=False, hdg=None, cmd=None,
                     rdr=None, rdr_pct=None, ap=0,
