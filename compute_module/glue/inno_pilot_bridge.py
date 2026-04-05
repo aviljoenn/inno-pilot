@@ -5,7 +5,7 @@ with a TCP listener on port 8555 for the inno-remote wireless handheld.
 
 Architecture:
   pypilot (port 23322) <-> bridge <-> PTY pair <-> Nano USB serial
-  inno-remote (Wi-Fi)  <-> bridge (TCP port 8555)
+  inno-remote / web remotes (Wi-Fi)  <-> bridge (TCP port 8555, multi-client)
 
 Threading model:
   - pypilot_worker (daemon thread): owns all pypilotClient interaction.
@@ -17,9 +17,9 @@ Threading model:
 Mode state machine (BridgeState.mode):
   IDLE   — AP disengaged, no remote manual control
   AP     — autopilot engaged via pypilot
-  MANUAL — remote has manual steering authority; AP locked out
+  MANUAL — remote/manual steering mode active
   Transitions:
-    BTN_TOGGLE / ESTOP       -> IDLE<->AP (rejected in MANUAL with WARN_AP_PRESSED)
+    BTN_TOGGLE / ESTOP       -> IDLE<->AP
     MODE MANUAL (TCP)        -> any -> MANUAL  (disengages AP)
     MODE AUTO   (TCP)        -> MANUAL -> IDLE
     TCP disconnect in MANUAL -> MANUAL -> IDLE + WARN_STEER_LOSS to Nano
@@ -103,7 +103,6 @@ WARNING_CODE               = 0xEA  # warning type to display/beep on Nano
 
 # Warning subtypes sent with WARNING_CODE
 WARN_NONE        = 0
-WARN_AP_PRESSED  = 1   # AP toggle rejected during MANUAL: 1-beep + 5s OLED flash
 WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
 
 # Nano -> Bridge telemetry / events
@@ -703,7 +702,7 @@ def setup_tcp_server() -> socket.socket:
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("", REMOTE_TCP_PORT))
-    srv.listen(1)
+    srv.listen(8)
     srv.setblocking(False)
     log.info("TCP remote server listening on port %d", REMOTE_TCP_PORT)
     return srv
@@ -716,6 +715,15 @@ def remote_send(sock: socket.socket, line: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def remote_send_many(remote_clients: dict, line: str) -> list[socket.socket]:
+    """Send one line to all connected remotes, returning sockets that failed."""
+    failed: list[socket.socket] = []
+    for sock in list(remote_clients.keys()):
+        if not remote_send(sock, line):
+            failed.append(sock)
+    return failed
 
 
 def close_remote(sock: socket.socket) -> None:
@@ -771,7 +779,7 @@ def process_remote_line(
       PING              -> reply PONG
       HELLO <ver>       -> log version match/mismatch, reply HELLO <bridge_ver>
       ESTOP             -> ap.enabled=False, exit MANUAL if active
-      BTN TOGGLE        -> toggle AP (rejected with WARN_AP_PRESSED in MANUAL mode)
+      BTN TOGGLE        -> toggle AP
       BTN -10|-1|+1|+10 -> adjust ap.heading_command (ignored in MANUAL)
       MODE MANUAL       -> enter remote manual steering
       MODE AUTO         -> exit remote manual steering
@@ -820,28 +828,19 @@ def process_remote_line(
         arg = parts[1].upper()
 
         if arg == "TOGGLE":
-            if bstate.mode == MODE_MANUAL:
-                # AP engage rejected while remote has manual authority
-                send_nano_frame(nano, WARNING_CODE, WARN_AP_PRESSED)
-                remote_send(remote_sock, "WARN AP_PRESSED")
-                log.warning("Remote BTN TOGGLE rejected in MANUAL mode")
+            with plock:
+                current = pstate.ap_enabled
+            target = True if current is None else (not current)
+            set_q.put(("ap.enabled", target))
+            with plock:
+                pstate.ap_enabled = target  # optimistic cache
+            if target:
+                bstate.mode = MODE_AP
             else:
-                with plock:
-                    current = pstate.ap_enabled
-                target = True if current is None else (not current)
-                set_q.put(("ap.enabled", target))
-                with plock:
-                    pstate.ap_enabled = target  # optimistic cache
-                if target:
-                    bstate.mode = MODE_AP
-                else:
-                    bstate.mode = MODE_IDLE
-                log.info("Remote BTN TOGGLE -> ap.enabled=%s", target)
+                bstate.mode = MODE_IDLE
+            log.info("Remote BTN TOGGLE -> ap.enabled=%s", target)
 
         else:
-            if bstate.mode == MODE_MANUAL:
-                # Heading adjustments have no meaning in manual mode
-                return
             try:
                 delta = float(arg)
             except ValueError:
@@ -1032,9 +1031,8 @@ def main() -> None:
 
     # ---- TCP remote state ----
     tcp_server  = setup_tcp_server()
-    remote_sock = None
-    remote_buf  = bytearray()
-    remote_last_rx_ts = 0.0
+    # key: socket, value: {"addr": str, "buf": bytearray, "last_rx": float}
+    remote_clients: dict[socket.socket, dict] = {}
 
     log.info("Inno-Pilot Bridge %s", INNOPILOT_VERSION)
     log.info("Starting main loop")
@@ -1082,34 +1080,34 @@ def main() -> None:
             log.debug("Telemetry -> Nano: hdg=%s cmd=%s rud=%s",
                       heading, heading_cmd, rudder_angle)
 
-            # ---- Remote telemetry (text lines to TCP client) ----
-            if remote_sock is not None:
-                ok = True
-                ok = ok and remote_send(remote_sock, f"AP {1 if bstate.mode == MODE_AP else 0}")
-                ok = ok and remote_send(remote_sock, f"MODE {bstate.mode}")
+            # ---- Remote telemetry (text lines to all TCP clients) ----
+            if remote_clients:
+                failed: set[socket.socket] = set()
+                failed.update(remote_send_many(remote_clients, f"AP {1 if bstate.mode == MODE_AP else 0}"))
+                failed.update(remote_send_many(remote_clients, f"MODE {bstate.mode}"))
                 if heading is not None:
-                    ok = ok and remote_send(remote_sock, f"HDG {heading:.1f}")
+                    failed.update(remote_send_many(remote_clients, f"HDG {heading:.1f}"))
                 if heading_cmd is not None:
-                    ok = ok and remote_send(remote_sock, f"CMD {heading_cmd:.1f}")
+                    failed.update(remote_send_many(remote_clients, f"CMD {heading_cmd:.1f}"))
                 if rudder_angle is not None:
-                    ok = ok and remote_send(remote_sock, f"RDR {rudder_angle:.1f}")
-                # Rudder percentage (useful in MANUAL mode for remote display)
+                    failed.update(remote_send_many(remote_clients, f"RDR {rudder_angle:.1f}"))
                 if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
                     rudder_pct = (rudder_angle + rudder_range) / (2.0 * rudder_range) * 100.0
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
-                    ok = ok and remote_send(remote_sock, f"RDR_PCT {rudder_pct:.1f}")
+                    failed.update(remote_send_many(remote_clients, f"RDR_PCT {rudder_pct:.1f}"))
                 if bstate.nano_comms_crit:
-                    ok = ok and remote_send(remote_sock, "COMMS CRIT")
+                    failed.update(remote_send_many(remote_clients, "COMMS CRIT"))
                 elif bstate.nano_comms_warn:
-                    ok = ok and remote_send(remote_sock, f"COMMS WARN {bstate.nano_err_window}")
+                    failed.update(remote_send_many(remote_clients, f"COMMS WARN {bstate.nano_err_window}"))
                 else:
-                    ok = ok and remote_send(remote_sock, "COMMS OK")
-                if not ok:
-                    log.warning("TCP remote: send failed during telemetry, disconnecting")
+                    failed.update(remote_send_many(remote_clients, "COMMS OK"))
+
+                for sock in failed:
+                    meta = remote_clients.pop(sock, {})
+                    close_remote(sock)
+                    log.warning("TCP remote: telemetry send failed, dropped %s", meta.get("addr", "?"))
+                if not remote_clients and bstate.mode == MODE_MANUAL:
                     handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
-                    close_remote(remote_sock)
-                    remote_sock = None
-                    remote_buf  = bytearray()
 
         # ================================================================
         # 4. Relay: pypilot -> Nano (CRC-validated, self-aligning)
@@ -1205,43 +1203,33 @@ def main() -> None:
                     log.debug("Nano -> API: BUTTON_EVENT value=%d", value)
                     try:
                         if value == BTN_EVT_TOGGLE:
-                            if bstate.mode == MODE_MANUAL:
-                                # AP toggle rejected while remote has manual authority
-                                send_nano_frame(nano, WARNING_CODE, WARN_AP_PRESSED)
-                                if remote_sock is not None:
-                                    remote_send(remote_sock, "WARN AP_PRESSED")
-                                log.warning("Nano BTN TOGGLE rejected in MANUAL mode")
+                            with plock:
+                                current = pstate.ap_enabled
+                            target = True if current is None else (not current)
+                            set_q.put(("ap.enabled", target))
+                            with plock:
+                                pstate.ap_enabled = target
+                            if target:
+                                bstate.mode = MODE_AP
                             else:
-                                with plock:
-                                    current = pstate.ap_enabled
-                                target = True if current is None else (not current)
-                                set_q.put(("ap.enabled", target))
-                                with plock:
-                                    pstate.ap_enabled = target
-                                if target:
-                                    bstate.mode = MODE_AP
-                                else:
-                                    bstate.mode = MODE_IDLE
+                                bstate.mode = MODE_IDLE
 
                         elif value in (BTN_EVT_MINUS10, BTN_EVT_MINUS1,
                                        BTN_EVT_PLUS10,  BTN_EVT_PLUS1):
-                            if bstate.mode == MODE_MANUAL:
-                                pass  # heading adjustments ignored in manual mode
-                            else:
-                                with plock:
-                                    current_cmd = pstate.heading_cmd
-                                if current_cmd is None:
-                                    continue
-                                delta = {
-                                    BTN_EVT_MINUS10: -10.0,
-                                    BTN_EVT_MINUS1:  -1.0,
-                                    BTN_EVT_PLUS1:    1.0,
-                                    BTN_EVT_PLUS10:  10.0,
-                                }[value]
-                                new_cmd = clamp_heading(current_cmd + delta)
-                                set_q.put(("ap.heading_command", new_cmd))
-                                with plock:
-                                    pstate.heading_cmd = new_cmd
+                            with plock:
+                                current_cmd = pstate.heading_cmd
+                            if current_cmd is None:
+                                continue
+                            delta = {
+                                BTN_EVT_MINUS10: -10.0,
+                                BTN_EVT_MINUS1:  -1.0,
+                                BTN_EVT_PLUS1:    1.0,
+                                BTN_EVT_PLUS10:  10.0,
+                            }[value]
+                            new_cmd = clamp_heading(current_cmd + delta)
+                            set_q.put(("ap.heading_command", new_cmd))
+                            with plock:
+                                pstate.heading_cmd = new_cmd
 
                         elif value == BTN_EVT_STOP:
                             # STOP pressed on Nano: disengage AP and exit any manual mode
@@ -1307,8 +1295,7 @@ def main() -> None:
                         bstate.comms_disengage_sent = False
 
                     # Relay flags to remote
-                    if remote_sock is not None:
-                        remote_send(remote_sock, f"FLAGS {value}")
+                    remote_send_many(remote_clients, f"FLAGS {value}")
 
                 elif code == BUZZER_STATE_CODE:
                     bstate.nano_buzzer_on = (value != 0)
@@ -1343,102 +1330,79 @@ def main() -> None:
 
                 elif code == RCT_RESULT_STOP_CODE:
                     log.info("RCT result: first_stop_adc=%d", value)
-                    if remote_sock is not None:
-                        remote_send(remote_sock, f"RCT_STOP {value}")
+                    remote_send_many(remote_clients, f"RCT_STOP {value}")
 
                 elif code == RCT_RESULT_PULSES_CODE:
                     log.info("RCT result: pulse_count=%d", value)
-                    if remote_sock is not None:
-                        remote_send(remote_sock, f"RCT_PULSES {value}")
+                    remote_send_many(remote_clients, f"RCT_PULSES {value}")
 
                 elif code == RCT_RESULT_FINAL_CODE:
                     log.info("RCT result: final_adc=%d", value)
-                    if remote_sock is not None:
-                        remote_send(remote_sock, f"RCT_FINAL {value}")
+                    remote_send_many(remote_clients, f"RCT_FINAL {value}")
 
                 elif code == RCT_RDR_PCT_CODE:
                     # Ratify live position: throttled to 50 ms (20 Hz) so a fast Nano
                     # ratify loop (>100 Hz) does not flood the remote TCP connection.
-                    if remote_sock is not None:
+                    if remote_clients:
                         now = time.monotonic()
                         if now - bstate.rct_last_rdr_send >= 0.05:
-                            remote_send(remote_sock, f"RDR_PCT {value / 10.0:.1f}")
+                            remote_send_many(remote_clients, f"RDR_PCT {value / 10.0:.1f}")
                             bstate.rct_last_rdr_send = now
 
                 elif code == RCT_HZ_CODE:
                     # Ratify loop Hz: forward to remote for display on MODE line
-                    if remote_sock is not None:
-                        remote_send(remote_sock, f"HZ {value}")
+                    remote_send_many(remote_clients, f"HZ {value}")
 
         # ================================================================
         # 6. TCP remote: accept new connections / handle existing client
         # ================================================================
-        watch_socks = [tcp_server]
-        if remote_sock is not None:
-            watch_socks.append(remote_sock)
+        watch_socks = [tcp_server] + list(remote_clients.keys())
 
         readable, _, _ = select.select(watch_socks, [], [], 0)
 
         for s in readable:
             if s is tcp_server:
                 conn, addr = tcp_server.accept()
-                if remote_sock is not None:
-                    # If the same IP reconnects (e.g. after OTA reboot or TCP half-close),
-                    # replace the stale socket rather than rejecting the new connection.
-                    try:
-                        curr_ip = remote_sock.getpeername()[0]
-                    except OSError:
-                        curr_ip = None
-                    if addr[0] == curr_ip:
-                        log.warning("TCP remote: %s reconnected, replacing stale connection", addr[0])
-                        handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
-                        close_remote(remote_sock)
-                        remote_buf = bytearray()
-                    else:
-                        log.warning("TCP remote: rejected %s (already connected from %s)", addr, curr_ip)
-                        conn.close()
-                        conn = None
-                if conn is not None and remote_sock is None:
-                    conn.setblocking(False)
-                    remote_sock = conn
-                    remote_buf  = bytearray()
-                    remote_last_rx_ts = now
-                    log.info("TCP remote: connected from %s", addr)
+                conn.setblocking(False)
+                remote_clients[conn] = {"addr": addr, "buf": bytearray(), "last_rx": now}
+                log.info("TCP remote: connected from %s (clients=%d)", addr, len(remote_clients))
 
-            elif s is remote_sock:
+            elif s in remote_clients:
                 try:
-                    data = remote_sock.recv(512)
+                    data = s.recv(512)
                     if data:
-                        remote_buf.extend(data)
-                        remote_last_rx_ts = now
-                        while b"\n" in remote_buf:
-                            nl = remote_buf.index(b"\n")
-                            line = remote_buf[:nl].decode("ascii", errors="replace")
-                            del remote_buf[:nl + 1]
+                        meta = remote_clients[s]
+                        meta["buf"].extend(data)
+                        meta["last_rx"] = now
+                        while b"\n" in meta["buf"]:
+                            nl = meta["buf"].index(b"\n")
+                            line = meta["buf"][:nl].decode("ascii", errors="replace")
+                            del meta["buf"][:nl + 1]
                             process_remote_line(
-                                line, set_q, remote_sock,
+                                line, set_q, s,
                                 pstate, plock, bstate, nano
                             )
                     else:
-                        log.info("TCP remote: disconnected (peer closed)")
-                        handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
-                        close_remote(remote_sock)
-                        remote_sock = None
-                        remote_buf  = bytearray()
+                        meta = remote_clients.pop(s, {})
+                        close_remote(s)
+                        log.info("TCP remote: disconnected %s (clients=%d)", meta.get("addr", "?"), len(remote_clients))
+                        if not remote_clients and bstate.mode == MODE_MANUAL:
+                            handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                 except OSError as exc:
-                    log.warning("TCP remote: socket error (%s), disconnecting", exc)
-                    handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
-                    close_remote(remote_sock)
-                    remote_sock = None
-                    remote_buf  = bytearray()
+                    meta = remote_clients.pop(s, {})
+                    log.warning("TCP remote: socket error (%s), disconnecting %s", exc, meta.get("addr", "?"))
+                    close_remote(s)
+                    if not remote_clients and bstate.mode == MODE_MANUAL:
+                        handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
 
-        # Check for remote connection timeout
-        if remote_sock is not None and (now - remote_last_rx_ts) >= REMOTE_TIMEOUT_S:
-            log.warning("TCP remote: timeout — no data received, disconnecting")
-            handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
-            close_remote(remote_sock)
-            remote_sock = None
-            remote_buf  = bytearray()
+        # Check for per-client timeout
+        for sock, meta in list(remote_clients.items()):
+            if (now - float(meta.get("last_rx", 0.0))) >= REMOTE_TIMEOUT_S:
+                log.warning("TCP remote: timeout %s — disconnecting", meta.get("addr", "?"))
+                remote_clients.pop(sock, None)
+                close_remote(sock)
+                if not remote_clients and bstate.mode == MODE_MANUAL:
+                    handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
 
         time.sleep(0.01)
 
