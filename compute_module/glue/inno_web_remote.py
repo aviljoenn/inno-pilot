@@ -17,7 +17,6 @@ Environment overrides:
     INNO_BRIDGE_HOST  Bridge host (default: 127.0.0.1)
     INNO_BRIDGE_PORT  Bridge TCP port (default: 8555)
     INNO_CONTROL_LOCK Enable single-controller lock (default: 1)
-    INNO_CONTROL_LEASE_S Control lock lease seconds (default: 10)
 """
 
 import json
@@ -47,9 +46,8 @@ BRIDGE_HOST       = os.getenv("INNO_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_PORT       = int(os.getenv("INNO_BRIDGE_PORT", "8555"))
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
-# Multi-browser command arbitration (control token/lease lock)
+# Multi-browser command arbitration (single REMOTE owner lock)
 CONTROL_LOCK_ENABLED = os.getenv("INNO_CONTROL_LOCK", "1").strip() not in ("0", "false", "False")
-CONTROL_LEASE_S      = float(os.getenv("INNO_CONTROL_LEASE_S", "10"))
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
 INNOPILOT_VERSION = "v1.2.0_B29"
 
@@ -144,11 +142,12 @@ _state: dict = {
     "warn":       None,
     "bridge_ver": None,
     "version":    INNOPILOT_VERSION,
+    "ui_mode":    "on",     # web remote selector state: auto | remote | on | off
 }
 _state_lock = threading.Lock()
 
-# One Queue per connected SSE browser
-_sse_subs: list[queue.Queue] = []
+# One queue per connected SSE browser, tracked with client id.
+_sse_subs: list[dict] = []
 _sse_lock  = threading.Lock()
 
 # Commands flowing from browser → bridge
@@ -165,10 +164,9 @@ SETTINGS_TIMEOUT_S = 4.0
 _bridge_active = threading.Event()
 _bridge_active.set()
 
-# Control-token state (single controller + lease timeout).
+# Control-token state (single controller).
 _control_lock = threading.Lock()
 _control_owner: Optional[str] = None
-_control_expires_mono: float = 0.0
 
 
 def _snap() -> dict:
@@ -187,47 +185,47 @@ def _update(**kw) -> None:
 def _broadcast(snap: dict) -> None:
     with _sse_lock:
         dead = []
-        for q in _sse_subs:
+        for sub in _sse_subs:
             try:
-                q.put_nowait(snap)
+                sub["q"].put_nowait(snap)
             except queue.Full:
-                dead.append(q)
-        for q in dead:
-            _sse_subs.remove(q)
+                dead.append(sub)
+        for sub in dead:
+            _sse_subs.remove(sub)
             log.debug("SSE: dropped slow client")
+
+
+def _notify_client(client_id: str, event: dict) -> None:
+    """Push one SSE event to a specific client id (best-effort)."""
+    with _sse_lock:
+        for sub in _sse_subs:
+            if sub["id"] != client_id:
+                continue
+            try:
+                sub["q"].put_nowait(event)
+            except queue.Full:
+                log.debug("SSE: takeover notice dropped for slow client %s", client_id)
+            break
 
 
 def _control_snapshot(client_id: Optional[str] = None) -> dict:
     """Return current control-token status."""
-    now = time.monotonic()
     with _control_lock:
-        global _control_owner, _control_expires_mono
-        if _control_owner and now >= _control_expires_mono:
-            log.info("Control lease expired for %s", _control_owner)
-            _control_owner = None
-            _control_expires_mono = 0.0
         owner = _control_owner
-        expires_in = max(0.0, _control_expires_mono - now) if owner else 0.0
     return {
         "enabled": CONTROL_LOCK_ENABLED,
         "owner": owner,
         "is_owner": bool(owner and client_id and owner == client_id),
-        "expires_in_s": round(expires_in, 2),
     }
 
 
 def _control_acquire(client_id: str, force: bool = False) -> dict:
-    """Acquire (or refresh) the control lock for this client."""
-    now = time.monotonic()
+    """Acquire control lock for this client."""
     with _control_lock:
-        global _control_owner, _control_expires_mono
-        if _control_owner and now >= _control_expires_mono:
-            _control_owner = None
-            _control_expires_mono = 0.0
+        global _control_owner
         if _control_owner is None or _control_owner == client_id or force:
             prev_owner = _control_owner
             _control_owner = client_id
-            _control_expires_mono = now + CONTROL_LEASE_S
             if prev_owner and prev_owner != client_id:
                 log.warning("Control takeover: %s -> %s", prev_owner, client_id)
             ok = True
@@ -242,14 +240,13 @@ def _control_acquire(client_id: str, force: bool = False) -> dict:
 def _control_release(client_id: str, force: bool = False) -> dict:
     """Release lock if owner (or if forced)."""
     with _control_lock:
-        global _control_owner, _control_expires_mono
+        global _control_owner
         if _control_owner is None:
             ok = True
             reason = None
         elif force or _control_owner == client_id:
             log.info("Control released by %s (owner was %s)", client_id, _control_owner)
             _control_owner = None
-            _control_expires_mono = 0.0
             ok = True
             reason = None
         else:
@@ -259,6 +256,25 @@ def _control_release(client_id: str, force: bool = False) -> dict:
     if ok:
         return {"ok": True, **snap}
     return {"ok": False, "reason": reason, **snap}
+
+
+def _handle_control_owner_disconnect(client_id: str) -> None:
+    """Handle complete TCP loss of an SSE client that owns REMOTE control."""
+    if not CONTROL_LOCK_ENABLED:
+        return
+    with _control_lock:
+        global _control_owner
+        if _control_owner != client_id:
+            return
+        _control_owner = None
+    log.warning("REMOTE owner disconnected (%s): forcing ON observer + ESTOP", client_id)
+    # Broadcast warning to every web remote and return all UI toggles to ON.
+    _update(warn="REMOTE_LINK_LOST", ui_mode="on", mode="IDLE", ap=0)
+    # Safety: force immediate bridge ESTOP so attached buzzers can alert.
+    try:
+        _cmd_q.put_nowait("ESTOP")
+    except queue.Full:
+        log.warning("Could not enqueue ESTOP after REMOTE owner disconnect")
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +893,12 @@ body{
   box-shadow:0 6px 24px rgba(0,0,0,.7);
 }
 .sw-toast.visible{opacity:1;transform:translate(-50%,-50%) scale(1)}
+.sw-toast.occupied{
+  background:rgba(0,70,155,.97);
+}
+.sw-toast.attempted{
+  background:rgba(150,60,0,.97);
+}
 
 /* ── Settings overlay panel ─────────────────────────────────────────── */
 .sov{
@@ -1014,10 +1036,10 @@ body{
       <div class="mode-radio" data-action="remote">
         <span class="mrd-dot"></span><span class="mrd-lbl">REMOTE</span>
       </div>
-      <div class="mode-radio" data-action="on">
+      <div class="mode-radio active" data-action="on">
         <span class="mrd-dot"></span><span class="mrd-lbl">ON</span>
       </div>
-      <div class="mode-radio active" data-action="off">
+      <div class="mode-radio" data-action="off">
         <span class="mrd-dot"></span><span class="mrd-lbl">OFF</span>
       </div>
     </div>
@@ -1042,6 +1064,8 @@ body{
 
 <!-- Settings warning toast -->
 <div class="sw-toast" id="sw-toast">Settings only<br>available in OFF mode</div>
+<div class="sw-toast occupied" id="remote-occupied-toast">REMOTE Control Occupied.</div>
+<div class="sw-toast attempted" id="takeover-attempted-toast">REMOTE Take-Over Attempted!</div>
 
 <!-- Settings overlay -->
 <div class="sov hidden" id="sov">
@@ -1200,7 +1224,7 @@ body{
 var gMode      = 'IDLE';
 var gConnected = false;
 var gApOn      = false;      // true when AP is actually engaged (d.ap === 1)
-var gTogglePos = 'off';      // mode radio position: 'auto' | 'remote' | 'on' | 'off'
+var gTogglePos = 'on';       // mode radio position: 'auto' | 'remote' | 'on' | 'off'
 var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DEG
 var isDragging = false;
 var prevPtrAngle = null;
@@ -1212,14 +1236,63 @@ var gJogTimer     = null;  // setInterval handle for hold-jog repeat
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
 var gSettingsOpen = false; // true while settings panel is visible
+var gRemoteOccupiedTimer = null;
+var gTakeoverAttemptedTimer = null;
+var gLastTakeoverSeq = 0;
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
-  fetch('/command', {
+  return fetch('/command', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({cmd: cmd})
-  }).catch(function() {});
+  }).then(function(resp) {
+    return resp.json().catch(function() { return {}; }).then(function(body) {
+      return {ok: resp.ok, status: resp.status, body: body};
+    });
+  }).catch(function() {
+    return {ok: false, status: 0, body: {}};
+  });
+}
+
+function flashRemoteOccupied() {
+  var t = document.getElementById('remote-occupied-toast');
+  if (!t) return;
+  if (gRemoteOccupiedTimer) {
+    clearInterval(gRemoteOccupiedTimer);
+    gRemoteOccupiedTimer = null;
+  }
+  var count = 0;
+  t.classList.remove('visible');
+  gRemoteOccupiedTimer = setInterval(function() {
+    count += 1;
+    t.classList.toggle('visible');
+    if (count >= 10) {
+      clearInterval(gRemoteOccupiedTimer);
+      gRemoteOccupiedTimer = null;
+      t.classList.remove('visible');
+    }
+  }, 500);
+}
+
+function flashTakeoverAttempted() {
+  var t = document.getElementById('takeover-attempted-toast');
+  if (!t) return;
+  if (gTakeoverAttemptedTimer) {
+    clearInterval(gTakeoverAttemptedTimer);
+    gTakeoverAttemptedTimer = null;
+  }
+  var count = 0;
+  t.classList.remove('visible');
+  gTakeoverAttemptedTimer = setInterval(function() {
+    count += 1;
+    t.classList.toggle('visible');
+    if (count >= 10) {
+      clearInterval(gTakeoverAttemptedTimer);
+      gTakeoverAttemptedTimer = null;
+      t.classList.remove('visible');
+    }
+  }, 500);
 }
 
 // ── SSE subscription ──────────────────────────────────────────────────────
@@ -1233,6 +1306,11 @@ function updateUI(d) {
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
   gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
+  if (d.ui_mode) gTogglePos = d.ui_mode;
+  if (d.takeover_seq && d.takeover_seq !== gLastTakeoverSeq) {
+    gLastTakeoverSeq = d.takeover_seq;
+    flashTakeoverAttempted();
+  }
 
   // Suppress overlay when connected, when mode is OFF (intentional disconnect),
   // or when the toggle has left OFF but the bridge hasn't reconnected yet.
@@ -1460,15 +1538,23 @@ function handleToggleAction(action) {
 
   } else if (action === 'remote') {
     // REMOTE mode: helm wheel lights up, skipper commands the rudder.
-    gTogglePos = 'remote';
-    if (gMode !== 'MANUAL') {
-      sendCmd('MODE MANUAL');
+    if (gMode === 'MANUAL') {
+      gTogglePos = 'remote';
+      return;
+    }
+    sendCmd('MODE MANUAL').then(function(res) {
+      if (res.status === 423) {
+        flashRemoteOccupied();
+        return;
+      }
+      if (!res.ok) return;
+      gTogglePos = 'remote';
       // Initialise commanded position from actual rudder (or midships if unknown)
       gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
       wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
       document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
-    }
+    });
   }
 }
 
@@ -1805,9 +1891,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")  # disable nginx buffering
         self.end_headers()
 
+        client_id = self._client_id()
         client_q: queue.Queue = queue.Queue(maxsize=60)
+        sub = {"id": client_id, "q": client_q}
         with _sse_lock:
-            _sse_subs.append(client_q)
+            _sse_subs.append(sub)
 
         try:
             # Send current state immediately on connect
@@ -1830,9 +1918,10 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             with _sse_lock:
                 try:
-                    _sse_subs.remove(client_q)
+                    _sse_subs.remove(sub)
                 except ValueError:
                     pass
+            _handle_control_owner_disconnect(client_id)
 
     # ---- POST /command ----
 
@@ -1855,9 +1944,15 @@ class _Handler(BaseHTTPRequestHandler):
         if CONTROL_LOCK_ENABLED and not is_estop:
             acq = _control_acquire(client_id)
             if not acq.get("ok", False):
+                owner_id = str(acq.get("owner") or "")
+                if owner_id:
+                    owner_event = _snap()
+                    owner_event["takeover_seq"] = int(time.time() * 1000)
+                    _notify_client(owner_id, owner_event)
                 self._send_json(423, {
                     "ok": False,
                     "error": "control_locked",
+                    "message": "REMOTE Control Occupied.",
                     "control": acq,
                 })
                 return
@@ -1875,7 +1970,7 @@ class _Handler(BaseHTTPRequestHandler):
             _update(
                 connected=False, hdg=None, cmd=None,
                 rdr=None, rdr_pct=None, ap=0,
-                mode="OFF", comms="OK", warn=None,
+                mode="OFF", comms="OK", warn=None, ui_mode="off",
             )
             self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
             return
@@ -1885,6 +1980,7 @@ class _Handler(BaseHTTPRequestHandler):
         # the bridge itself.  Bridge stays in IDLE; web remote observes only.
         if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "ON":
             _bridge_active.set()          # wake bridge thread if idle (was mode OFF)
+            _update(ui_mode="on")
             self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
             return
 
@@ -1895,12 +1991,12 @@ class _Handler(BaseHTTPRequestHandler):
         # Optimistic local state update for instant UI feedback before
         # bridge confirms via telemetry (bridge updates within ~200 ms)
         if tok and tok[0] == "ESTOP":
-            _update(mode="IDLE", ap=0)
+            _update(mode="IDLE", ap=0, ui_mode="on")
         elif len(tok) >= 2 and tok[0] == "MODE":
             if tok[1] == "MANUAL":
-                _update(mode="MANUAL")
+                _update(mode="MANUAL", ui_mode="remote")
             elif tok[1] == "AUTO":
-                _update(mode="IDLE")
+                _update(mode="IDLE", ui_mode="auto")
         elif len(tok) >= 2 and tok[0] == "BTN" and tok[1] == "TOGGLE":
             with _state_lock:
                 cur_ap   = _state["ap"]
