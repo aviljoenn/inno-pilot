@@ -43,7 +43,7 @@ WEB_PORT          = int(os.getenv("INNO_WEB_PORT", "8888"))
 BRIDGE_HOST       = os.getenv("INNO_BRIDGE_HOST", "127.0.0.1")
 BRIDGE_PORT       = int(os.getenv("INNO_BRIDGE_PORT", "8555"))
 PING_PERIOD_S     = 2.0
-RECONNECT_DELAY_S = 5.0
+RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
