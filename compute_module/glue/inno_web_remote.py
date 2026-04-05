@@ -2120,12 +2120,26 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ---- GET /events (SSE) ----
 
+    def _sse_chunk(self, data: bytes) -> None:
+        """Write one HTTP/1.1 chunked-transfer frame and flush.
+
+        HTTP/1.1 streaming responses require either Content-Length or
+        Transfer-Encoding: chunked so the browser knows each frame boundary.
+        Without chunked encoding Chrome buffers the entire SSE stream and
+        onmessage never fires, leaving the 'NO BRIDGE' overlay permanently.
+        """
+        self.wfile.write(f"{len(data):x}\r\n".encode())
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
     def _serve_sse(self) -> None:
         self.send_response(200)
-        self.send_header("Content-Type",    "text/event-stream")
-        self.send_header("Cache-Control",   "no-cache")
-        self.send_header("Connection",      "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")  # disable nginx buffering
+        self.send_header("Content-Type",       "text/event-stream")
+        self.send_header("Cache-Control",      "no-cache")
+        self.send_header("Connection",         "keep-alive")
+        self.send_header("Transfer-Encoding",  "chunked")   # required for HTTP/1.1 streaming
+        self.send_header("X-Accel-Buffering",  "no")        # disable nginx buffering
         self.end_headers()
 
         client_id = self._client_id()
@@ -2137,18 +2151,15 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             # Send current state immediately on connect
             snap = _snap()
-            self.wfile.write(f"data: {json.dumps(snap)}\n\n".encode())
-            self.wfile.flush()
+            self._sse_chunk(f"data: {json.dumps(snap)}\n\n".encode())
 
             while True:
                 try:
                     event = client_q.get(timeout=15)
-                    self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
-                    self.wfile.flush()
+                    self._sse_chunk(f"data: {json.dumps(event)}\n\n".encode())
                 except queue.Empty:
                     # SSE keepalive comment (prevents proxy/browser timeout)
-                    self.wfile.write(b": ka\n\n")
-                    self.wfile.flush()
+                    self._sse_chunk(b": ka\n\n")
 
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
