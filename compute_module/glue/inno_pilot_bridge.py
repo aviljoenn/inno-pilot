@@ -72,7 +72,7 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B29"
+INNOPILOT_VERSION   = "v1.2.0_B30"
 INNOPILOT_BUILD_NUM = 29  # increment with each push during development
 
 # ---------------------------------------------------------------------------
@@ -306,6 +306,7 @@ class BridgeState:
     comms_disengage_sent: bool = False   # latch: prevents repeated disengage on same fault
     rct_target:            int  = 500        # last TGT sent to Nano (pct×10, 0-1000)
     rct_last_rdr_send:   float = 0.0        # monotonic time of last RDR_PCT forward to remote
+    test_mode:            bool = False       # True while a TEST <id> is running (pwm_test.ino)
 
 
 # ===========================================================================
@@ -917,6 +918,30 @@ def process_remote_line(
         send_nano_frame(nano, RCT_TARGET_CODE, target_0_1000)
         log.info("Remote TGT %.1f%% -> RCT_TARGET_CODE %d", pct, target_0_1000)
 
+    elif cmd == "TEST":
+        # TEST <id> — trigger a hardware test by ID (1–8).
+        # Writes a plain-text "TEST <id>\n" to the Nano serial port.
+        # Requires pwm_test.ino to be flashed; motor_simple.ino ignores this command.
+        # The Nano should respond with plain-text "TEST_LINE: <data>\n" and "TEST_DONE\n"
+        # lines; the bridge's text-relay loop (below) forwards these to remote clients.
+        if len(parts) < 2:
+            log.warning("Remote TEST: missing test id, ignored")
+            return
+        test_id = parts[1]
+        try:
+            int(test_id)
+        except ValueError:
+            log.warning("Remote TEST: non-numeric id '%s', ignored", test_id)
+            return
+        bstate.test_mode = True
+        try:
+            nano.write(f"TEST {test_id}\n".encode("ascii"))
+            nano.flush()
+            log.info("Remote TEST %s -> plain-text 'TEST %s' written to Nano serial", test_id, test_id)
+        except Exception as exc:
+            log.warning("Nano TEST write failed: %s", exc)
+            remote_send(remote_sock, f"TEST_LINE ERROR: serial write failed: {exc}")
+
     elif cmd == "SETTINGS":
         sub = parts[1].upper() if len(parts) > 1 else ""
 
@@ -996,8 +1021,9 @@ def main() -> None:
     # Push feature enables to Nano so it knows which sensors/alarms are active.
     send_features_to_nano(nano, _pilot_settings)
 
-    nano_buf  = bytearray()
-    pilot_buf = bytearray()
+    nano_buf       = bytearray()
+    pilot_buf      = bytearray()
+    test_text_buf  = bytearray()   # plain-text lines from Nano when test_mode is True
 
     # ---- bridge state (mode state machine) ----
     bstate = BridgeState()
@@ -1352,6 +1378,33 @@ def main() -> None:
                 elif code == RCT_HZ_CODE:
                     # Ratify loop Hz: forward to remote for display on MODE line
                     remote_send_many(remote_clients, f"HZ {value}")
+
+            # ── Plain-text relay (test mode only) ──────────────────���──────
+            # When bstate.test_mode is True, the Nano is running pwm_test.ino
+            # and outputs plain-text result lines.  Those bytes accumulate in
+            # test_text_buf (which is NOT touched by extract_wrapped_frames).
+            # Relay complete text lines prefixed "TEST_LINE:" to remote clients.
+            if bstate.test_mode:
+                test_text_buf.extend(data_from_nano)
+                if len(test_text_buf) > 4096:          # cap against runaway growth
+                    del test_text_buf[:-2048]
+                while b"\n" in test_text_buf:
+                    nl = test_text_buf.index(b"\n")
+                    raw_line = test_text_buf[:nl]
+                    del test_text_buf[:nl + 1]
+                    text = raw_line.decode("ascii", errors="replace").strip()
+                    if not text:
+                        continue
+                    if text.upper().startswith("TEST_DONE"):
+                        log.info("Nano TEST_DONE")
+                        bstate.test_mode = False
+                        test_text_buf.clear()
+                        if remote_clients:
+                            remote_send_many(remote_clients, "TEST_DONE")
+                    else:
+                        log.debug("Nano TEST_LINE: %s", text)
+                        if remote_clients:
+                            remote_send_many(remote_clients, f"TEST_LINE {text}")
 
         # ================================================================
         # 6. TCP remote: accept new connections / handle existing client

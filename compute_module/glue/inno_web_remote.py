@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 5.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B29"
+INNOPILOT_VERSION = "v1.2.0_B30"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -262,6 +262,20 @@ def _parse_bridge_line(line: str) -> None:
                 _settings_resp_q.put_nowait(data)
             except (json.JSONDecodeError, queue.Full) as exc:
                 log.warning("SETTINGS response parse error: %s", exc)
+
+    elif c == "TEST_LINE":
+        # Bridge relays a plain-text result line from the Nano test firmware.
+        # Broadcast transiently — does NOT persist in _state (avoids replay on reconnect).
+        text = " ".join(parts[1:])
+        snap = _snap()
+        snap["_test_line"] = text
+        _broadcast(snap)
+
+    elif c == "TEST_DONE":
+        # Bridge signals that the Nano test run is complete.
+        snap = _snap()
+        snap["_test_done"] = True
+        _broadcast(snap)
 
     else:
         log.debug("Bridge unknown: %s", line)
@@ -786,7 +800,7 @@ body{
 }
 
 /* ── Gear / settings button ─────────────────────────────────────────── */
-.settings-footer{display:flex;justify-content:flex-start;padding:0 4px 2px}
+.settings-footer{display:flex;justify-content:flex-start;padding:0 4px 2px;gap:8px}
 .gear-btn{
   width:38px;height:38px;border-radius:50%;
   background:#111;border:1.5px solid #333;
@@ -888,6 +902,131 @@ body{
 }
 .sftr-btn.sv {background:linear-gradient(180deg,#0d4020,#061808);color:#00cc50;border:1px solid #0a4020}
 .sftr-btn.cx {background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
+
+/* ── TEST button ────────────────────────────────────────────────���────── */
+.test-btn{
+  width:38px;height:38px;border-radius:50%;
+  background:#111;border:1.5px solid #333;
+  color:#e8a020;font-size:1.0em;font-weight:700;line-height:1;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 3px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.07);
+  transition:transform .1s,background .15s,border-color .15s;
+  touch-action:manipulation;letter-spacing:-.5px;
+}
+.test-btn:active{transform:scale(.88)}
+.test-btn.test-open{
+  background:#1a1200;border-color:#e8a020;color:#f0c040;
+  box-shadow:0 0 8px rgba(232,160,32,.45),0 3px 8px rgba(0,0,0,.4);
+}
+
+/* ── TEST overlay ────────────────────────────────────────────────────── */
+.tov{
+  position:fixed;inset:0;background:rgba(4,6,22,.92);
+  display:flex;align-items:center;justify-content:center;
+  z-index:400;
+  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+}
+.tov.hidden{display:none}
+.tpanel{
+  background:linear-gradient(170deg,#0e1226,#080b18);
+  border:1px solid #2a1a00;border-radius:13px;
+  box-shadow:0 24px 70px rgba(0,0,0,.85),0 0 0 1px rgba(232,160,32,.08);
+  width:318px;max-width:96vw;max-height:88vh;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.thdr{
+  background:linear-gradient(90deg,#1a1000,#201800);
+  border-bottom:1px solid #2a1a00;
+  padding:9px 14px 7px;flex-shrink:0;
+}
+.thdr-title{
+  color:#e8a020;font-size:1.0em;font-weight:700;
+  letter-spacing:3px;text-shadow:0 0 10px rgba(232,160,32,.4);
+  display:block;
+}
+.thdr-hint{
+  color:#504030;font-size:.62em;font-family:'Courier New',monospace;
+  letter-spacing:.5px;margin-top:2px;display:block;
+}
+.tbody{overflow-y:auto;padding:6px 12px 10px;flex:1;overscroll-behavior:contain}
+
+/* Catalogue list */
+.tcat-item{
+  display:flex;align-items:center;gap:8px;
+  padding:7px 6px;border-radius:6px;border:1px solid #1a1200;
+  margin-bottom:4px;cursor:pointer;touch-action:manipulation;
+  transition:background .12s,border-color .12s;
+}
+.tcat-item:active,.tcat-item:hover{background:rgba(232,160,32,.08);border-color:#604010}
+.tcat-num{
+  background:#1a1200;color:#e8a020;font-size:.7em;font-weight:700;
+  font-family:'Courier New',monospace;border-radius:4px;
+  padding:3px 6px;min-width:22px;text-align:center;flex-shrink:0;
+}
+.tcat-name{color:#c0a060;font-size:.76em;line-height:1.35;flex:1}
+.tcat-arrow{color:#504030;font-size:1.0em;flex-shrink:0}
+
+/* Detail view */
+.tdet-view{display:none}
+.tdet-view.active{display:block}
+.tcat-view.hidden{display:none}
+.tdet-name{
+  color:#e8a020;font-size:.88em;font-weight:700;letter-spacing:.5px;
+  margin-bottom:8px;line-height:1.3;
+}
+.tdet-section{
+  color:#6080a0;font-size:.6em;font-weight:700;letter-spacing:2px;
+  margin:8px 0 3px;text-transform:uppercase;
+}
+.tdet-text{color:#90a8b8;font-size:.72em;line-height:1.55;margin-bottom:4px;white-space:pre-wrap}
+.tdet-fw{
+  background:#0d0f1e;border:1px solid #1a1200;border-radius:4px;
+  color:#e8a020;font-family:'Courier New',monospace;font-size:.67em;
+  padding:4px 8px;margin-bottom:6px;white-space:pre-wrap;word-break:break-all;
+}
+.tdet-confirm{
+  display:flex;gap:8px;margin-top:10px;
+}
+.tdet-btn{
+  flex:1;padding:8px 0;border-radius:6px;border:none;
+  font-size:.78em;font-weight:700;cursor:pointer;letter-spacing:1.5px;
+  touch-action:manipulation;
+}
+.tdet-btn.yes{background:linear-gradient(180deg,#0d4020,#061808);color:#00cc50;border:1px solid #0a4020}
+.tdet-btn.no {background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
+
+/* Results view */
+.tres-view{display:none}
+.tres-view.active{display:block}
+.tres-name{color:#e8a020;font-size:.85em;font-weight:700;margin-bottom:6px;line-height:1.3}
+.tres-log{
+  background:#06081a;border-radius:6px;border:1px solid #0a0e24;
+  padding:7px 8px;height:220px;overflow-y:auto;
+  font-family:'Courier New',monospace;font-size:.67em;color:#00cc80;
+  line-height:1.5;white-space:pre-wrap;word-break:break-all;
+}
+.tres-status{
+  color:#e8a020;font-size:.7em;text-align:center;
+  margin-top:5px;font-family:'Courier New',monospace;letter-spacing:1px;
+}
+.tres-b3{
+  display:none;width:100%;margin-top:6px;
+  padding:8px 0;border-radius:6px;border:1px solid #0a4020;
+  background:linear-gradient(180deg,#0d4020,#061808);color:#00cc50;
+  font-size:.78em;font-weight:700;cursor:pointer;letter-spacing:1.5px;
+  touch-action:manipulation;
+}
+.tres-b3.visible{display:block}
+
+/* Shared footer */
+.tftr{border-top:1px solid #1a1200;padding:7px 12px;display:flex;gap:8px;flex-shrink:0}
+.tftr-btn{
+  flex:1;padding:7px 0;border-radius:6px;border:none;
+  font-size:.78em;font-weight:700;cursor:pointer;letter-spacing:1.5px;
+  touch-action:manipulation;
+}
+.tftr-btn.back{background:linear-gradient(180deg,#1a1000,#0d0800);color:#a07020;border:1px solid #2a1800}
+.tftr-btn.close{background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
 </style>
 </head>
 <body>
@@ -971,8 +1110,10 @@ body{
   </div>
 
   <!-- Settings gear button — only active while toggle is in OFF position -->
+  <!-- TEST button — opens hardware test catalogue -->
   <div class="settings-footer">
     <button class="gear-btn" id="gear-btn" title="Settings (OFF mode only)">&#9881;</button>
+    <button class="test-btn" id="test-btn" title="Hardware tests">TEST</button>
   </div>
 
 </div><!-- .remote -->
@@ -1130,6 +1271,51 @@ body{
   </div><!-- .spanel -->
 </div><!-- .sov -->
 
+<!-- TEST overlay -->
+<div class="tov hidden" id="tov">
+  <div class="tpanel">
+    <div class="thdr">
+      <span class="thdr-title" id="tov-title">&#x2697; HARDWARE TESTS</span>
+      <span class="thdr-hint" id="tov-hint">Select a test to view description</span>
+    </div>
+    <div class="tbody" id="tbody">
+
+      <!-- View 1: Test catalogue list (populated by JS) -->
+      <div id="tcat-view"></div>
+
+      <!-- View 2: Test detail + YES/NO confirm -->
+      <div class="tdet-view" id="tdet-view">
+        <div class="tdet-name"    id="tdet-name"></div>
+        <div class="tdet-section">Description</div>
+        <div class="tdet-text"    id="tdet-desc"></div>
+        <div class="tdet-section">Purpose</div>
+        <div class="tdet-text"    id="tdet-purpose"></div>
+        <div class="tdet-section">Expected Output</div>
+        <div class="tdet-text"    id="tdet-output"></div>
+        <div class="tdet-section">Required Firmware</div>
+        <div class="tdet-fw"      id="tdet-fw"></div>
+        <div class="tdet-confirm">
+          <button class="tdet-btn yes" id="tdet-yes">YES &mdash; RUN</button>
+          <button class="tdet-btn no"  id="tdet-no">NO &mdash; BACK</button>
+        </div>
+      </div>
+
+      <!-- View 3: Results / output streaming -->
+      <div class="tres-view" id="tres-view">
+        <div class="tres-name"   id="tres-name"></div>
+        <div class="tres-log"    id="tres-log"></div>
+        <div class="tres-status" id="tres-status">WAITING&hellip;</div>
+        <button class="tres-b3"  id="tres-b3">SEND B3 (TRIGGER)</button>
+      </div>
+
+    </div><!-- .tbody -->
+    <div class="tftr">
+      <button class="tftr-btn back"  id="tov-back"  style="display:none">&#8592; BACK</button>
+      <button class="tftr-btn close" id="tov-close">CLOSE</button>
+    </div>
+  </div><!-- .tpanel -->
+</div><!-- .tov -->
+
 <script>
 'use strict';
 
@@ -1149,6 +1335,9 @@ var gJogTimer     = null;  // setInterval handle for hold-jog repeat
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
 var gSettingsOpen = false; // true while settings panel is visible
+var gTestOpen     = false; // true while test modal is visible
+var gSelectedTest = null;  // id of test currently shown in detail/results view
+var gTestRunning  = false; // true while a test is streaming results
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
@@ -1165,6 +1354,186 @@ function sendCmd(cmd) {
   });
 }
 
+
+// ── Hardware test catalogue ───────────────────────────────────────────────
+var TESTS = [
+  { id: 1,
+    name: 'Binary Search \u2014 Min Starting PWM',
+    desc: 'Bisects the PWM range (0\u2013255) in both STBD and PORT directions to find the lowest duty cycle that actually moves the rudder from standstill.',
+    purpose: 'Establish the motor deadband floor. Below this PWM the hydraulic valve does not crack open. Required before any closed-loop control tuning.',
+    output: 'MIN_STBD and MIN_PORT PWM thresholds with motor current at each threshold.\nExample: MIN_STBD=118  MIN_PORT=122  CURRENT=0.8A',
+    fw: 'pwm_test.ino\n(default compile \u2014 no extra #define)',
+    trigger: 'Automatic on power-up'
+  },
+  { id: 2,
+    name: 'Speed Sweep',
+    desc: 'Drives the rudder at fixed PWM steps (100 \u2192 255, \u223c15 per step) for 600 ms each. Records counts/second and motor current at each step.',
+    purpose: 'Map motor speed as a function of PWM. Used to build the braking-time lookup table and characterise the full actuator range.',
+    output: 'Table with \u223c10 rows: PWM | cps (counts/s) | amps.',
+    fw: 'pwm_test.ino\n(default compile \u2014 no extra #define)',
+    trigger: 'Automatic'
+  },
+  { id: 3,
+    name: 'Coast / Ramp-Down Test',
+    desc: 'For PWM 150, 190, and 255: (A) hard-cuts the motor at a trigger point and measures overshoot; (B) applies a proportional ramp-down and measures the improvement side-by-side.',
+    purpose: 'Quantify overshoot from hard-cut versus speed-proportional ramp braking. Determines whether ramp braking is worth implementing for this vessel.',
+    output: '3 rows: PWM | coast_counts | hard_error | ramp_error.\nSide-by-side comparison for each speed.',
+    fw: 'pwm_test.ino\n(default compile \u2014 no extra #define)',
+    trigger: 'Automatic'
+  },
+  { id: 4,
+    name: 'Comprehensive Characterisation Table',
+    desc: 'For each of 15 PWM levels (120 \u2192 255): measures coast count on hard-cut, minimum pulse width (binary search), speed (cps), and reverse-brake ms needed for dead-stop.',
+    purpose: 'Produce the master reference table. This is the single most important calibration run \u2014 its output feeds all control algorithm parameters.',
+    output: '15-row table: PWM | coast_ms | min_pulse_ms | cps | brake_ms.\nFull hydraulic characterisation for this vessel.',
+    fw: 'pwm_test.ino\n(default compile \u2014 no extra #define)',
+    trigger: 'Automatic'
+  },
+  { id: 5,
+    name: 'Interactive Target Test',
+    desc: 'Drives 450-count runs alternating STBD/PORT (6 total). B3 triggers each run. Two algorithms: ALG 0 = hard-cut baseline; ALG 1 = speed-aware braking (replica of motor_simple B5). Reports overshoot, drive time, speed at brake trigger, brake ms used.',
+    purpose: 'Validate the closed-loop stopping algorithm against a fixed target under realistic conditions. Directly measures real-world overshoot.',
+    output: '6 rows: dir | target | actual | overshoot | drive_ms | brake_ms | speed@trigger.',
+    fw: 'pwm_test.ino\n#define RUN_INTERACTIVE_TEST',
+    trigger: 'B3 button to start each run'
+  },
+  { id: 6,
+    name: 'Burst Sweep Test',
+    desc: '24 burst durations (10\u2013600 ms) \xd7 2 directions = 48 fully automatic runs after one B3 press. PWM=255, hard-cut. Records ADC start/final and net counts per burst.',
+    purpose: 'Map the hydraulic cracking threshold \u2014 below what pulse duration does the rudder not move? Reveals burst duration vs. displacement relationship.',
+    output: '48 rows: dir | duration_ms | start_adc | final_adc | net_counts.\nIdentifies minimum effective pulse width.',
+    fw: 'pwm_test.ino\n#define RUN_BURST_SWEEP_TEST',
+    trigger: 'B3 once to start \u2014 then fully automatic'
+  },
+  { id: 7,
+    name: 'Fine Burst Test',
+    desc: 'Steps 15\u201325 ms in 1 ms increments, 10 reps per step, both directions. PWM=255, hard-cut. Characterises fine-pulse resolution at the low end of burst duration.',
+    purpose: 'Find the minimum repeatable pulse that moves the rudder by at least 1 ADC count. Critical for precision micro-corrections in closed-loop control.',
+    output: '220 rows (10 reps \xd7 11 steps \xd7 2 dirs): dir | duration_ms | counts_moved.\nStatistical view of fine-pulse repeatability.',
+    fw: 'pwm_test.ino\n#define RUN_FINE_BURST_TEST',
+    trigger: 'B3 once to start \u2014 then fully automatic'
+  },
+  { id: 8,
+    name: 'Remote Control Test (RCT)',
+    desc: 'Bridge-integrated positioning trial with 3 sub-modes: ADJUST (B2/B4 scroll settings, B1/B5 change value, B3 save); TEST (bridge sends TGT <pct>, Nano chases target using 7 RCT settings); RATIFY (real-time remote steering). Settings persist to EEPROM.',
+    purpose: 'End-to-end validation of the full closed-loop positioning system from web remote through bridge to Nano, including EEPROM-persisted tuning parameters.',
+    output: 'Real-time telemetry: TGT | RDR_PCT | overshoot | PWM.\nEEPROM parameter dump on ADJUST save.\nB3 cycles: ADJUST \u2192 TEST \u2192 RATIFY.',
+    fw: 'pwm_test.ino\n#define RUN_REMOTE_CONTROL_TEST\n(bridge-integrated \u2014 full TCP protocol)',
+    trigger: 'B3 cycles modes; B1/B2/B4/B5 adjust parameters'
+  }
+];
+
+// ── Test modal functions ──────────────────────────────────────────────────
+
+function openTestMenu() {
+  gTestOpen = true;
+  document.getElementById('test-btn').classList.add('test-open');
+  document.getElementById('tov').classList.remove('hidden');
+  showTestCatalogue();
+}
+
+function closeTestMenu() {
+  gTestOpen     = false;
+  gTestRunning  = false;
+  gSelectedTest = null;
+  document.getElementById('test-btn').classList.remove('test-open');
+  document.getElementById('tov').classList.add('hidden');
+}
+
+function showTestCatalogue() {
+  document.getElementById('tov-title').textContent = '\u2697 HARDWARE TESTS';
+  document.getElementById('tov-hint').textContent  = 'Select a test to view description';
+  // Populate catalogue list on first call (idempotent)
+  var catView = document.getElementById('tcat-view');
+  catView.innerHTML = '';
+  TESTS.forEach(function(t) {
+    var item = document.createElement('div');
+    item.className = 'tcat-item';
+    item.innerHTML =
+      '<span class="tcat-num">' + t.id + '</span>' +
+      '<span class="tcat-name">' + t.name + '</span>' +
+      '<span class="tcat-arrow">\u203a</span>';
+    item.addEventListener('click', function() { selectTest(t.id); });
+    item.addEventListener('touchstart', function(e) {
+      e.preventDefault(); selectTest(t.id);
+    }, {passive: false});
+    catView.appendChild(item);
+  });
+  catView.classList.remove('hidden');
+  document.getElementById('tdet-view').classList.remove('active');
+  document.getElementById('tres-view').classList.remove('active');
+  document.getElementById('tov-back').style.display = 'none';
+}
+
+function selectTest(id) {
+  var t = TESTS.find(function(x) { return x.id === id; });
+  if (!t) return;
+  gSelectedTest = id;
+  document.getElementById('tdet-name').textContent    = t.id + '.  ' + t.name;
+  document.getElementById('tdet-desc').textContent    = t.desc;
+  document.getElementById('tdet-purpose').textContent = t.purpose;
+  document.getElementById('tdet-output').textContent  = t.output;
+  document.getElementById('tdet-fw').textContent      = t.fw;
+  document.getElementById('tov-title').textContent    = 'TEST ' + t.id;
+  document.getElementById('tov-hint').textContent     = 'Trigger: ' + t.trigger;
+  document.getElementById('tcat-view').classList.add('hidden');
+  document.getElementById('tdet-view').classList.add('active');
+  document.getElementById('tres-view').classList.remove('active');
+  document.getElementById('tov-back').style.display = '';
+}
+
+function runTest(id) {
+  var t = TESTS.find(function(x) { return x.id === id; });
+  if (!t) return;
+  gTestRunning = true;
+  document.getElementById('tres-name').textContent   = t.id + '.  ' + t.name;
+  document.getElementById('tres-log').textContent    = '';
+  document.getElementById('tres-status').textContent = 'Sending TEST ' + id + ' to Nano\u2026';
+  // Show B3 button for tests that require it
+  var needsB3 = (id >= 5);
+  document.getElementById('tres-b3').classList.toggle('visible', needsB3);
+  document.getElementById('tdet-view').classList.remove('active');
+  document.getElementById('tres-view').classList.add('active');
+  document.getElementById('tov-back').style.display = 'none';
+  // Forward TEST command through bridge to Nano
+  sendCmd('TEST ' + id);
+}
+
+function appendTestLine(line) {
+  if (!gTestOpen) return;
+  var log = document.getElementById('tres-log');
+  if (!log) return;
+  log.textContent += line + '\n';
+  log.scrollTop = log.scrollHeight;
+  document.getElementById('tres-status').textContent = 'RUNNING\u2026';
+}
+
+function testDone() {
+  gTestRunning = false;
+  var status = document.getElementById('tres-status');
+  if (status) status.textContent = 'TEST COMPLETE';
+  document.getElementById('tres-b3').classList.remove('visible');
+  document.getElementById('tov-back').style.display = '';
+}
+
+// Test button and modal event wiring
+document.getElementById('test-btn').addEventListener('click', openTestMenu);
+document.getElementById('test-btn').addEventListener('touchstart', function(e) {
+  e.preventDefault(); openTestMenu();
+}, {passive: false});
+document.getElementById('tov-close').addEventListener('click', closeTestMenu);
+document.getElementById('tov-back').addEventListener('click', function() {
+  // Back always returns to catalogue (from detail or results)
+  showTestCatalogue();
+});
+document.getElementById('tdet-yes').addEventListener('click', function() {
+  if (gSelectedTest) runTest(gSelectedTest);
+});
+document.getElementById('tdet-no').addEventListener('click', showTestCatalogue);
+document.getElementById('tres-b3').addEventListener('click', function() {
+  // Send B3 (BTN TOGGLE) — trigger for tests 5, 6, 7
+  sendCmd('BTN TOGGLE');
+});
 
 // ── SSE subscription ──────────────────────────────────────────────────────
 var es = new EventSource('/events');
@@ -1247,6 +1616,10 @@ function updateUI(d) {
     document.getElementById('wheel-pct').textContent =
       d.rdr_pct != null ? d.rdr_pct.toFixed(0) : '--';
   }
+
+  // Test result streaming — bridge relays TEST_LINE / TEST_DONE from Nano
+  if (d._test_line) appendTestLine(d._test_line);
+  if (d._test_done) testDone();
 }
 
 function setConnected(ok) {
