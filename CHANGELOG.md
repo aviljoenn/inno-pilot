@@ -6,6 +6,20 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B29] — 2026-04-05 — Feat: 4-mode animated radio button selector (OFF / ON / REMOTE / AUTO)
+
+### Changed
+- **Web Remote**: Replaced 3-position vertical lever toggle (OFF / AUTO / MANUAL) with a
+  4-position animated radio button group (AUTO / REMOTE / ON / OFF, top-to-bottom).
+  Each option has an animated round radio dot with a label beside it.
+- **Web Remote**: Mode semantics redefined:
+  - **OFF** — OLED content area blanked, TCP connection to bridge dropped (port freed for ESP32 handheld)
+  - **ON** — observer mode; connects to bridge, shows all telemetry, helm wheel follows rudder position sensor (dark/inactive appearance), no control
+  - **REMOTE** — skipper steers; helm wheel lights up, wheel reflects commanded rudder position, boat driven by web remote (was "MANUAL")
+  - **AUTO** — Pypilot heading hold; helm wheel dark but follows actual rudder movements, all metrics displayed
+- **Web Remote**: `MODE ON` command handled server-side (wakes bridge thread without forwarding a control command)
+- **Web Remote**: Wheel label updated to "drag wheel in REMOTE mode"
+
 ## [v1.2.0_B28] — 2026-04-05 — Fix: On-Board Buttons setting not rendering or responding in web UI
 
 ### Fixed

@@ -40,7 +40,7 @@ BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B28"
+INNOPILOT_VERSION = "v1.2.0_B29"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -685,63 +685,35 @@ body{
              inset 0 2px 4px rgba(255,255,255,0.18);
 }
 
-/* ── 3-position toggle switch ── */
-.toggle-assembly{display:flex;align-items:center;gap:14px;flex-direction:row-reverse}
-.toggle-track{
-  width:38px;
-  height:126px;
-  background:linear-gradient(to bottom,#b8b8b8,#888888);
-  border-radius:19px;
-  border:2px solid #686868;
-  position:relative;
-  box-shadow:inset 0 2px 5px rgba(0,0,0,0.45),0 2px 4px rgba(0,0,0,0.2);
-  cursor:pointer;
-  flex-shrink:0;
+/* ── 4-position mode radio selector ── */
+.mode-radio-group{display:flex;flex-direction:column;gap:12px;justify-content:center}
+.mode-radio{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;-webkit-user-select:none}
+.mrd-dot{
+  width:22px;height:22px;border-radius:50%;
+  border:2px solid #888;background:#ccc;
+  position:relative;flex-shrink:0;
+  transition:border-color .18s,background .18s;
 }
-/* Detent marks */
-.toggle-track::before,.toggle-track::after{
-  content:'';
-  position:absolute;
-  left:5px;
-  right:5px;
-  height:2px;
-  background:rgba(0,0,0,0.25);
+.mrd-dot::after{
+  content:'';position:absolute;inset:4px;border-radius:50%;
+  background:#007aff;transform:scale(0);
+  transition:transform .22s cubic-bezier(.34,1.56,.64,1);
 }
-.toggle-track::before{top:43px}
-.toggle-track::after{top:87px}
-
-.toggle-lever{
-  position:absolute;
-  width:34px;
-  height:34px;
-  border-radius:50%;
-  background:radial-gradient(circle at 38% 32%,#eeeeee 0%,#bbbbbb 60%,#999999 100%);
-  left:-1px;
-  box-shadow:0 2px 6px rgba(0,0,0,0.55);
-  transition:top .22s cubic-bezier(.34,1.56,.64,1);
-  top:46px; /* default: OFF */
+.mode-radio.active .mrd-dot{border-color:#007aff;background:#d8eaff}
+.mode-radio.active .mrd-dot::after{transform:scale(1)}
+.mrd-lbl{
+  font-size:0.7em;font-weight:600;color:#999;
+  letter-spacing:0.5px;line-height:1.1;
+  transition:color .15s,font-weight .15s;
 }
-.toggle-lever.pos-auto  {top:4px}
-.toggle-lever.pos-off   {top:46px}
-.toggle-lever.pos-manual{top:88px}
-
-.toggle-labels{
-  display:flex;
-  flex-direction:column;
-  justify-content:space-between;
-  height:126px;
-}
-.tgl-lbl{
-  font-size:0.7em;
-  font-weight:600;
-  color:#999;
-  cursor:pointer;
-  letter-spacing:0.5px;
-  line-height:1.1;
-  transition:color .15s;
-}
-.tgl-lbl:hover{color:#444}
-.tgl-lbl.active{color:#111;font-weight:800}
+.mode-radio.active .mrd-lbl{color:#111;font-weight:800}
+.mode-radio:hover .mrd-lbl{color:#444}
+/* OFF mode: blank the OLED content area */
+.oled.blank-mode .oled-title,
+.oled.blank-mode .rdr-bar,
+.oled.blank-mode .oled-mode,
+.oled.blank-mode .oled-data,
+.oled.blank-mode .oled-status{visibility:hidden}
 
 /* ── Ship's wheel ── */
 .wheel-section{
@@ -955,14 +927,18 @@ body{
       <button class="stop-btn" id="stop-btn">STOP</button>
     </div>
 
-    <div class="toggle-assembly">
-      <div class="toggle-track" id="toggle-track">
-        <div class="toggle-lever pos-off" id="toggle-lever"></div>
+    <div class="mode-radio-group" id="mode-radio-group">
+      <div class="mode-radio" data-action="auto">
+        <span class="mrd-dot"></span><span class="mrd-lbl">AUTO</span>
       </div>
-      <div class="toggle-labels">
-        <span class="tgl-lbl"        id="lbl-auto"   data-action="auto">AUTO</span>
-        <span class="tgl-lbl active" id="lbl-off"    data-action="off">OFF</span>
-        <span class="tgl-lbl"        id="lbl-manual" data-action="manual">MANUAL</span>
+      <div class="mode-radio" data-action="remote">
+        <span class="mrd-dot"></span><span class="mrd-lbl">REMOTE</span>
+      </div>
+      <div class="mode-radio" data-action="on">
+        <span class="mrd-dot"></span><span class="mrd-lbl">ON</span>
+      </div>
+      <div class="mode-radio active" data-action="off">
+        <span class="mrd-dot"></span><span class="mrd-lbl">OFF</span>
       </div>
     </div>
   </div>
@@ -974,7 +950,7 @@ body{
         $$WHEEL_SVG$$
       </svg>
     </div>
-    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in MANUAL mode</div>
+    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in REMOTE mode</div>
   </div>
 
   <!-- Settings gear button — only active while toggle is in OFF position -->
@@ -1144,7 +1120,7 @@ body{
 var gMode      = 'IDLE';
 var gConnected = false;
 var gApOn      = false;      // true when AP is actually engaged (d.ap === 1)
-var gTogglePos = 'off';      // physical toggle position: 'auto' | 'off' | 'manual'
+var gTogglePos = 'off';      // mode radio position: 'auto' | 'remote' | 'on' | 'off'
 var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DEG
 var isDragging = false;
 var prevPtrAngle = null;
@@ -1225,8 +1201,10 @@ function updateUI(d) {
     connEl.className = 'crit';
   }
 
-  // 3-position toggle — driven by physical position, not bridge mode
+  // Mode radio selector — driven by physical position, not bridge mode
   setToggle(gTogglePos);
+  // Blank the OLED content panel when in OFF mode
+  document.querySelector('.oled').classList.toggle('blank-mode', gTogglePos === 'off');
 
   // Wheel active state + position sync
   var ww = document.getElementById('wheel-wrap');
@@ -1251,28 +1229,12 @@ function setConnected(ok) {
 }
 
 function setToggle(m) {
-  var lever  = document.getElementById('toggle-lever');
-  var lblA   = document.getElementById('lbl-auto');
-  var lblO   = document.getElementById('lbl-off');
-  var lblM   = document.getElementById('lbl-manual');
+  // Sync animated radio button active state
+  document.querySelectorAll('.mode-radio').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.action === m);
+  });
 
-  lever.className = 'toggle-lever';
-  lblA.classList.remove('active');
-  lblO.classList.remove('active');
-  lblM.classList.remove('active');
-
-  if (m === 'auto') {
-    lever.classList.add('pos-auto');
-    lblA.classList.add('active');
-  } else if (m === 'manual') {
-    lever.classList.add('pos-manual');
-    lblM.classList.add('active');
-  } else {
-    lever.classList.add('pos-off');
-    lblO.classList.add('active');
-  }
-
-  // Physical button labels — always shown when toggle is in AUTO or MANUAL position
+  // Physical button labels — shown in AUTO and REMOTE modes only
   var btns = [
     document.querySelector('.hw-btn.b1'),
     document.querySelector('.hw-btn.b2'),
@@ -1286,13 +1248,14 @@ function setToggle(m) {
     btns[2].textContent = 'Go';
     btns[3].textContent = '+1';
     btns[4].textContent = '+10';
-  } else if (m === 'manual') {
+  } else if (m === 'remote') {
     btns[0].innerHTML = '&laquo;';
     btns[1].innerHTML = '&lsaquo;';
     btns[2].innerHTML = '|';
     btns[3].innerHTML = '&rsaquo;';
     btns[4].innerHTML = '&raquo;';
   } else {
+    // OFF and ON: no button labels
     btns.forEach(function(b) { b.textContent = ''; });
   }
 }
@@ -1384,21 +1347,12 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
   e.preventDefault(); sendCmd('ESTOP');
 }, {passive: false});
 
-// Toggle label clicks
-document.querySelectorAll('.tgl-lbl').forEach(function(el) {
+// Mode radio button clicks
+document.querySelectorAll('.mode-radio').forEach(function(el) {
   el.addEventListener('click', function() { handleToggleAction(el.dataset.action); });
   el.addEventListener('touchstart', function(e) {
     e.preventDefault(); handleToggleAction(el.dataset.action);
   }, {passive: false});
-});
-
-// Toggle track click — position in track determines action
-document.getElementById('toggle-track').addEventListener('click', function(e) {
-  var rect = e.currentTarget.getBoundingClientRect();
-  var frac = (e.clientY - rect.top) / rect.height;
-  if      (frac < 0.33) handleToggleAction('auto');
-  else if (frac > 0.67) handleToggleAction('manual');
-  else                   handleToggleAction('off');
 });
 
 function handleToggleAction(action) {
@@ -1408,15 +1362,25 @@ function handleToggleAction(action) {
     if (gMode !== 'AP') sendCmd('MODE AUTO');
 
   } else if (action === 'off') {
-    if (gApOn)               sendCmd('BTN TOGGLE');  // disengage AP before disconnect
-    if (gTogglePos === 'manual') sendCmd('MODE AUTO');   // exit manual before disconnect
+    if (gApOn)                    sendCmd('BTN TOGGLE');  // disengage AP before disconnect
+    if (gTogglePos === 'remote')  sendCmd('MODE AUTO');   // exit REMOTE before disconnect
     gTogglePos = 'off';
     // Delay gives the preceding command time to reach the bridge before the TCP
     // connection is dropped by MODE OFF (bridge loop polls every ~100 ms).
     setTimeout(function() { sendCmd('MODE OFF'); }, 300);
 
-  } else if (action === 'manual') {
-    gTogglePos = 'manual';
+  } else if (action === 'on') {
+    // Observer mode: connect (or reconnect), show telemetry, no steering control.
+    if (gApOn)                    sendCmd('BTN TOGGLE');  // disengage AP
+    if (gTogglePos === 'remote')  sendCmd('MODE AUTO');   // exit REMOTE steering → IDLE
+    gTogglePos = 'on';
+    // Send MODE ON to wake the bridge thread if it was idle due to mode OFF;
+    // the server handles it locally without forwarding a control command.
+    sendCmd('MODE ON');
+
+  } else if (action === 'remote') {
+    // REMOTE mode: helm wheel lights up, skipper commands the rudder.
+    gTogglePos = 'remote';
     if (gMode !== 'MANUAL') {
       sendCmd('MODE MANUAL');
       // Initialise commanded position from actual rudder (or midships if unknown)
@@ -1795,6 +1759,17 @@ class _Handler(BaseHTTPRequestHandler):
                 rdr=None, rdr_pct=None, ap=0,
                 mode="OFF", comms="OK", warn=None,
             )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+
+        # ── MODE ON: observer mode — reconnect without taking control ─────────
+        # Re-enables the bridge thread without forwarding any mode command to
+        # the bridge itself.  Bridge stays in IDLE; web remote observes only.
+        if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "ON":
+            _bridge_active.set()          # wake bridge thread if idle (was mode OFF)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
