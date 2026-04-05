@@ -6,6 +6,15 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B28] — 2026-04-05 — Fix: On-Board Buttons setting not rendering or responding in web UI
+
+### Fixed
+- **Web Remote**: `on_board_buttons` was missing from the `SF` field descriptor array —
+  the UI rendered the row but had no JS registration for it, so the ON/OFF buttons showed
+  no active state on open and click events were silently ignored. Added
+  `{id:'on_board_buttons', sec:'features', type:'bool'}` to `SF` alongside the other
+  feature flags.
+
 ## [v1.2.0_B27] — 2026-04-05 — Fix: motor activates in HAND mode on units without buttons
 
 ### Fixed
