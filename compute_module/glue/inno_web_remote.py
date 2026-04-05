@@ -11,6 +11,13 @@ No external dependencies — stdlib only.
 Usage:
     python3 /usr/local/bin/inno_web_remote.py
     Open http://192.168.6.13:8888/ in a browser on the boat LAN.
+
+Environment overrides:
+    INNO_WEB_PORT     HTTP/SSE listen port (default: 8888)
+    INNO_BRIDGE_HOST  Bridge host (default: 127.0.0.1)
+    INNO_BRIDGE_PORT  Bridge TCP port (default: 8555)
+    INNO_CONTROL_LOCK Enable single-controller lock (default: 1)
+    INNO_CONTROL_LEASE_S Control lock lease seconds (default: 10)
 """
 
 import json
@@ -34,11 +41,15 @@ log = logging.getLogger("web-remote")
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-WEB_PORT          = 8888           # HTTP / SSE port for browser clients
-BRIDGE_HOST       = "127.0.0.1"
-BRIDGE_PORT       = 8555           # inno-pilot-bridge TCP remote port
+WEB_PORT          = int(os.getenv("INNO_WEB_PORT", "8888"))
+# NOTE: bridge currently supports a single active remote TCP client at a time.
+BRIDGE_HOST       = os.getenv("INNO_BRIDGE_HOST", "127.0.0.1")
+BRIDGE_PORT       = int(os.getenv("INNO_BRIDGE_PORT", "8555"))
 PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
+# Multi-browser command arbitration (control token/lease lock)
+CONTROL_LOCK_ENABLED = os.getenv("INNO_CONTROL_LOCK", "1").strip() not in ("0", "false", "False")
+CONTROL_LEASE_S      = float(os.getenv("INNO_CONTROL_LEASE_S", "10"))
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
 INNOPILOT_VERSION = "v1.2.0_B29"
 
@@ -154,6 +165,11 @@ SETTINGS_TIMEOUT_S = 4.0
 _bridge_active = threading.Event()
 _bridge_active.set()
 
+# Control-token state (single controller + lease timeout).
+_control_lock = threading.Lock()
+_control_owner: Optional[str] = None
+_control_expires_mono: float = 0.0
+
 
 def _snap() -> dict:
     with _state_lock:
@@ -179,6 +195,70 @@ def _broadcast(snap: dict) -> None:
         for q in dead:
             _sse_subs.remove(q)
             log.debug("SSE: dropped slow client")
+
+
+def _control_snapshot(client_id: Optional[str] = None) -> dict:
+    """Return current control-token status."""
+    now = time.monotonic()
+    with _control_lock:
+        global _control_owner, _control_expires_mono
+        if _control_owner and now >= _control_expires_mono:
+            log.info("Control lease expired for %s", _control_owner)
+            _control_owner = None
+            _control_expires_mono = 0.0
+        owner = _control_owner
+        expires_in = max(0.0, _control_expires_mono - now) if owner else 0.0
+    return {
+        "enabled": CONTROL_LOCK_ENABLED,
+        "owner": owner,
+        "is_owner": bool(owner and client_id and owner == client_id),
+        "expires_in_s": round(expires_in, 2),
+    }
+
+
+def _control_acquire(client_id: str, force: bool = False) -> dict:
+    """Acquire (or refresh) the control lock for this client."""
+    now = time.monotonic()
+    with _control_lock:
+        global _control_owner, _control_expires_mono
+        if _control_owner and now >= _control_expires_mono:
+            _control_owner = None
+            _control_expires_mono = 0.0
+        if _control_owner is None or _control_owner == client_id or force:
+            prev_owner = _control_owner
+            _control_owner = client_id
+            _control_expires_mono = now + CONTROL_LEASE_S
+            if prev_owner and prev_owner != client_id:
+                log.warning("Control takeover: %s -> %s", prev_owner, client_id)
+            ok = True
+        else:
+            ok = False
+    snap = _control_snapshot(client_id)
+    if ok:
+        return {"ok": True, **snap}
+    return {"ok": False, "reason": "owned", **snap}
+
+
+def _control_release(client_id: str, force: bool = False) -> dict:
+    """Release lock if owner (or if forced)."""
+    with _control_lock:
+        global _control_owner, _control_expires_mono
+        if _control_owner is None:
+            ok = True
+            reason = None
+        elif force or _control_owner == client_id:
+            log.info("Control released by %s (owner was %s)", client_id, _control_owner)
+            _control_owner = None
+            _control_expires_mono = 0.0
+            ok = True
+            reason = None
+        else:
+            ok = False
+            reason = "not_owner"
+    snap = _control_snapshot(client_id)
+    if ok:
+        return {"ok": True, **snap}
+    return {"ok": False, "reason": reason, **snap}
 
 
 # ---------------------------------------------------------------------------
@@ -1667,6 +1747,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_sse()
         elif self.path == "/health":
             self._serve_health()
+        elif self.path == "/control":
+            self._serve_control()
         elif self.path == "/settings":
             self._serve_settings()
         else:
@@ -1675,10 +1757,32 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/command":
             self._handle_command()
+        elif self.path == "/control/acquire":
+            self._handle_control_acquire()
+        elif self.path == "/control/release":
+            self._handle_control_release()
+        elif self.path == "/control/heartbeat":
+            self._handle_control_heartbeat()
         elif self.path == "/settings":
             self._handle_settings_post()
         else:
             self.send_error(404)
+
+    def _client_id(self) -> str:
+        # Prefer first x-forwarded-for entry when behind a proxy.
+        xff = self.headers.get("X-Forwarded-For", "").strip()
+        if xff:
+            return xff.split(",")[0].strip()
+        return self.client_address[0]
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
 
     # ---- GET / ----
 
@@ -1743,6 +1847,20 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         tok = cmd_str.upper().split()
+        client_id = self._client_id()
+        is_estop = bool(tok and tok[0] == "ESTOP")
+
+        # ESTOP is intentionally always allowed (safety critical), even if
+        # another browser currently holds the control token.
+        if CONTROL_LOCK_ENABLED and not is_estop:
+            acq = _control_acquire(client_id)
+            if not acq.get("ok", False):
+                self._send_json(423, {
+                    "ok": False,
+                    "error": "control_locked",
+                    "control": acq,
+                })
+                return
 
         # ── MODE OFF: intentional TCP disconnect ──────────────────────────────
         # Handled entirely locally — do not forward to bridge.
@@ -1759,10 +1877,7 @@ class _Handler(BaseHTTPRequestHandler):
                 rdr=None, rdr_pct=None, ap=0,
                 mode="OFF", comms="OK", warn=None,
             )
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
+            self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
             return
 
         # ── MODE ON: observer mode — reconnect without taking control ─────────
@@ -1770,10 +1885,7 @@ class _Handler(BaseHTTPRequestHandler):
         # the bridge itself.  Bridge stays in IDLE; web remote observes only.
         if len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "ON":
             _bridge_active.set()          # wake bridge thread if idle (was mode OFF)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
+            self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
             return
 
         # ── Any active command: ensure bridge is (re)connected ────────────────
@@ -1805,10 +1917,39 @@ class _Handler(BaseHTTPRequestHandler):
         except queue.Full:
             log.warning("Command queue full, dropping: %s", cmd_str)
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        self._send_json(200, {"ok": True, "control": _control_snapshot(client_id)})
+
+    # ---- GET /control ----
+
+    def _serve_control(self) -> None:
+        self._send_json(200, _control_snapshot(self._client_id()))
+
+    # ---- POST /control/acquire ----
+
+    def _handle_control_acquire(self) -> None:
+        if not CONTROL_LOCK_ENABLED:
+            self._send_json(200, {"ok": True, "enabled": False})
+            return
+        result = _control_acquire(self._client_id())
+        self._send_json(200 if result.get("ok") else 423, result)
+
+    # ---- POST /control/release ----
+
+    def _handle_control_release(self) -> None:
+        if not CONTROL_LOCK_ENABLED:
+            self._send_json(200, {"ok": True, "enabled": False})
+            return
+        result = _control_release(self._client_id())
+        self._send_json(200 if result.get("ok") else 403, result)
+
+    # ---- POST /control/heartbeat ----
+
+    def _handle_control_heartbeat(self) -> None:
+        if not CONTROL_LOCK_ENABLED:
+            self._send_json(200, {"ok": True, "enabled": False})
+            return
+        result = _control_acquire(self._client_id())
+        self._send_json(200 if result.get("ok") else 423, result)
 
     # ---- GET /health ----
 
@@ -1818,6 +1959,7 @@ class _Handler(BaseHTTPRequestHandler):
             "status":           "ok",
             "bridge_connected": snap["connected"],
             "mode":             snap["mode"],
+            "control":          _control_snapshot(self._client_id()),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type",   "application/json")
