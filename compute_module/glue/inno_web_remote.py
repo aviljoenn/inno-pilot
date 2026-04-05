@@ -140,7 +140,7 @@ _state: dict = {
     "warn":       None,
     "bridge_ver": None,
     "version":    INNOPILOT_VERSION,
-    "ui_mode":    "off",    # web remote selector state: auto | remote | on | off
+    "ui_mode":    "on",     # web remote selector state: auto | remote | on | off
 }
 _state_lock = threading.Lock()
 
@@ -158,9 +158,10 @@ _settings_resp_q: "queue.Queue[Optional[dict]]" = queue.Queue(maxsize=4)
 SETTINGS_TIMEOUT_S = 4.0
 
 # When cleared, the bridge thread drops the TCP connection and stops reconnecting.
-# Starts cleared (OFF is the default startup mode); set when any active mode is selected.
+# When cleared, the bridge thread drops the TCP connection and stops reconnecting.
+# Set by default (ON is the startup mode); cleared only when the user selects OFF.
 _bridge_active = threading.Event()
-# Do NOT call _bridge_active.set() here — default startup mode is OFF.
+_bridge_active.set()
 
 
 def _snap() -> dict:
@@ -1324,7 +1325,7 @@ body{
 var gMode      = 'IDLE';
 var gConnected = false;
 var gApOn      = false;      // true when AP is actually engaged (d.ap === 1)
-var gTogglePos = 'off';      // mode radio position: 'auto' | 'remote' | 'on' | 'off'
+var gTogglePos = 'on';       // mode radio position: 'auto' | 'remote' | 'on' | 'off'
 var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DEG
 var isDragging = false;
 var prevPtrAngle = null;
