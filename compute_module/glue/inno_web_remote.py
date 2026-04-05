@@ -17,6 +17,7 @@ Environment overrides:
     INNO_BRIDGE_HOST  Bridge host (default: 127.0.0.1)
     INNO_BRIDGE_PORT  Bridge TCP port (default: 8555)
     INNO_CONTROL_LOCK Enable single-controller lock (default: 1)
+    INNO_WEB_MASTER   Allow this instance to send steering/mode commands (default: 1)
 """
 
 import json
@@ -48,6 +49,7 @@ PING_PERIOD_S     = 2.0
 RECONNECT_DELAY_S = 5.0
 # Multi-browser command arbitration (single REMOTE owner lock)
 CONTROL_LOCK_ENABLED = os.getenv("INNO_CONTROL_LOCK", "1").strip() not in ("0", "false", "False")
+INSTANCE_IS_MASTER = os.getenv("INNO_WEB_MASTER", "1").strip() not in ("0", "false", "False")
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
 INNOPILOT_VERSION = "v1.2.0_B29"
 
@@ -143,6 +145,7 @@ _state: dict = {
     "bridge_ver": None,
     "version":    INNOPILOT_VERSION,
     "ui_mode":    "on",     # web remote selector state: auto | remote | on | off
+    "is_master":  INSTANCE_IS_MASTER,
 }
 _state_lock = threading.Lock()
 
@@ -256,6 +259,17 @@ def _control_release(client_id: str, force: bool = False) -> dict:
     if ok:
         return {"ok": True, **snap}
     return {"ok": False, "reason": reason, **snap}
+
+
+def _requires_master(tok: list[str]) -> bool:
+    """Return True when command mutates steering/mode state."""
+    if not tok:
+        return False
+    if tok[0] in ("MODE", "BTN", "RUD"):
+        return True
+    if len(tok) >= 2 and tok[0] == "SETTINGS" and tok[1] == "SET":
+        return True
+    return False
 
 
 def _handle_control_owner_disconnect(client_id: str) -> None:
@@ -1253,9 +1267,19 @@ var gSettingsOpen = false; // true while settings panel is visible
 var gRemoteOccupiedTimer = null;
 var gTakeoverAttemptedTimer = null;
 var gLastTakeoverSeq = 0;
+var gIsMaster = true;
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
+  var parts = String(cmd || '').trim().toUpperCase().split(/\\s+/);
+  var isMutating = parts.length && (parts[0] === 'MODE' || parts[0] === 'BTN' || parts[0] === 'RUD');
+  if (!gIsMaster && isMutating) {
+    return Promise.resolve({
+      ok: false,
+      status: 403,
+      body: {ok: false, error: 'read_only_instance'}
+    });
+  }
   return fetch('/command', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1316,6 +1340,7 @@ es.onerror   = function()  { setConnected(false); };
 
 // ── UI updater ────────────────────────────────────────────────────────────
 function updateUI(d) {
+  if (typeof d.is_master === 'boolean') gIsMaster = d.is_master;
   gConnected = !!d.connected;
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
@@ -1528,6 +1553,8 @@ document.querySelectorAll('.mode-radio').forEach(function(el) {
 });
 
 function handleToggleAction(action) {
+  if (!gIsMaster) return;
+
   if (action === 'auto') {
     // Enter AUTO-ready state; AP starts OFF.  User presses Go to engage/disengage AP.
     gTogglePos = 'auto';
@@ -1951,6 +1978,14 @@ class _Handler(BaseHTTPRequestHandler):
 
         tok = cmd_str.upper().split()
         client_id = self._client_id()
+        if not INSTANCE_IS_MASTER and _requires_master(tok):
+            self._send_json(403, {
+                "ok": False,
+                "error": "read_only_instance",
+                "message": "This inno-web-remote instance is configured as non-master.",
+                "control": _control_snapshot(client_id),
+            })
+            return
         is_estop = bool(tok and tok[0] == "ESTOP")
         wants_remote_takeover = len(tok) >= 2 and tok[0] == "MODE" and tok[1] == "MANUAL"
         with _state_lock:
@@ -2078,6 +2113,7 @@ class _Handler(BaseHTTPRequestHandler):
             "status":           "ok",
             "bridge_connected": snap["connected"],
             "mode":             snap["mode"],
+            "is_master":        INSTANCE_IS_MASTER,
             "control":          _control_snapshot(self._client_id()),
         }).encode()
         self.send_response(200)
