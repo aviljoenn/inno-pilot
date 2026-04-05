@@ -86,3 +86,48 @@ After reboot:
 - inno-pilot-fixlink adjusts the by-id symlink
 - inno-pilot-bridge connects Nano ↔ PTY
 - pypilot starts and uses the PTY via the by-id name
+
+
+## Multi-browser control strategy (control token/lock)
+
+Today, the bridge accepts **one active TCP remote** at a time on port `8555`.
+A single `inno_web_remote` process can still serve many browser tabs/phones through
+SSE, but without arbitration those browsers can all send commands.
+
+A practical pattern is a **control token** (also called a control lock):
+
+- Exactly one browser session can hold the token (`controller`).
+- All other connected browsers are `observers` (read-only by default).
+- Only the controller's commands are forwarded to bridge (`BTN`, `RUD`, `MODE`, `ESTOP`).
+- Observers still receive the same live telemetry (`HDG`, `CMD`, `RDR`, `COMMS`, etc).
+
+Current `inno_web_remote.py` behavior implements this lock with a lease and
+exposes HTTP endpoints for lock status/acquire/release/heartbeat:
+`GET /control`, `POST /control/acquire`, `POST /control/release`,
+`POST /control/heartbeat`.
+
+### Suggested lock lifecycle
+
+1. Browser opens UI and gets a generated `session_id` from the server.
+2. Browser requests `POST /control/acquire`.
+3. If no owner exists, server grants lock and returns `owner=true` with a lease expiry (for example 10 s).
+4. Owner renews lease via heartbeat every ~2 s (`POST /control/heartbeat`).
+5. If heartbeat stops (tab closed, Wi-Fi loss), lock expires and auto-releases.
+6. Another browser may then acquire lock.
+7. Owner may release explicitly (`POST /control/release`) when done steering.
+
+### Safety and UX guards
+
+- **Manual mode guard**: while bridge mode is `MANUAL`, reject takeover from other sessions unless owner disconnects/expires (prevents fighting helm inputs).
+- **Emergency stop**: `ESTOP` is accepted from any browser even when it does not
+  own the lock (safety-first bypass); lock ownership remains unchanged.
+- **Visible owner banner**: show `CONTROL: <device-name>` so crew know who has helm authority.
+- **Takeover policy** (optional): require owner confirmation, or allow forced takeover only after a timeout window.
+
+### Why this works with multiple remotes
+
+- You keep a single web service endpoint (for example `:8888`) and a single bridge socket (`:8555`).
+- Multiple remote browsers can stay connected simultaneously for situational awareness.
+- Only one browser can send steering commands at any instant, eliminating control races.
+
+This avoids per-session port hopping/redirect complexity and keeps control authority explicit and auditable.
