@@ -2062,6 +2062,12 @@ setInterval(function() {
 
 class _Handler(BaseHTTPRequestHandler):
 
+    # HTTP/1.1 is required for Server-Sent Events (persistent connection).
+    # Python's BaseHTTPRequestHandler defaults to HTTP/1.0, which browsers
+    # reject for EventSource — the SSE stream never delivers and the
+    # "NO BRIDGE" overlay stays permanently.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, fmt, *args):  # suppress default access log noise
         pass
 
