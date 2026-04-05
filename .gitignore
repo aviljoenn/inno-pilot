@@ -3,3 +3,6 @@
 **/sdkconfig.old
 **/sdkconfig.old.*
 **/wifi_secrets.h
+__pycache__/
+*.pyc
+.claude/
