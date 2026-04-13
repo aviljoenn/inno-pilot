@@ -107,6 +107,8 @@ This script:
 - Enables all four services
 - Sets `~/.pypilot/servodevice` to the stable by-id USB path
 - Creates a pypilot drop-in so pypilot starts after glue services
+- Sets `/etc/inno-pilot/` and `/var/lib/inno-pilot/` to be owned by `innopilot`
+  (required so the bridge and web-remote can read/write `settings.json`)
 
 ---
 
@@ -288,3 +290,5 @@ sudo reboot
 | Remote can't connect | Wrong IP in ESP32 firmware | Rebuild firmware with correct Pi IP |
 | Web remote shows NO BRIDGE | Bridge not running or web remote started first | `systemctl restart inno-pilot-web-remote`; check bridge log |
 | Web remote 404 / no page | Service not deployed | Re-run deploy script; check `ls /usr/local/bin/inno_web_remote.py` |
+| Settings not saved / always reset to defaults | `/var/lib/inno-pilot/` owned by root | `sudo chown innopilot:innopilot /var/lib/inno-pilot` (deploy script handles this from B32 onward) |
+| Settings panel shows "⚠ Using local settings" even when bridge is running | Bridge client thread was in OFF mode during settings open (fixed in B32) | Deploy B32 or later |

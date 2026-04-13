@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B32"
+INNOPILOT_VERSION = "v1.2.0_B33"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -2024,13 +2024,18 @@ function closeSettings(save) {
   if (save) {
     sfCollect();
     setSovStatus('Saving\u2026', 'pend');
+    // Abort controller: guarantees .catch() fires within SAVE_TIMEOUT_MS even if
+    // the server is slow (Pi Zero SD write + bridge round-trip can take up to ~6 s).
+    var ctrl = new AbortController();
+    var abortTimer = setTimeout(function() { ctrl.abort(); }, 9000);
     // Keep panel open while the POST is in-flight so the user sees feedback.
     fetch('/settings', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(gSettings)
+      body:JSON.stringify(gSettings),
+      signal: ctrl.signal
     })
-    .then(function(r) { return r.json(); })
+    .then(function(r) { clearTimeout(abortTimer); return r.json(); })
     .then(function(d) {
       var msg, type;
       if (d.ok && d.via === 'bridge') {
@@ -2044,8 +2049,12 @@ function closeSettings(save) {
       setSovStatus(msg, type);
       setTimeout(_doClosePanel, 1800);
     })
-    .catch(function() {
-      setSovStatus('\u2717 Save failed \u2014 network error', 'err');
+    .catch(function(err) {
+      clearTimeout(abortTimer);
+      var msg = (err && err.name === 'AbortError')
+        ? '\u2717 Save timed out'
+        : '\u2717 Save failed \u2014 network error';
+      setSovStatus(msg, 'err');
       setTimeout(_doClosePanel, 2000);
     });
     return; // panel stays open until timeout above fires

@@ -22,6 +22,13 @@ echo "Ensuring /etc/inno-pilot config dir exists..."
 sudo mkdir -p /etc/inno-pilot
 sudo chown innopilot:innopilot /etc/inno-pilot
 
+# Ensure /var/lib/inno-pilot exists and is writable by innopilot.
+# Both the bridge and the web-remote write settings.json here; without this
+# chown the directory is root-owned and neither process can create the file.
+echo "Ensuring /var/lib/inno-pilot data dir is owned by innopilot..."
+sudo mkdir -p /var/lib/inno-pilot
+sudo chown innopilot:innopilot /var/lib/inno-pilot
+
 # Copy bridge script
 echo "Installing inno_pilot_bridge.py -> /usr/local/bin/"
 sudo cp "$REPO_DIR/inno_pilot_bridge.py" /usr/local/bin/inno_pilot_bridge.py

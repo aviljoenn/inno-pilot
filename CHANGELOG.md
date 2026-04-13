@@ -6,6 +6,16 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B33] — 2026-04-13 — Fix: "Saving…" status stuck indefinitely on slow bridge response
+
+### Fixed
+- **Web Remote**: Settings SAVE POST now has a 9-second `AbortController` timeout.
+  Previously there was no client-side fetch timeout — if the Python HTTP handler
+  blocked longer than expected (bridge reconnect 2 s + SETTINGS_TIMEOUT_S 4 s = 6 s
+  worst case, or indefinitely on an unhandled server error), the "Saving…" status
+  would remain on-screen forever. The AbortController guarantees `.catch()` fires
+  within 9 s with a "✗ Save timed out" message so the panel always closes.
+
 ## [v1.2.0_B32] — 2026-04-13 — Fix: Settings panel always shows "bridge unavailable" in OFF mode
 
 ### Fixed
