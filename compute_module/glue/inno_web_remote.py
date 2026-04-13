@@ -1505,7 +1505,7 @@ function appendTestLine(line) {
   if (!gTestOpen) return;
   var log = document.getElementById('tres-log');
   if (!log) return;
-  log.textContent += line + '\n';
+  log.textContent += line + '\\n';
   log.scrollTop = log.scrollHeight;
   document.getElementById('tres-status').textContent = 'RUNNING\u2026';
 }
