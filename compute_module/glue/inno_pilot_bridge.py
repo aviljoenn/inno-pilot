@@ -69,6 +69,21 @@ def _toggle_log_level(signum, frame):       # noqa: ARG001
 if hasattr(signal, "SIGUSR1"):
     signal.signal(signal.SIGUSR1, _toggle_log_level)
 
+def _local_ip() -> str:
+    """Return the Pi's LAN IP by probing the routing table (no data sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+# OTA server host: auto-detected at startup so this code works on any Pi
+# regardless of its fixed IP address.
+OTA_SERVER_HOST = _local_ip()
+
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
@@ -255,7 +270,6 @@ REMOTE_PING_PERIOD_S   = 2.0   # send PONG keepalive to remote every N seconds
 # OTA firmware server (serves inno_remote.bin to remote on version mismatch)
 # ---------------------------------------------------------------------------
 OTA_HTTP_PORT     = 8556
-OTA_SERVER_HOST   = "192.168.6.13"        # Pi fixed IP on boat LAN
 OTA_FIRMWARE_DIR  = "/var/lib/inno-pilot/ota"
 OTA_FIRMWARE_FILE = "inno_remote.bin"
 OTA_FIRMWARE_PATH = f"{OTA_FIRMWARE_DIR}/{OTA_FIRMWARE_FILE}"
