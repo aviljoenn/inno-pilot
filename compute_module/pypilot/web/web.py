@@ -7,7 +7,11 @@
 # version 3 of the License, or (at your option) any later version.  
 
 import sys, os
-from flask import Flask, render_template, session, request, Markup
+from flask import Flask, render_template, session, request
+try:
+    from flask import Markup          # Flask < 2.3
+except ImportError:
+    from markupsafe import Markup     # Flask >= 2.3 (Markup moved to markupsafe)
 
 from flask_socketio import SocketIO, Namespace, emit, join_room, leave_room, \
     close_room, rooms, disconnect
