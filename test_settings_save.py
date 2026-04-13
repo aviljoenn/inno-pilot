@@ -1,127 +1,201 @@
 """
-Playwright test: open web-remote settings, toggle Battery Voltage, SAVE,
-and report every status-line state change seen during the operation.
+Playwright debug test: open web-remote settings, toggle Battery Voltage,
+click SAVE, and capture both browser console.log output AND Pi journalctl
+output so we can see exactly where the SAVE stalls.
 """
 import sys
 import time
+import threading
+import io
 from playwright.sync_api import sync_playwright
 
 URL = "http://192.168.6.12:8888"
+PI_HOST = "192.168.6.12"
+PI_USER = "innopilot"
+PI_PASS = "innopilot123"
+
+# Timestamped log helper (UTC-relative seconds from test start)
+_t0 = time.monotonic()
+
+def tlog(msg: str) -> None:
+    elapsed = time.monotonic() - _t0
+    line = f"[{elapsed:6.2f}s] {msg}"
+    sys.stdout.buffer.write((line + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+
+def tail_pi_journal(stop_event: threading.Event, lines_out: list) -> None:
+    """SSH to Pi and follow the web-remote journal; append lines to lines_out."""
+    try:
+        import paramiko
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(PI_HOST, username=PI_USER, password=PI_PASS, timeout=10)
+        # -n 0 = no history, -f = follow, grep for DBG lines only
+        _, stdout, _ = ssh.exec_command(
+            "journalctl -u inno-pilot-web-remote -f -n 0 2>/dev/null",
+            get_pty=False
+        )
+        stdout.channel.setblocking(False)
+        while not stop_event.is_set():
+            try:
+                chunk = stdout.channel.recv(4096)
+                if chunk:
+                    for line in chunk.decode("utf-8", errors="replace").splitlines():
+                        lines_out.append(line)
+            except Exception:
+                pass
+            time.sleep(0.05)
+        ssh.close()
+    except Exception as exc:
+        lines_out.append(f"[SSH ERROR] {exc}")
+
 
 def run():
+    # Start Pi journal tail in background thread
+    pi_lines: list = []
+    stop_journal = threading.Event()
+    journal_thread = threading.Thread(
+        target=tail_pi_journal, args=(stop_journal, pi_lines), daemon=True
+    )
+    journal_thread.start()
+    time.sleep(1.0)  # give SSH a moment to connect before we start the test
+
+    browser_console: list = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Capture console messages from the page
-        console_msgs = []
-        page.on("console", lambda msg: console_msgs.append(msg.text))
+        # Capture every browser console message
+        def on_console(msg):
+            elapsed = time.monotonic() - _t0
+            browser_console.append(f"[{elapsed:6.2f}s] BROWSER {msg.type.upper()}: {msg.text}")
+        page.on("console", on_console)
 
-        sys.stdout.buffer.write(b"=== Navigating to " + URL.encode() + b" ===\n")
-        sys.stdout.buffer.flush()
-        # SSE keeps the page from ever reaching networkidle; use domcontentloaded + settle delay.
+        tlog(f"Navigating to {URL}")
         page.goto(URL, timeout=10000, wait_until="domcontentloaded")
-        time.sleep(2.0)  # let SSE initial burst settle
+        time.sleep(2.0)  # let SSE settle
+        tlog("Page loaded")
+        page.screenshot(path="test_before_gear.png")
+        tlog("Screenshot: test_before_gear.png")
 
-        # ---- Open settings panel ----
-        sys.stdout.buffer.write(b"\n--- Clicking gear button ---\n")
-        sys.stdout.buffer.flush()
-        page.click("#gear-btn")
-        page.wait_for_selector("#sov:not(.hidden)", timeout=4000)
-        time.sleep(0.5)
+        # Ensure AP is in OFF mode — settings guard (line 1985) blocks otherwise
+        tlog("Waiting for gear button…")
+        page.wait_for_selector("#gear-btn", timeout=8000)
+        gTogglePos = page.evaluate("gTogglePos")
+        tlog(f"Current gTogglePos = {repr(gTogglePos)}")
+        if gTogglePos != 'off':
+            tlog("Switching to OFF mode via the OFF radio button")
+            switched = page.evaluate("""() => {
+                var btn = document.querySelector('.mode-radio[data-action="off"]');
+                if (btn) { btn.click(); return 'clicked off btn'; }
+                return 'off btn not found';
+            }""")
+            tlog(f"Mode switch: {switched}")
+            time.sleep(0.5)
+            gTogglePos = page.evaluate("gTogglePos")
+            tlog(f"gTogglePos after switch = {repr(gTogglePos)}")
+
+        # Open settings
+        tlog("Calling openSettings() via JS")
+        page.evaluate("openSettings()")
+        time.sleep(1.5)
+
+        # Verify panel opened
+        panel_classes = page.evaluate("document.getElementById('sov').className")
+        tlog(f"#sov classes after openSettings(): {repr(panel_classes)}")
+        page.screenshot(path="test_after_opensettings.png")
+        tlog("Screenshot: test_after_opensettings.png")
+        if 'hidden' in panel_classes:
+            tlog("ERROR: settings panel is still hidden after openSettings() — aborting")
+            stop_journal.set()
+            browser.close()
+            return
 
         status_el = page.locator("#sov-status")
-        status_text = status_el.inner_text()
-        sys.stdout.buffer.write(("Status after open: " + repr(status_text) + "\n").encode("utf-8"))
-        sys.stdout.buffer.flush()
+        tlog("Status after open: " + repr(status_el.inner_text()))
 
-        # Wait for the GET response (loading... -> result)
-        time.sleep(3.0)
-        status_text = status_el.inner_text()
-        sys.stdout.buffer.write(("Status after GET settle: " + repr(status_text) + "\n").encode("utf-8"))
-        sys.stdout.buffer.flush()
+        # Wait for GET to resolve
+        time.sleep(3.5)
+        tlog("Status after GET settle: " + repr(status_el.inner_text()))
 
-        # ---- Find and toggle the Battery Voltage setting ----
-        # The label text is in a <span> or similar; the ON/OFF buttons immediately follow it.
-        # Strategy: find the label element by text, then grab the next sibling button group.
-        batt_label = page.locator("text=Battery Voltage").first
-        if batt_label.count() == 0:
-            sys.stdout.buffer.write(b"WARNING: 'Battery Voltage' text not found in settings panel\n")
-            sys.stdout.buffer.flush()
-        else:
-            sys.stdout.buffer.write(b"Found 'Battery Voltage' label\n")
-            sys.stdout.buffer.flush()
-            # Click the first .sf-bool-btn that follows the Battery Voltage label
-            # They render as: <label>Battery Voltage</label> <button>ON</button> <button>OFF</button>
-            # Use JS to find and toggle: locate buttons after the Battery Voltage text node
-            toggled = page.evaluate("""() => {
-                const labels = Array.from(document.querySelectorAll('span, label, div'));
-                for (const el of labels) {
-                    if (el.textContent.trim() === 'Battery Voltage') {
-                        // Walk siblings until we find a button
-                        let sib = el.nextElementSibling;
-                        while (sib) {
-                            const btn = sib.tagName === 'BUTTON' ? sib
-                                      : sib.querySelector('button');
-                            if (btn) { btn.click(); return btn.textContent.trim(); }
-                            sib = sib.nextElementSibling;
-                        }
-                        // Try parent's next sibling
-                        const parentSib = el.parentElement && el.parentElement.nextElementSibling;
-                        if (parentSib) {
-                            const btn = parentSib.tagName === 'BUTTON' ? parentSib
-                                      : parentSib.querySelector('button');
-                            if (btn) { btn.click(); return btn.textContent.trim(); }
-                        }
-                        return 'label found but no button sibling';
+        # Toggle Battery Voltage via JS (label → next sibling button)
+        toggled = page.evaluate("""() => {
+            const labels = Array.from(document.querySelectorAll('span, label, div, td'));
+            for (const el of labels) {
+                if (el.textContent.trim() === 'Battery Voltage') {
+                    let sib = el.nextElementSibling;
+                    while (sib) {
+                        const btn = sib.tagName === 'BUTTON' ? sib : sib.querySelector('button');
+                        if (btn) { btn.click(); return 'clicked: ' + btn.textContent.trim(); }
+                        sib = sib.nextElementSibling;
                     }
+                    const p = el.parentElement;
+                    if (p) {
+                        let psib = p.nextElementSibling;
+                        while (psib) {
+                            const btn = psib.tagName === 'BUTTON' ? psib : psib.querySelector('button');
+                            if (btn) { btn.click(); return 'clicked(parent sib): ' + btn.textContent.trim(); }
+                            psib = psib.nextElementSibling;
+                        }
+                    }
+                    return 'label found but no button';
                 }
-                return 'label not found';
-            }""")
-            sys.stdout.buffer.write(("Toggle result: " + repr(toggled) + "\n").encode("utf-8"))
-            sys.stdout.buffer.flush()
+            }
+            return 'Battery Voltage label not found';
+        }""")
+        tlog(f"Battery Voltage toggle: {toggled}")
 
-        # ---- Click SAVE ----
-        sys.stdout.buffer.write(b"\n--- Clicking SAVE ---\n")
-        sys.stdout.buffer.flush()
-        save_time = time.monotonic()
+        # Click SAVE and watch
+        tlog("=== Clicking SAVE ===")
+        save_start = time.monotonic()
         page.click("#sov-save")
 
-        # Poll the status line every 200 ms for up to 15 s
-        last_text = ""
-        transitions = []
-        deadline = time.monotonic() + 15.0
+        # Poll status and panel visibility for up to 20 s
+        last_status = ""
+        deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             try:
                 txt = status_el.inner_text()
             except Exception:
-                txt = "<panel gone>"
-            if txt != last_text:
-                elapsed = time.monotonic() - save_time
-                transitions.append((elapsed, txt))
-                last_text = txt
-            # Stop once the panel closes (sov hidden)
+                txt = "<element gone>"
+            if txt != last_status:
+                elapsed = time.monotonic() - save_start
+                tlog(f"  Status changed [{elapsed:.1f}s after SAVE]: {repr(txt)}")
+                last_status = txt
             try:
-                panel_visible = page.is_visible("#sov")
+                panel_open = page.is_visible("#sov")
             except Exception:
-                panel_visible = False
-            if not panel_visible and last_text != "Saving\u2026":
-                time.sleep(0.3)  # let final status render
+                panel_open = False
+            if not panel_open:
+                tlog(f"  Panel closed [{time.monotonic()-save_start:.1f}s after SAVE]")
                 break
             time.sleep(0.2)
+        else:
+            tlog("  20s timeout reached — panel still open, status still: " + repr(last_status))
 
-        sys.stdout.buffer.write(b"\n=== Status line transitions after SAVE ===\n")
-        for elapsed, txt in transitions:
-            sys.stdout.buffer.write(
-                ("[{:5.1f}s] {}\n".format(elapsed, repr(txt))).encode("utf-8")
-            )
-        sys.stdout.buffer.flush()
-
-        # Take a screenshot of the final state (panel may be closed)
         page.screenshot(path="test_settings_save_final.png")
-        sys.stdout.buffer.write(b"\nScreenshot saved: test_settings_save_final.png\n")
-
+        tlog("Screenshot saved: test_settings_save_final.png")
         browser.close()
+
+    # Stop journal tail and give it a moment to drain
+    time.sleep(0.5)
+    stop_journal.set()
+    journal_thread.join(timeout=3)
+
+    # Print browser console output
+    print("\n=== BROWSER CONSOLE ===")
+    for line in browser_console:
+        sys.stdout.buffer.write((line + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+    # Print Pi journal lines (filter to DBG + WARNING lines to keep it short)
+    print("\n=== PI JOURNAL (web-remote) ===")
+    for line in pi_lines:
+        sys.stdout.buffer.write((line + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
+
 
 if __name__ == "__main__":
     run()

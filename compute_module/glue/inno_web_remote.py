@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B33"
+INNOPILOT_VERSION = "v1.2.0_B34"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -2452,10 +2452,12 @@ class _Handler(BaseHTTPRequestHandler):
             _persist_settings(settings)
 
         via = "bridge" if saved_via_bridge else "local"
+        body = json.dumps({"ok": True, "via": via}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))  # required for HTTP/1.1 keep-alive
         self.end_headers()
-        self.wfile.write(json.dumps({"ok": True, "via": via}).encode())
+        self.wfile.write(body)
 
 
 # ---------------------------------------------------------------------------

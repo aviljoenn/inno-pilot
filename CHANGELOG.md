@@ -6,6 +6,20 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B34] — 2026-04-13 — Fix: settings SAVE permanently stuck on "Saving…" (missing Content-Length)
+
+### Fixed
+- **Web Remote**: Settings POST response now includes a `Content-Length` header.
+  The handler class uses `protocol_version = "HTTP/1.1"` so the browser keeps the
+  connection alive and requires either `Content-Length` or `Transfer-Encoding:
+  chunked` to know when the response body ends.  Without it `r.json()` in the
+  browser hung forever — the 200 status and headers were received immediately but
+  the body never "arrived".  The GET (`_serve_settings`) and command POST
+  (`_handle_command` via `_send_json`) already sent Content-Length correctly; only
+  the settings POST was missing it.  Root cause found via Playwright debug tracing
+  (browser showed HTTP 200 received; server logs showed response fully sent; body
+  never delivered to JS).
+
 ## [v1.2.0_B33] — 2026-04-13 — Fix: "Saving…" status stuck indefinitely on slow bridge response
 
 ### Fixed
