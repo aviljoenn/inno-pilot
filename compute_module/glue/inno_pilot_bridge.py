@@ -70,7 +70,7 @@ if hasattr(signal, "SIGUSR1"):
     signal.signal(signal.SIGUSR1, _toggle_log_level)
 
 # ---------------------------------------------------------------------------
-# Inno-Pilot version (must match Nano firmware + remote firmware)
+# Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
 INNOPILOT_VERSION   = "v1.2.0_B31"
 INNOPILOT_BUILD_NUM = 29  # increment with each push during development
