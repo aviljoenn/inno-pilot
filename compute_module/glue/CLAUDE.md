@@ -16,6 +16,36 @@ before closing, or the Nano will reset and be silent for ~5 s.  See the
 
 ---
 
+## Critical: Nano UART cold-boot initialisation (DTR pulse required)
+
+On a **cold power-on**, the CH340 USB-UART chip on the Nano starts with DTR LOW.
+`open_serial_no_reset()` keeps DTR LOW (that is its purpose — no transition, no
+reset), but the Nano's serial TX hardware does not initialise until it sees a proper
+DTR pulse.
+
+**Symptom:** Bridge sends frames continuously; Nano OLED shows "Bridge: waiting…"
+indefinitely.  `journalctl` shows TX byte counts increasing but zero RX bytes.
+
+**Fix already in place** (in `main()` of `inno_pilot_bridge.py`):
+
+```python
+nano.dtr = True
+time.sleep(0.15)   # 150 ms — long enough for the RC differentiator on RESET
+nano.dtr = False
+log.info("DTR reset pulse sent to Nano")
+```
+
+HUPCL was already cleared by `open_serial_no_reset()`, so this explicit pulse is
+the **only** reset the Nano sees during normal bridge operation.  The bridge then
+waits 2 s (extended from 1 s) for the Nano to finish `setup()` before sending RCT
+settings.
+
+**Do not remove this pulse.**  It is required on every cold boot, not just after
+power outages — any situation where DTR has been LOW since the Pi powered on triggers
+this condition.
+
+---
+
 ## Principles
 
 - The **repository is the source of truth**.

@@ -292,3 +292,112 @@ sudo reboot
 | Web remote 404 / no page | Service not deployed | Re-run deploy script; check `ls /usr/local/bin/inno_web_remote.py` |
 | Settings not saved / always reset to defaults | `/var/lib/inno-pilot/` owned by root | `sudo chown innopilot:innopilot /var/lib/inno-pilot` (deploy script handles this from B32 onward) |
 | Settings panel shows "⚠ Using local settings" even when bridge is running | Bridge client thread was in OFF mode during settings open (fixed in B32) | Deploy B32 or later |
+
+---
+
+## Appendix A — Pi5 / Bookworm reinstall notes
+
+The main guide above targets **Pi Zero 2W + Bullseye**. If you are reinstalling on a
+**Raspberry Pi 5 (or Pi 4/400) running Raspberry Pi OS Bookworm**, the procedure
+differs in several places.  These differences were discovered during the April 2026
+reinstall of the `.12` boat Pi5.
+
+### OS / Python differences on Bookworm
+
+- Python 3.12+ (sometimes 3.13) is the system interpreter.
+- PEP 668 is enforced: `pip install` to the system site-packages is blocked with
+  "externally-managed-environment". You **cannot** use `pip install` for the pypilot
+  dependencies.
+- Flask ships at version 3.x on Bookworm.  `flask.Markup` was removed in Flask 2.3
+  and moved to `markupsafe`; the inno-pilot source already has the fix.
+
+### Phase 2 — Base packages (Bookworm variant)
+
+Replace the `apt-get install` from the main guide with:
+
+```bash
+sudo apt-get update && sudo apt-get upgrade -y
+sudo apt-get install -y \
+  git python3-pip python3-dev python3-numpy python3-scipy \
+  python3-serial python3-smbus i2c-tools socat \
+  libgles2-mesa-dev libgles2 libgbm-dev \
+  python3-flask python3-flask-socketio \
+  python3-importlib-metadata
+```
+
+Note: `pigpio` is not available by default on Bookworm arm64 — omit it unless you
+specifically need it (it is not required by the glue layer).
+
+### Phase 3 — Install pypilot (Bookworm variant)
+
+**Do NOT use `pip install`** for pypilot on Bookworm. The SWIG-generated C extension
+modules (`linebuffer`, `arduino_servo`, `ugfx`) must be placed by the old-style
+installer to the correct locations.  Use:
+
+```bash
+cd ~/inno-pilot
+sudo python3 setup.py install
+```
+
+If `dependencies.py` fails with `externally-managed-environment` errors:
+
+```bash
+sudo apt-get install -y python3-importlib-metadata
+sudo python3 dependencies.py   # retry after apt install
+```
+
+Then proceed with `sudo python3 setup.py install`.
+
+### After install: fix pypilot_client.conf
+
+After the first boot, check and correct the pypilot client config:
+
+```bash
+cat ~/.pypilot/pypilot_client.conf
+```
+
+If this shows any IP other than `127.0.0.1` (e.g. a stale `.13` address from a
+previous installation), fix it:
+
+```bash
+echo '{"host":"127.0.0.1","port":23322}' > ~/.pypilot/pypilot_client.conf
+sudo systemctl restart pypilot
+```
+
+pypilot's zeroconf discovery auto-writes this file when it finds a remote server on
+the LAN.  On a Pi that was previously connected to another pypilot instance this file
+will be stale.
+
+### Nano cold-boot UART note
+
+On cold power-on the Nano's UART TX does not initialise until a proper DTR
+transition occurs. The bridge (B35+) now pulses DTR HIGH→LOW immediately after
+opening the serial port to force UART initialisation. No manual intervention is
+required — this is handled automatically.
+
+**If you see "Bridge: waiting…" stuck on the OLED after a cold boot** with an older
+bridge (pre-B35), the workaround is:
+
+```bash
+sudo systemctl restart inno-pilot-bridge
+```
+
+One restart is enough — the bridge holds DTR at the correct level after the first
+start.
+
+### Flask 2.3+ note
+
+If `pypilot_web` fails with:
+```
+ImportError: cannot import name 'Markup' from 'flask'
+```
+the deployed `web.py` is from upstream pypilot (not the inno-pilot fork).  Replace it:
+
+```bash
+sudo cp ~/inno-pilot/compute_module/pypilot/web/web.py \
+        /usr/local/lib/python3*/dist-packages/pypilot/web/web.py
+sudo systemctl restart pypilot_web
+```
+
+This fix is already in the inno-pilot source; `sudo python3 setup.py install` will
+place the correct file automatically.

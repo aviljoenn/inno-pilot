@@ -6,6 +6,28 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B35] — 2026-04-13 — Fix: Pi5/Bookworm reinstall issues (OTA IP, Nano cold-boot UART, Flask Markup)
+
+### Fixed
+- **Bridge** (`inno_pilot_bridge.py`): Removed hardcoded `OTA_SERVER_HOST = "192.168.6.13"`.
+  Replaced with a `_local_ip()` function that probes the routing table via a UDP
+  connect (no data sent) to determine the Pi's own LAN IP at startup. This means the
+  bridge works correctly on any Pi regardless of its fixed IP address, and OTA update
+  push works without manual edits after install.
+- **Bridge** (`inno_pilot_bridge.py`): Added explicit DTR pulse on bridge startup to
+  ensure the Nano's UART initialises correctly on cold boot. On cold boot the CH340
+  USB-UART DTR line starts LOW; `open_serial_no_reset()` clears HUPCL but causes no
+  DTR transition, so the Nano's serial TX never drove the line. The bridge sent frames
+  continuously but received nothing until a DTR reset occurred. The fix pulses DTR
+  HIGH→LOW (150 ms) immediately after opening the port; HUPCL is already cleared so
+  this is the only reset the Nano will see during normal bridge operation. The
+  subsequent `time.sleep(2.0)` gives the Nano comfortable margin to finish `setup()`
+  before the bridge starts sending RCT settings.
+- **Web** (`compute_module/pypilot/web/web.py`): Fixed `ImportError` crash-loop on
+  Flask >= 2.3. `flask.Markup` was removed in Flask 2.3 and moved to `markupsafe`.
+  The import is now guarded with a try/except so pypilot_web starts correctly on
+  Bookworm (Flask 3.x) and still works on older installs.
+
 ## [v1.2.0_B34] — 2026-04-13 — Fix: settings SAVE permanently stuck on "Saving…" (missing Content-Length)
 
 ### Fixed
