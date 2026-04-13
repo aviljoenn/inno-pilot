@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B30"
+INNOPILOT_VERSION = "v1.2.0_B31"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -860,6 +860,13 @@ body{
   color:#354860;font-size:.62em;font-family:'Courier New',monospace;
   letter-spacing:.5px;margin-top:2px;display:block;
 }
+/* Status/feedback line shown below the header hint while loading/saving settings */
+.shdr-status{font-size:.67em;font-family:'Courier New',monospace;margin-top:3px;
+  min-height:1em;transition:color .2s;display:block;}
+.shdr-status.s-ok  {color:#00cc50;}
+.shdr-status.s-warn{color:#f0a000;}
+.shdr-status.s-err {color:#cc3030;}
+.shdr-status.s-pend{color:#6090b0;}
 .sbody{overflow-y:auto;padding:6px 12px 10px;flex:1;overscroll-behavior:contain}
 .ss-title{
   color:#3090b8;font-size:.68em;font-weight:700;letter-spacing:2px;
@@ -1129,6 +1136,7 @@ body{
     <div class="shdr">
       <span class="shdr-title">&#9881; SETTINGS</span>
       <span class="shdr-hint">Tap a field to edit &nbsp;&bull;&nbsp; SAVE to apply</span>
+      <span class="shdr-status" id="sov-status"></span>
     </div>
     <div class="sbody" id="sbody">
 
@@ -1965,6 +1973,14 @@ function sfCollect() {
 }
 
 
+// Update the status line inside the settings header.
+// type: 'ok' (green) | 'warn' (amber) | 'err' (red) | 'pend' (blue-grey) | '' (clear)
+function setSovStatus(msg, type) {
+  var el = document.getElementById('sov-status');
+  el.textContent = msg;
+  el.className = 'shdr-status' + (type ? ' s-' + type : '');
+}
+
 function openSettings() {
   if (gTogglePos !== 'off') {
     // Flash warning — settings only accessible in OFF mode
@@ -1977,29 +1993,64 @@ function openSettings() {
   document.getElementById('gear-btn').classList.add('settings-open');
   document.getElementById('sov').classList.remove('hidden');
   setToggle('off'); // re-renders buttons (override inside setToggle shows settings labels)
+  setSovStatus('Loading\u2026', 'pend');
   fetch('/settings')
     .then(function(r) { return r.json(); })
     .then(function(s) {
+      // _source is injected by server to indicate origin; strip before storing
+      var src = s['_source'] || 'unknown';
+      delete s['_source'];
       gSettings = s;
       sfApplyToUI();
       sfSyncVisibility();
+      if (src === 'bridge') {
+        setSovStatus('\u2713 Loaded from bridge', 'ok');
+      } else {
+        setSovStatus('\u26a0 Using local settings \u2014 bridge unavailable', 'warn');
+      }
     })
-    .catch(function() {});
+    .catch(function() { setSovStatus('\u2717 Failed to load settings', 'err'); });
+}
+
+// Internal: tears down the settings overlay without any save action.
+function _doClosePanel() {
+  gSettingsOpen = false;
+  document.getElementById('gear-btn').classList.remove('settings-open');
+  document.getElementById('sov').classList.add('hidden');
+  setToggle('off'); // restore button labels (empty in OFF mode, since gSettingsOpen is now false)
 }
 
 function closeSettings(save) {
   if (save) {
     sfCollect();
+    setSovStatus('Saving\u2026', 'pend');
+    // Keep panel open while the POST is in-flight so the user sees feedback.
     fetch('/settings', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(gSettings)
-    }).catch(function() {});
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var msg, type;
+      if (d.ok && d.via === 'bridge') {
+        msg = '\u2713 Saved via bridge'; type = 'ok';
+      } else if (d.ok) {
+        // Saved to local file — bridge was unavailable or timed out
+        msg = '\u26a0 Saved locally \u2014 bridge unavailable'; type = 'warn';
+      } else {
+        msg = '\u2717 Save failed'; type = 'err';
+      }
+      setSovStatus(msg, type);
+      setTimeout(_doClosePanel, 1800);
+    })
+    .catch(function() {
+      setSovStatus('\u2717 Save failed \u2014 network error', 'err');
+      setTimeout(_doClosePanel, 2000);
+    });
+    return; // panel stays open until timeout above fires
   }
-  gSettingsOpen = false;
-  document.getElementById('gear-btn').classList.remove('settings-open');
-  document.getElementById('sov').classList.add('hidden');
-  setToggle('off'); // restore button labels (empty in OFF mode, since gSettingsOpen is now false)
+  _doClosePanel();
 }
 
 // Settings event wiring
@@ -2291,10 +2342,15 @@ class _Handler(BaseHTTPRequestHandler):
                 except queue.Empty:
                     log.warning("Settings GET: bridge timed out, using local file")
 
+        source = "bridge" if data is not None else "local"
         if data is None:
             data = _load_settings()
 
-        body = json.dumps(data).encode()
+        # Shallow copy so we can inject _source without mutating the live dict.
+        # JS strips _source before storing in gSettings so it is never re-POSTed.
+        resp_data = dict(data)
+        resp_data["_source"] = source
+        body = json.dumps(resp_data).encode()
         self.send_response(200)
         self.send_header("Content-Type",   "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -2351,10 +2407,11 @@ class _Handler(BaseHTTPRequestHandler):
             # Bridge unavailable — write local file so settings survive reconnect
             _persist_settings(settings)
 
+        via = "bridge" if saved_via_bridge else "local"
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        self.wfile.write(json.dumps({"ok": True, "via": via}).encode())
 
 
 # ---------------------------------------------------------------------------

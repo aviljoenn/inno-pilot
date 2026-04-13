@@ -6,6 +6,32 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B31] — 2026-04-13 — Feat: Settings panel status/feedback line
+
+### Added
+- **Web Remote**: Status/feedback line inside the settings panel header (`#sov-status`).
+  Shows load and save outcomes so the user always knows whether settings came from the
+  bridge or the local fallback file, and whether a save succeeded.
+  - **Opening settings**: "Loading…" (blue-grey) while the `GET /settings` request is in
+    flight; then "✓ Loaded from bridge" (green) or "⚠ Using local settings — bridge
+    unavailable" (amber) depending on which path the server used.
+  - **Saving settings**: "Saving…" (blue-grey) while the `POST /settings` request is in
+    flight; panel stays open until the response arrives, then shows "✓ Saved via bridge"
+    (green), "⚠ Saved locally — bridge unavailable" (amber), or "✗ Save failed" (red).
+    Panel auto-closes 1.8 s after a successful save (2 s after a network error).
+  - **Load failure**: "✗ Failed to load settings" (red) on network error.
+- **Web Remote**: `setSovStatus(msg, type)` JS helper manages the status line.
+- **Web Remote**: `_doClosePanel()` JS helper extracted from `closeSettings` to support
+  the deferred-close save flow.
+
+### Changed
+- **Web Remote** (`_serve_settings`): Response JSON now includes a `_source` key
+  (`"bridge"` or `"local"`) so JS can show the correct status. JS strips this key before
+  storing settings in `gSettings` so it is never re-POSTed to the bridge.
+- **Web Remote** (`_handle_settings_post`): Response JSON changed from `{"ok":true}` to
+  `{"ok":true,"via":"bridge"|"local"}` so JS can distinguish the two save paths.
+- **Nano**: Version constant bumped to B31 (no logic changes).
+
 ## [v1.2.0_B29] — 2026-04-05 — Feat: 4-mode animated radio button selector (OFF / ON / REMOTE / AUTO)
 
 ### Changed

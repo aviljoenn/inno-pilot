@@ -72,7 +72,7 @@ if hasattr(signal, "SIGUSR1"):
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware)
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B30"
+INNOPILOT_VERSION   = "v1.2.0_B31"
 INNOPILOT_BUILD_NUM = 29  # increment with each push during development
 
 # ---------------------------------------------------------------------------
