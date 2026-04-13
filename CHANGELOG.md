@@ -6,6 +6,18 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B32] — 2026-04-13 — Fix: Settings panel always shows "bridge unavailable" in OFF mode
+
+### Fixed
+- **Web Remote**: Settings GET and SET now work regardless of autopilot mode.
+  Previously, the bridge client thread dropped its TCP connection when mode was
+  OFF, so `_snap()["connected"]` returned False and both `_serve_settings` and
+  `_handle_settings_post` silently fell back to the local file — showing the
+  "⚠ Using local settings — bridge unavailable" warning even when the bridge
+  was fully operational.  Fixed by temporarily setting `_bridge_active` before
+  each settings operation, waiting up to 2 s for the bridge thread to
+  (re)connect, then restoring the OFF state in a `finally` block.
+
 ## [v1.2.0_B31] — 2026-04-13 — Feat: Settings panel status/feedback line
 
 ### Added

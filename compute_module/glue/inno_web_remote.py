@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B31"
+INNOPILOT_VERSION = "v1.2.0_B32"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -2316,6 +2316,10 @@ class _Handler(BaseHTTPRequestHandler):
         Sends SETTINGS GET through the command queue and waits for the bridge
         to reply with SETTINGS <json>.  Falls back to the local settings file
         when the bridge is not connected or the response times out.
+
+        Works even when mode is OFF: temporarily wakes the bridge thread,
+        waits up to 2 s for the connection to establish, then restores the
+        OFF state after the operation completes.
         """
         # Drain any stale responses from a previous request
         while True:
@@ -2324,23 +2328,38 @@ class _Handler(BaseHTTPRequestHandler):
             except queue.Empty:
                 break
 
+        # Temporarily wake bridge thread if mode is OFF so settings can be
+        # fetched via the live bridge regardless of autopilot mode state.
+        was_active = _bridge_active.is_set()
+        if not was_active:
+            _bridge_active.set()
+            # Wait up to 2 s for the bridge thread to (re)connect
+            deadline = time.monotonic() + 2.0
+            while not _snap()["connected"] and time.monotonic() < deadline:
+                time.sleep(0.05)
+
         data: Optional[dict] = None
-        if _snap()["connected"]:
-            try:
-                _cmd_q.put_nowait("SETTINGS GET")
-            except queue.Full:
-                log.warning("Settings GET: cmd_q full, falling back to file")
-            else:
+        try:
+            if _snap()["connected"]:
                 try:
-                    resp = _settings_resp_q.get(timeout=SETTINGS_TIMEOUT_S)
-                    # If it's a dict without an _ack key it's the GET response
-                    if isinstance(resp, dict) and "_ack" not in resp:
-                        data = resp
-                        log.debug("Settings fetched from bridge (%d keys)", len(resp))
-                    else:
-                        log.warning("Settings GET: unexpected response %s", resp)
-                except queue.Empty:
-                    log.warning("Settings GET: bridge timed out, using local file")
+                    _cmd_q.put_nowait("SETTINGS GET")
+                except queue.Full:
+                    log.warning("Settings GET: cmd_q full, falling back to file")
+                else:
+                    try:
+                        resp = _settings_resp_q.get(timeout=SETTINGS_TIMEOUT_S)
+                        # If it's a dict without an _ack key it's the GET response
+                        if isinstance(resp, dict) and "_ack" not in resp:
+                            data = resp
+                            log.debug("Settings fetched from bridge (%d keys)", len(resp))
+                        else:
+                            log.warning("Settings GET: unexpected response %s", resp)
+                    except queue.Empty:
+                        log.warning("Settings GET: bridge timed out, using local file")
+        finally:
+            # Restore OFF state if the bridge thread was idle before this request
+            if not was_active:
+                _bridge_active.clear()
 
         source = "bridge" if data is not None else "local"
         if data is None:
@@ -2378,30 +2397,46 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         saved_via_bridge = False
-        if _snap()["connected"]:
-            # Drain stale responses
-            while True:
-                try:
-                    _settings_resp_q.get_nowait()
-                except queue.Empty:
-                    break
 
-            # Compact JSON — must be a single line (no embedded newlines)
-            json_line = json.dumps(settings, separators=(",", ":"), ensure_ascii=True)
-            try:
-                _cmd_q.put_nowait(f"SETTINGS SET {json_line}")
-            except queue.Full:
-                log.warning("Settings POST: cmd_q full, falling back to file")
-            else:
+        # Temporarily wake bridge thread if mode is OFF so settings can be
+        # saved via the live bridge regardless of autopilot mode state.
+        was_active = _bridge_active.is_set()
+        if not was_active:
+            _bridge_active.set()
+            # Wait up to 2 s for the bridge thread to (re)connect
+            deadline = time.monotonic() + 2.0
+            while not _snap()["connected"] and time.monotonic() < deadline:
+                time.sleep(0.05)
+
+        try:
+            if _snap()["connected"]:
+                # Drain stale responses
+                while True:
+                    try:
+                        _settings_resp_q.get_nowait()
+                    except queue.Empty:
+                        break
+
+                # Compact JSON — must be a single line (no embedded newlines)
+                json_line = json.dumps(settings, separators=(",", ":"), ensure_ascii=True)
                 try:
-                    resp = _settings_resp_q.get(timeout=SETTINGS_TIMEOUT_S)
-                    if isinstance(resp, dict) and resp.get("_ack") == "OK":
-                        saved_via_bridge = True
-                        log.debug("Settings saved via bridge")
-                    else:
-                        log.warning("Settings POST: bridge replied %s", resp)
-                except queue.Empty:
-                    log.warning("Settings POST: bridge timed out, falling back to file")
+                    _cmd_q.put_nowait(f"SETTINGS SET {json_line}")
+                except queue.Full:
+                    log.warning("Settings POST: cmd_q full, falling back to file")
+                else:
+                    try:
+                        resp = _settings_resp_q.get(timeout=SETTINGS_TIMEOUT_S)
+                        if isinstance(resp, dict) and resp.get("_ack") == "OK":
+                            saved_via_bridge = True
+                            log.debug("Settings saved via bridge")
+                        else:
+                            log.warning("Settings POST: bridge replied %s", resp)
+                    except queue.Empty:
+                        log.warning("Settings POST: bridge timed out, falling back to file")
+        finally:
+            # Restore OFF state if the bridge thread was idle before this request
+            if not was_active:
+                _bridge_active.clear()
 
         if not saved_via_bridge:
             # Bridge unavailable — write local file so settings survive reconnect
