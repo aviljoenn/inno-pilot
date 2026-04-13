@@ -1019,16 +1019,26 @@ def main() -> None:
     nano  = open_serial_no_reset(nano_port, BAUD, timeout=0.01)
     pilot = open_serial_no_reset(PILOT_PORT, BAUD, timeout=0.01)
 
+    # Pulse DTR HIGH→LOW to ensure the Nano's UART initialises cleanly.
+    # On cold boot DTR starts LOW so open_serial_no_reset() causes no transition
+    # and the Nano's serial TX may not drive the line until a proper reset.
+    # HUPCL was already cleared by open_serial_no_reset(), so this explicit
+    # pulse is the only reset the Nano will see during normal bridge operation.
+    nano.dtr = True
+    time.sleep(0.15)   # 150 ms — long enough for the RC differentiator on RESET
+    nano.dtr = False
+    log.info("DTR reset pulse sent to Nano")
+
     # Load pilot settings (user-configurable parameters).
     _pilot_settings.update(load_pilot_settings())
     _apply_pilot_settings(_pilot_settings)
     log.info("Pilot settings loaded from %s", PILOT_SETTINGS_PATH)
 
-    # Load RCT settings and push to Nano.  Production motor_simple.ino ignores
-    # these frames; the remote_control_test sketch uses them.  We delay 1 s so
-    # the Nano has time to complete its setup() before the frames arrive.
+    # Load RCT settings and push to Nano.  Allow 2 s for the Nano to complete
+    # its setup() after the DTR reset above (splash is non-blocking but Serial
+    # re-initialisation takes ~500 ms; 2 s gives comfortable margin).
     rct_settings = load_or_create_rct_settings()
-    time.sleep(1.0)
+    time.sleep(2.0)
     # Safety: ensure Nano is not stuck in ratify mode from a previous run.
     send_nano_frame(nano, MANUAL_MODE_CODE, 0)
     push_rct_settings_to_nano(nano, rct_settings)
