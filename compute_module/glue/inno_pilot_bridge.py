@@ -765,6 +765,8 @@ def push_all_settings_to_nano_eeprom(
     blob = _serialize_settings(pilot, rct)
     for addr, byte_val in enumerate(blob):
         send_nano_frame(nano, EEPROM_WRITE_CODE, (addr << 8) | byte_val)
+    nano.flush()       # wait for OS buffer to drain to USB-serial chip
+    time.sleep(0.5)    # allow CH340 to finish UART transmission
     log.info("EEPROM settings pushed to Nano (%d bytes, %d frames)", len(blob), len(blob))
 
 
