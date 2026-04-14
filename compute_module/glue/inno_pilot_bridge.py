@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B34"
-INNOPILOT_BUILD_NUM = 34  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B36"
+INNOPILOT_BUILD_NUM = 36  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -149,6 +149,15 @@ FEATURE_PI_VOLTAGE        = 0x04  # A3 Pi supply voltage fault detection
 FEATURE_BATTERY_VOLTAGE   = 0x08  # A0 main Vin over/under-voltage fault detection
 FEATURE_CURRENT_SENSOR    = 0x10  # A1 motor current telemetry
 FEATURE_ON_BOARD_BUTTONS  = 0x20  # physical button ladder on A6 is wired
+FEATURE_OLED_SH1106       = 0x40  # OLED uses SH1106 controller (vs SSD1306)
+
+# Bridge -> Nano: EEPROM write (0x53)
+EEPROM_WRITE_CODE         = 0x53  # Bridge->Nano: uint16 = (addr<<8)|data_byte
+
+# EEPROM binary layout constants
+EEPROM_MAGIC1             = 0xAA
+EEPROM_MAGIC2             = 0x55
+EEPROM_LAYOUT_VERSION     = 1
 
 # Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
 FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
@@ -199,6 +208,7 @@ _DEFAULT_PILOT_SETTINGS: dict = {
         "battery_voltage_sensor": False,
         "current_sensor":         False,
         "on_board_buttons":       False,
+        "oled_sh1106":            False,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -639,9 +649,10 @@ def send_features_to_nano(nano: serial.Serial, settings: dict) -> None:
     if feats.get("battery_voltage_sensor", False): mask |= FEATURE_BATTERY_VOLTAGE
     if feats.get("current_sensor",         False): mask |= FEATURE_CURRENT_SENSOR
     if feats.get("on_board_buttons",       False): mask |= FEATURE_ON_BOARD_BUTTONS
+    if feats.get("oled_sh1106",            False): mask |= FEATURE_OLED_SH1106
     send_nano_frame(nano, FEATURES_CODE, mask)
     log.info(
-        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s btn=%s)",
+        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s btn=%s sh1106=%s)",
         mask,
         bool(mask & FEATURE_LIMIT_SWITCHES),
         bool(mask & FEATURE_TEMP_SENSOR),
@@ -649,7 +660,120 @@ def send_features_to_nano(nano: serial.Serial, settings: dict) -> None:
         bool(mask & FEATURE_BATTERY_VOLTAGE),
         bool(mask & FEATURE_CURRENT_SENSOR),
         bool(mask & FEATURE_ON_BOARD_BUTTONS),
+        bool(mask & FEATURE_OLED_SH1106),
     )
+
+
+def _ip_to_bytes(ip_str: str) -> bytes:
+    """Convert dotted-quad IP string to 4 bytes; returns 4 zero bytes on error."""
+    if not ip_str:
+        return b"\x00\x00\x00\x00"
+    try:
+        parts = [int(p) & 0xFF for p in ip_str.split(".")]
+        return bytes(parts[:4]).ljust(4, b"\x00")
+    except (ValueError, AttributeError):
+        return b"\x00\x00\x00\x00"
+
+
+def _build_features_mask(settings: dict) -> int:
+    """Build the feature bitmask from pilot settings (shared logic)."""
+    feats = settings.get("features", {})
+    mask = 0
+    if feats.get("limit_switches",         False): mask |= FEATURE_LIMIT_SWITCHES
+    if feats.get("temp_sensor",            False): mask |= FEATURE_TEMP_SENSOR
+    if feats.get("pi_voltage_sensor",      False): mask |= FEATURE_PI_VOLTAGE
+    if feats.get("battery_voltage_sensor", False): mask |= FEATURE_BATTERY_VOLTAGE
+    if feats.get("current_sensor",         False): mask |= FEATURE_CURRENT_SENSOR
+    if feats.get("on_board_buttons",       False): mask |= FEATURE_ON_BOARD_BUTTONS
+    if feats.get("oled_sh1106",            False): mask |= FEATURE_OLED_SH1106
+    return mask
+
+
+def _serialize_settings(pilot: dict, rct: dict) -> bytes:
+    """Serialize all settings into the EEPROM binary layout.
+
+    Returns the complete block including magic, version, payload, and CRC8.
+    """
+    buf = bytearray()
+
+    # Header (offsets 0-2)
+    buf.append(EEPROM_MAGIC1)
+    buf.append(EEPROM_MAGIC2)
+    buf.append(EEPROM_LAYOUT_VERSION)
+
+    # Feature flags bitmask (offset 3)
+    buf.append(_build_features_mask(pilot))
+
+    # RCT settings — 7 x uint8 (offsets 4-10)
+    for key in _RCT_KEYS:
+        val = max(0, min(255, int(rct.get(key, _RCT_DEFAULTS[key]))))
+        buf.append(val)
+
+    # Vessel (offsets 11-12)
+    vessel = pilot.get("vessel", {})
+    buf.append(0 if vessel.get("type", "sail") == "sail" else 1)
+    buf.append(max(10, min(60, int(vessel.get("rudder_range_deg", 35)))))
+
+    # Autopilot (offsets 13-19)
+    ap = pilot.get("autopilot", {})
+    db10 = max(0, min(65535, int(round(float(ap.get("deadband_pct", 3.0)) * 10))))
+    buf.extend(db10.to_bytes(2, "little"))
+    pg10 = max(0, min(65535, int(round(float(ap.get("pgain", 1.0)) * 10))))
+    buf.extend(pg10.to_bytes(2, "little"))
+    buf.append(max(0, min(255, int(ap.get("off_course_alarm_deg", 20)))))
+    buf.append(max(0, min(255, int(ap.get("rudder_limit_port_pct", 0)))))
+    buf.append(max(0, min(255, int(ap.get("rudder_limit_stbd_pct", 100)))))
+
+    # Safety (offsets 20-22)
+    safety = pilot.get("safety", {})
+    safety_flags = 0x01 if safety.get("auto_disengage_on_fault", True) else 0x00
+    buf.append(safety_flags)
+    buf.append(max(0, min(255, int(safety.get("comms_warn_threshold_pct", 10)))))
+    buf.append(max(0, min(255, int(safety.get("comms_crit_threshold_pct", 25)))))
+
+    # Network (offsets 23-43)
+    net = pilot.get("network", {})
+    buf.append(0 if net.get("ip_mode", "dhcp") == "dhcp" else 1)
+    buf.extend(_ip_to_bytes(net.get("ip", "")))
+    buf.extend(_ip_to_bytes(net.get("mask", "255.255.255.0")))
+    buf.extend(_ip_to_bytes(net.get("gateway", "")))
+    buf.extend(_ip_to_bytes(net.get("dns1", "8.8.8.8")))
+    buf.extend(_ip_to_bytes(net.get("dns2", "8.8.4.4")))
+
+    # Variable-length strings: SSID, WiFi key, vessel name
+    wifi = pilot.get("wifi", {})
+    for s, maxlen in [
+        (wifi.get("ssid", ""), 32),
+        (wifi.get("key", ""), 63),
+        (vessel.get("name", ""), 32),
+    ]:
+        raw = s.encode("utf-8", errors="replace")[:maxlen]
+        buf.append(len(raw))
+        buf.extend(raw)
+
+    # CRC8 over the entire payload (same algo as frame CRC)
+    crc = crc8_msb(bytes(buf))
+    buf.append(crc)
+
+    return bytes(buf)
+
+
+def push_all_settings_to_nano_eeprom(
+    nano: serial.Serial, pilot: dict, rct: dict
+) -> None:
+    """Serialize all settings and write to Nano EEPROM byte by byte."""
+    blob = _serialize_settings(pilot, rct)
+    for addr, byte_val in enumerate(blob):
+        send_nano_frame(nano, EEPROM_WRITE_CODE, (addr << 8) | byte_val)
+    log.info("EEPROM settings pushed to Nano (%d bytes, %d frames)", len(blob), len(blob))
+
+
+def reboot_nano(nano: serial.Serial) -> None:
+    """Reboot the Nano via DTR pulse (same as startup cold-boot fix)."""
+    nano.dtr = True
+    time.sleep(0.15)
+    nano.dtr = False
+    log.info("DTR reset pulse sent — Nano rebooting")
 
 
 def _apply_pilot_settings(settings: dict, nano: "serial.Serial | None" = None) -> None:
@@ -982,8 +1106,17 @@ def process_remote_line(
                         _pilot_settings[sec] = vals
                 _persist_pilot_settings(_pilot_settings)
                 _apply_pilot_settings(_pilot_settings, nano=nano)
+                # Push all settings to Nano EEPROM and reboot so they take effect
+                if nano is not None:
+                    rct_now = load_or_create_rct_settings()
+                    push_all_settings_to_nano_eeprom(nano, _pilot_settings, rct_now)
+                    reboot_nano(nano)
+                    time.sleep(2.0)  # settle delay for Nano setup()
+                    send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+                    push_rct_settings_to_nano(nano, rct_now)
+                    send_features_to_nano(nano, _pilot_settings)
                 remote_send(remote_sock, "SETTINGS OK")
-                log.info("SETTINGS SET: saved and applied")
+                log.info("SETTINGS SET: saved, applied, and pushed to Nano EEPROM")
             except Exception as exc:
                 log.warning("SETTINGS SET failed: %s", exc)
                 remote_send(remote_sock, "SETTINGS ERR")
@@ -1044,6 +1177,8 @@ def main() -> None:
     push_rct_settings_to_nano(nano, rct_settings)
     # Push feature enables to Nano so it knows which sensors/alarms are active.
     send_features_to_nano(nano, _pilot_settings)
+    # Sync all settings to Nano EEPROM (no reboot — Nano was just reset above).
+    push_all_settings_to_nano_eeprom(nano, _pilot_settings, rct_settings)
 
     nano_buf       = bytearray()
     pilot_buf      = bytearray()

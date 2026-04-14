@@ -20,13 +20,14 @@
 #include <SSD1306AsciiWire.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <EEPROM.h>
 #include "crc.h"    // your existing CRC-8 table + crc8()
 
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B34";
-const uint16_t INNOPILOT_BUILD_NUM = 34;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B36";
+const uint16_t INNOPILOT_BUILD_NUM = 36;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -100,6 +101,12 @@ const uint8_t FEATURE_PI_VOLTAGE      = 0x04; // A3 Pi supply voltage fault dete
 const uint8_t FEATURE_BATTERY_VOLTAGE = 0x08; // A0 main Vin over/under-voltage faults
 const uint8_t FEATURE_CURRENT_SENSOR  = 0x10; // A1 current sensor telemetry
 const uint8_t FEATURE_ON_BOARD_BUTTONS = 0x20; // physical button ladder on A6 is wired
+const uint8_t FEATURE_OLED_SH1106     = 0x40; // OLED uses SH1106 controller (132-col, offset 2)
+
+// ---- EEPROM settings layout ----
+const uint8_t EEPROM_MAGIC1          = 0xAA;
+const uint8_t EEPROM_MAGIC2          = 0x55;
+const uint8_t EEPROM_LAYOUT_VERSION  = 1;
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -1083,6 +1090,35 @@ void oled_draw() {
   }
 }
 
+// ---- EEPROM settings loader ----
+// Reads the binary settings block written by the bridge and extracts
+// feature_flags so the correct OLED driver is selected on boot.
+void eeprom_load_settings() {
+  if (EEPROM.read(0) != EEPROM_MAGIC1 || EEPROM.read(1) != EEPROM_MAGIC2) return;
+  if (EEPROM.read(2) != EEPROM_LAYOUT_VERSION) return;
+
+  // Walk the variable-length tail to find total block length.
+  // Fixed part is 44 bytes (offsets 0-43), then three length-prefixed strings + CRC.
+  uint16_t pos = 44;
+  for (uint8_t i = 0; i < 3; i++) {            // SSID, WiFi key, vessel name
+    uint8_t slen = EEPROM.read(pos);
+    pos += 1 + slen;
+    if (pos > 250) return;                      // sanity guard
+  }
+  // pos now points at the CRC byte
+  uint16_t block_len = pos;                     // bytes 0..(pos-1) are payload
+
+  // Validate CRC8 over the entire payload
+  uint8_t crc = 0xFF;
+  for (uint16_t i = 0; i < block_len; i++) {
+    crc = crc8_byte(crc, EEPROM.read(i));
+  }
+  if (crc != EEPROM.read(block_len)) return;    // CRC mismatch — ignore
+
+  // Extract feature flags (offset 3)
+  feature_flags = EEPROM.read(3);
+}
+
 bool oled_try_init(bool allow_blocking_splash) {
   // Probe I2C to check if OLED is present
   Wire.beginTransmission(OLED_ADDR);
@@ -1091,7 +1127,8 @@ bool oled_try_init(bool allow_blocking_splash) {
     return false;
   }
 
-  display.begin(&Adafruit128x64, OLED_ADDR);
+  const DevType* dev = (feature_flags & FEATURE_OLED_SH1106) ? &SH1106_128x64 : &Adafruit128x64;
+  display.begin(dev, OLED_ADDR);
   display.setFont(System5x7);
   oled_ok = true;
 
@@ -1744,6 +1781,13 @@ void process_packet() {
       break;
     }
 
+    case EEPROM_WRITE_CODE: {
+      uint8_t addr = (uint8_t)(value >> 8);
+      uint8_t data = (uint8_t)(value & 0xFF);
+      EEPROM.update(addr, data);  // update() avoids unnecessary wear
+      break;
+    }
+
     default:
       // Unhandled commands ignored for now
       break;
@@ -1796,6 +1840,7 @@ void setup() {
   temp_cycle_ms = 0;
 
   Wire.begin();
+  eeprom_load_settings();       // load feature_flags from EEPROM before OLED init
   oled_last_init_ms = millis();
   oled_try_init(true);
 

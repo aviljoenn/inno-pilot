@@ -6,6 +6,25 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.2.0_B36] — 2026-04-14 — OLED SH1106 toggle + EEPROM settings storage
+
+### Added
+- **Web** (`inno_web_remote.py`): "OLED SH1106 Mode" toggle in CONNECTIONS & FEATURES
+  settings section with hover tooltip explaining the pixel-shift symptom.
+- **Bridge** (`inno_pilot_bridge.py`): All settings now serialized to Nano EEPROM on
+  save and on bridge startup. Nano rebooted via DTR pulse after EEPROM write so
+  settings take effect immediately.
+- **Nano** (`motor_simple.ino`): EEPROM read on boot — loads feature flags (including
+  OLED type) before display init. OLED init selects SH1106_128x64 or Adafruit128x64
+  profile based on the stored flag.
+- **Nano** (`motor_simple.ino`): EEPROM_WRITE_CODE (0x53) handler for receiving
+  settings bytes from bridge.
+
+### Changed
+- **All** (Nano, Bridge, Web): Version bump v1.2.0_B34 → v1.2.0_B36.
+  B35 fixes (OTA IP auto-detect, Nano cold-boot DTR pulse, Flask Markup) are
+  included but were committed previously without a version string bump.
+
 ## [v1.2.0_B35] — 2026-04-13 — Fix: Pi5/Bookworm reinstall issues (OTA IP, Nano cold-boot UART, Flask Markup)
 
 ### Fixed

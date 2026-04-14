@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B34"
+INNOPILOT_VERSION = "v1.2.0_B36"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -79,6 +79,7 @@ _DEFAULT_SETTINGS: dict = {
         "battery_voltage_sensor": False,
         "current_sensor":         False,
         "on_board_buttons":       False,
+        "oled_sh1106":            False,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -1233,6 +1234,13 @@ body{
           <button class="sf-bb" data-boolid="on_board_buttons" data-bval="false">OFF</button>
         </div>
       </div>
+      <div class="sf-row" data-sfid="oled_sh1106">
+        <span class="sf-lbl" title="Enable if the left-most column of pixels appears on the right edge of the screen. This switches the OLED driver from SSD1306 to SH1106 mode, which corrects the 2-pixel column offset used by some 1.3&quot; OLED modules.">OLED SH1106 Mode &#9432;</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="oled_sh1106" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="oled_sh1106" data-bval="false">OFF</button>
+        </div>
+      </div>
 
       <div class="ss-title">AUTOPILOT</div>
       <div class="sf-row" data-sfid="deadband_pct">
@@ -1896,6 +1904,7 @@ var SF = [
   {id:'battery_voltage_sensor', sec:'features', type:'bool'},
   {id:'current_sensor',         sec:'features', type:'bool'},
   {id:'on_board_buttons',       sec:'features', type:'bool'},
+  {id:'oled_sh1106',            sec:'features', type:'bool'},
   // Autopilot
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
   {id:'pgain',                  sec:'autopilot', type:'number'},
