@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B38";
-const uint16_t INNOPILOT_BUILD_NUM = 38;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B39";
+const uint16_t INNOPILOT_BUILD_NUM = 39;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -276,6 +276,10 @@ const float RUDDER_RANGE_DEG = 40.0f;
 // Default 0x00: all features OFF until bridge configures them.
 // Safe-start behaviour: no limit-switch reads, no sensor fault alarms before bridge connects.
 uint8_t feature_flags = 0x00;
+
+// Deadband for AP command dead zone and PWM scaling (in delta units, 0–1000).
+// Loaded from EEPROM at boot (= deadband_pct × 10). Falls back to 20 if EEPROM absent.
+uint16_t g_deadband = 20;
 
 // ---- Command codes (same as motor.ino) ----
 enum commands {
@@ -1119,6 +1123,11 @@ void eeprom_load_settings() {
 
   // Extract feature flags (offset 3)
   feature_flags = EEPROM.read(3);
+
+  // Extract deadband (offsets 13-14, uint16 little-endian = deadband_pct × 10).
+  // Clamp to 5–200 (0.5–20%) to match the web UI limits and prevent zero-deadband runaway.
+  uint16_t db = (uint16_t)EEPROM.read(13) | ((uint16_t)EEPROM.read(14) << 8);
+  if (db >= 5 && db <= 200) g_deadband = db;
 }
 
 bool oled_try_init(bool allow_blocking_splash) {
@@ -1263,15 +1272,15 @@ void update_motor_from_command() {
   bool at_stbd_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 >= stbd_pilot_exit);
 
   int16_t delta = (int16_t)last_command_val - 1000;   // -1000..+1000
-  const int16_t DEADBAND = 20;
+  int16_t db    = (int16_t)g_deadband;                // cast once for signed comparisons
 
   bool manual_jog_active = manual_override;
   int8_t manual_jog_dir = manual_dir;
   if (!manual_override && !ap_active && !remote_manual_active && pi_alive && command_recent) {
-    if (delta > DEADBAND) {
+    if (delta > db) {
       manual_jog_active = true;
       manual_jog_dir = +1;
-    } else if (delta < -DEADBAND) {
+    } else if (delta < -db) {
       manual_jog_active = true;
       manual_jog_dir = -1;
     }
@@ -1587,7 +1596,7 @@ void update_motor_from_command() {
   // ----- Autopilot motor drive from last_command_val -----
   // last_command_val: 0..2000, 1000 = stop
   // Deadband around neutral
-  if (delta > -DEADBAND && delta < DEADBAND) {
+  if (delta > -db && delta < db) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1620,9 +1629,9 @@ void update_motor_from_command() {
   if (MAX_DUTY == MIN_DUTY) {
     duty = MIN_DUTY;
   } else {
-    int16_t span = 1000 - DEADBAND;
+    int16_t span = 1000 - db;
     if (span < 1) span = 1;
-    int16_t effective = abs_delta - DEADBAND;
+    int16_t effective = abs_delta - db;
     if (effective < 0) effective = 0;
 
     duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
