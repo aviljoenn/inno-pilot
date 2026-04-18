@@ -1817,6 +1817,9 @@ function handleToggleAction(action) {
       wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
       document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
+      // Immediately send the initial position so the Nano holds the current rudder
+      // position instead of driving toward its default centre target (500).
+      sendCmd('RUD ' + gManualRudPct.toFixed(1));
     });
   }
 }
