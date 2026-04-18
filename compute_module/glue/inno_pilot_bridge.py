@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B37"
-INNOPILOT_BUILD_NUM = 36  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B38"
+INNOPILOT_BUILD_NUM = 38  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -150,6 +150,7 @@ FEATURE_BATTERY_VOLTAGE   = 0x08  # A0 main Vin over/under-voltage fault detecti
 FEATURE_CURRENT_SENSOR    = 0x10  # A1 motor current telemetry
 FEATURE_ON_BOARD_BUTTONS  = 0x20  # physical button ladder on A6 is wired
 FEATURE_OLED_SH1106       = 0x40  # OLED uses SH1106 controller (vs SSD1306)
+FEATURE_INVERT_CLUTCH     = 0x80  # Clutch relay is active-LOW (invert pin 11 logic)
 
 # Bridge -> Nano: EEPROM write (0x53)
 EEPROM_WRITE_CODE         = 0x53  # Bridge->Nano: uint16 = (addr<<8)|data_byte
@@ -209,6 +210,7 @@ _DEFAULT_PILOT_SETTINGS: dict = {
         "current_sensor":         False,
         "on_board_buttons":       False,
         "oled_sh1106":            False,
+        "invert_clutch":          False,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -650,9 +652,10 @@ def send_features_to_nano(nano: serial.Serial, settings: dict) -> None:
     if feats.get("current_sensor",         False): mask |= FEATURE_CURRENT_SENSOR
     if feats.get("on_board_buttons",       False): mask |= FEATURE_ON_BOARD_BUTTONS
     if feats.get("oled_sh1106",            False): mask |= FEATURE_OLED_SH1106
+    if feats.get("invert_clutch",          False): mask |= FEATURE_INVERT_CLUTCH
     send_nano_frame(nano, FEATURES_CODE, mask)
     log.info(
-        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s btn=%s sh1106=%s)",
+        "Features -> Nano: 0x%02X  (limit=%s temp=%s pi_v=%s bat_v=%s curr=%s btn=%s sh1106=%s inv_clutch=%s)",
         mask,
         bool(mask & FEATURE_LIMIT_SWITCHES),
         bool(mask & FEATURE_TEMP_SENSOR),
@@ -661,6 +664,7 @@ def send_features_to_nano(nano: serial.Serial, settings: dict) -> None:
         bool(mask & FEATURE_CURRENT_SENSOR),
         bool(mask & FEATURE_ON_BOARD_BUTTONS),
         bool(mask & FEATURE_OLED_SH1106),
+        bool(mask & FEATURE_INVERT_CLUTCH),
     )
 
 
@@ -686,6 +690,7 @@ def _build_features_mask(settings: dict) -> int:
     if feats.get("current_sensor",         False): mask |= FEATURE_CURRENT_SENSOR
     if feats.get("on_board_buttons",       False): mask |= FEATURE_ON_BOARD_BUTTONS
     if feats.get("oled_sh1106",            False): mask |= FEATURE_OLED_SH1106
+    if feats.get("invert_clutch",          False): mask |= FEATURE_INVERT_CLUTCH
     return mask
 
 

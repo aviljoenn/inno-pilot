@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B36";
-const uint16_t INNOPILOT_BUILD_NUM = 36;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B38";
+const uint16_t INNOPILOT_BUILD_NUM = 38;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -102,6 +102,7 @@ const uint8_t FEATURE_BATTERY_VOLTAGE = 0x08; // A0 main Vin over/under-voltage 
 const uint8_t FEATURE_CURRENT_SENSOR  = 0x10; // A1 current sensor telemetry
 const uint8_t FEATURE_ON_BOARD_BUTTONS = 0x20; // physical button ladder on A6 is wired
 const uint8_t FEATURE_OLED_SH1106     = 0x40; // OLED uses SH1106 controller (132-col, offset 2)
+const uint8_t FEATURE_INVERT_CLUTCH   = 0x80; // Clutch relay is active-LOW (invert pin 11 logic)
 
 // ---- EEPROM settings layout ----
 const uint8_t EEPROM_MAGIC1          = 0xAA;
@@ -157,7 +158,8 @@ const uint8_t HBRIDGE_RPWM_PIN = 2;   // RPWM
 const uint8_t HBRIDGE_LPWM_PIN = 3;   // LPWM
 const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN (R_EN + L_EN tied together)
 
-// Clutch pin (active-HIGH: HIGH = engaged)
+// Clutch pin. Default active-HIGH: HIGH = engaged, LOW = disengaged.
+// Set FEATURE_INVERT_CLUTCH to reverse for active-LOW relay wiring.
 const uint8_t CLUTCH_PIN       = 11;
 
 // Limit switches (NC -> GND, HIGH = tripped / broken)
@@ -1281,7 +1283,9 @@ void update_motor_from_command() {
                        !pi_fault &&
                        !(flags & OVERTEMP_FAULT);
 
-  digitalWrite(CLUTCH_PIN, clutch_should ? HIGH : LOW);
+  // FEATURE_INVERT_CLUTCH: relay is active-LOW, so invert the pin level.
+  bool clutch_pin_high = clutch_should ^ (bool)(feature_flags & FEATURE_INVERT_CLUTCH);
+  digitalWrite(CLUTCH_PIN, clutch_pin_high ? HIGH : LOW);
 
   // If in a fault state, don't drive the motor at all
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
