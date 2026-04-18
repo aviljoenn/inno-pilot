@@ -1913,6 +1913,7 @@ var SF = [
   {id:'current_sensor',         sec:'features', type:'bool'},
   {id:'on_board_buttons',       sec:'features', type:'bool'},
   {id:'oled_sh1106',            sec:'features', type:'bool'},
+  {id:'invert_clutch',          sec:'features', type:'bool'},
   // Autopilot
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
   {id:'pgain',                  sec:'autopilot', type:'number'},
