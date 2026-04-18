@@ -87,7 +87,7 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B36"
+INNOPILOT_VERSION   = "v1.2.0_B37"
 INNOPILOT_BUILD_NUM = 36  # increment with each push during development
 
 # ---------------------------------------------------------------------------
@@ -104,9 +104,9 @@ BAUD       = 38400
 # Bridge -> Nano commands
 PILOT_HEADING_CODE         = 0xE2  # imu.heading * 10 (uint16, 0-3600)
 PILOT_COMMAND_CODE         = 0xE3  # ap.heading_command * 10 (uint16)
-PILOT_RUDDER_CODE          = 0xE4  # rudder.angle * 10 (int16 as two's-complement uint16)
-PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # +rudder.range * 10 (int16)
-PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # -rudder.range * 10 (int16)
+PILOT_RUDDER_CODE          = 0xE4  # -rudder.angle * 10 (int16): Nano convention positive=stbd
+PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # -rudder.range * 10 (int16, negative: port is the lower end)
+PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # +rudder.range * 10 (int16, positive: stbd is the upper end)
 # NOTE: 0xE7 is RESET_CODE in pypilot servo protocol — do NOT use for bridge commands
 
 # pypilot servo protocol codes (relayed verbatim to Nano via PILOT_PORT)
@@ -1257,10 +1257,12 @@ def main() -> None:
             if heading_cmd is not None:
                 send_nano_frame(nano, PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd))
             if rudder_angle is not None:
-                send_nano_frame(nano, PILOT_RUDDER_CODE, enc_deg10_i16(rudder_angle))
+                # Negate: pypilot positive=port; Nano expects positive=stbd.
+                send_nano_frame(nano, PILOT_RUDDER_CODE, enc_deg10_i16(-rudder_angle))
             if rudder_range is not None:
-                port_lim =  abs(rudder_range)
-                stbd_lim = -abs(rudder_range)
+                # Port limit is negative (lower end), stbd limit is positive (upper end).
+                port_lim = -abs(rudder_range)
+                stbd_lim =  abs(rudder_range)
                 send_nano_frame(nano, PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim))
                 send_nano_frame(nano, PILOT_RUDDER_STBD_LIM_CODE, enc_deg10_i16(stbd_lim))
 
@@ -1277,9 +1279,11 @@ def main() -> None:
                 if heading_cmd is not None:
                     failed.update(remote_send_many(remote_clients, f"CMD {heading_cmd:.1f}"))
                 if rudder_angle is not None:
-                    failed.update(remote_send_many(remote_clients, f"RDR {rudder_angle:.1f}"))
+                    # Negate so remote receives positive=stbd (matching RUD command convention).
+                    failed.update(remote_send_many(remote_clients, f"RDR {-rudder_angle:.1f}"))
                 if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
-                    rudder_pct = (rudder_angle + rudder_range) / (2.0 * rudder_range) * 100.0
+                    # 0% = full port, 100% = full stbd (consistent with RUD command input).
+                    rudder_pct = (rudder_range - rudder_angle) / (2.0 * rudder_range) * 100.0
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
                     failed.update(remote_send_many(remote_clients, f"RDR_PCT {rudder_pct:.1f}"))
                 if bstate.nano_comms_crit:
