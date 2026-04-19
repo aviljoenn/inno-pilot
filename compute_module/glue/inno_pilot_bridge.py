@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B46"
-INNOPILOT_BUILD_NUM = 46  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B47"
+INNOPILOT_BUILD_NUM = 47  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -156,8 +156,11 @@ FEATURE_INVERT_CLUTCH     = 0x80  # Clutch relay is active-LOW (invert pin 11 lo
 # Not sent via FEATURES_CODE at runtime; EEPROM-only until direction-inversion logic is wired in.
 FEATURE2_INVERT_MOTOR     = 0x01  # Invert H-bridge direction (storage only for now)
 
-# Bridge -> Nano: EEPROM write (0x53)
-EEPROM_WRITE_CODE         = 0x53  # Bridge->Nano: uint16 = (addr<<8)|data_byte
+# Bridge -> Nano: settings EEPROM write (0xF2, B47+).
+# 0x53 is reserved for the arduino_servo pass-through protocol (EEPROM_WRITE_CODE).
+# Using a separate code avoids the byte-order conflict: arduino_servo encodes
+# as lo=addr/hi=data, while the bridge settings push uses hi=addr/lo=data.
+BRIDGE_SETTINGS_WRITE_CODE = 0xF2  # Bridge->Nano: uint16 = (addr<<8)|data_byte
 
 # EEPROM binary layout constants
 EEPROM_MAGIC1             = 0xAA
@@ -789,7 +792,7 @@ def push_all_settings_to_nano_eeprom(
     """Serialize all settings and write to Nano EEPROM byte by byte."""
     blob = _serialize_settings(pilot, rct)
     for addr, byte_val in enumerate(blob):
-        send_nano_frame(nano, EEPROM_WRITE_CODE, (addr << 8) | byte_val)
+        send_nano_frame(nano, BRIDGE_SETTINGS_WRITE_CODE, (addr << 8) | byte_val)
     nano.flush()       # wait for OS buffer to drain to USB-serial chip
     time.sleep(0.5)    # allow CH340 to finish UART transmission
     log.info("EEPROM settings pushed to Nano (%d bytes, %d frames)", len(blob), len(blob))

@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B46";
-const uint16_t INNOPILOT_BUILD_NUM = 46;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B47";
+const uint16_t INNOPILOT_BUILD_NUM = 47;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -112,6 +112,21 @@ const uint8_t FEATURE2_INVERT_MOTOR   = 0x01; // Invert H-bridge direction (stor
 const uint8_t EEPROM_MAGIC1          = 0xAA;
 const uint8_t EEPROM_MAGIC2          = 0x55;
 const uint8_t EEPROM_LAYOUT_VERSION  = 2;
+
+// ---- arduino_servo EEPROM mirror (B47) ----
+// 32-byte opaque region that mirrors the arduino_servo_data struct as serialised
+// by the Pi-side arduino_servo driver (ARM gcc layout, includes 1 padding byte
+// before rudder_offset so that int16_t is 2-byte aligned).
+// Key struct byte offsets (ARM-padded):
+//   8-9:  rudder_offset      (int16_t, tobase255s(v × 64))
+//   10-11: rudder_scale      (int16_t, tobase255s(v × 8))
+//   12-13: rudder_nonlinearity (int16_t, tobase255s(v × 8))
+//   25-30: signature "arsv27" (validity sentinel)
+// Motor_simple does not decode these fields — it stores/returns raw bytes.
+// On first boot (EEPROM = 0xFF) the signature check fails inside arduino_servo,
+// which then pushes the live calibration via EEPROM_WRITE_CODE before succeeding.
+const uint16_t ASRV_EEPROM_BASE = 180;
+const uint8_t  ASRV_EEPROM_SIZE = 32;
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -299,9 +314,10 @@ enum commands {
   REPROGRAM_CODE            = 0x19,
   DISENGAGE_CODE            = 0x68,
   MAX_SLEW_CODE             = 0x71,
-  EEPROM_READ_CODE          = 0x91,
-  EEPROM_WRITE_CODE         = 0x53,
-  CLUTCH_PWM_AND_BRAKE_CODE = 0x36
+  EEPROM_READ_CODE              = 0x91,
+  EEPROM_WRITE_CODE             = 0x53,  // arduino_servo protocol: lo=struct_addr, hi=data
+  CLUTCH_PWM_AND_BRAKE_CODE     = 0x36,
+  BRIDGE_SETTINGS_WRITE_CODE    = 0xF2   // bridge settings push (B47+): hi=addr, lo=data
 };
 
 // ---- Forward declarations ----
@@ -1758,9 +1774,35 @@ void process_packet() {
     }
 
     case EEPROM_WRITE_CODE: {
+      // arduino_servo protocol encoding: lo byte = struct byte addr, hi byte = data.
+      // Writes into the arduino_servo EEPROM mirror region only; addr is bounds-checked.
+      uint8_t addr = (uint8_t)(value & 0xFF);
+      uint8_t data = (uint8_t)(value >> 8);
+      if (addr < ASRV_EEPROM_SIZE) {
+        EEPROM.update(ASRV_EEPROM_BASE + addr, data);
+      }
+      break;
+    }
+
+    case BRIDGE_SETTINGS_WRITE_CODE: {
+      // Bridge settings push encoding (B47+): hi byte = EEPROM addr, lo byte = data.
+      // Writes into the bridge settings region (addresses 0–175).
       uint8_t addr = (uint8_t)(value >> 8);
       uint8_t data = (uint8_t)(value & 0xFF);
-      EEPROM.update(addr, data);  // update() avoids unnecessary wear
+      EEPROM.update(addr, data);
+      break;
+    }
+
+    case EEPROM_READ_CODE: {
+      // arduino_servo requests a range of struct bytes to verify its local copy.
+      // Respond with one EEPROM_VALUE_CODE frame per byte: lo=struct_addr, hi=stored_byte.
+      // arduino_servo processes frames in even/odd pairs; sequential iteration satisfies this.
+      uint8_t start = (uint8_t)(value & 0xFF);
+      uint8_t end   = (uint8_t)(value >> 8);
+      for (uint8_t a = start; a < end && a < ASRV_EEPROM_SIZE; a++) {
+        send_frame(EEPROM_VALUE_CODE,
+                   (uint16_t)a | ((uint16_t)EEPROM.read(ASRV_EEPROM_BASE + a) << 8));
+      }
       break;
     }
 
