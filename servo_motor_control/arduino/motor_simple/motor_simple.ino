@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B44";
-const uint16_t INNOPILOT_BUILD_NUM = 44;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B45";
+const uint16_t INNOPILOT_BUILD_NUM = 45;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -48,8 +48,8 @@ const uint8_t BRIDGE_HELLO_CODE = 0xF0;
 const uint8_t BRIDGE_HELLO_ACK_CODE = 0xF1;
 const uint8_t BRIDGE_VERSION_CODE = 0xF2;  // Bridge -> Nano: build number
 // Bridge->Nano: pypilot rudder limits (tenths of degrees)
-const uint8_t PILOT_RUDDER_PORT_LIM_CODE = 0xE5; // port limit * 10 (int16)
-const uint8_t PILOT_RUDDER_STBD_LIM_CODE = 0xE6; // stbd limit * 10 (int16)
+const uint8_t PILOT_RUDDER_DIRB_LIM_CODE = 0xE5; // Dir-B limit * 10 (int16)
+const uint8_t PILOT_RUDDER_DIRA_LIM_CODE = 0xE6; // Dir-A limit * 10 (int16)
 // Remote manual control (Bridge->Nano)
 const uint8_t MANUAL_RUD_TARGET_CODE = 0xE8; // remote rudder target 0..1000
 const uint8_t MANUAL_MODE_CODE       = 0xE9; // 1=enter MANUAL, 0=exit MANUAL
@@ -124,11 +124,11 @@ bool     pilot_rudder_valid  = false;
 int16_t  pilot_rudder_deg10  = 0;
 
 // Rudder limits from pypilot (tenths of degrees)
-bool     pilot_port_lim_valid = false;
-int16_t  pilot_port_lim_deg10 = 0;
+bool     pilot_dirb_lim_valid = false;
+int16_t  pilot_dirb_lim_deg10 = 0;
 
-bool     pilot_stbd_lim_valid = false;
-int16_t  pilot_stbd_lim_deg10 = 0;
+bool     pilot_dira_lim_valid = false;
+int16_t  pilot_dira_lim_deg10 = 0;
 
 bool any_serial_rx = false;
 unsigned long last_serial_rx_ms = 0;
@@ -167,8 +167,8 @@ const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN (R_EN + L_EN tied together)
 const uint8_t CLUTCH_PIN       = 11;
 
 // Limit switches (NC -> GND, HIGH = tripped / broken)
-const uint8_t PORT_LIMIT_PIN   = 7;
-const uint8_t STBD_LIMIT_PIN   = 8;
+const uint8_t DIRB_LIMIT_PIN   = 7;   // Dir-B end limit switch
+const uint8_t DIRA_LIMIT_PIN   = 8;   // Dir-A end limit switch
 
 const float ADC_VREF              = 5.00f;
 const float VOLTAGE_SCALE         = 3.323f; // Change to 3.323f for .12 and 5.156f for .13
@@ -196,11 +196,11 @@ const float MAX_CONTROLLER_TEMP_C = 50.0f;
 
 // Manual jog state (used when AP is disengaged)
 bool  manual_override = false;  // true while a manual jog is active
-int8_t manual_dir     = 0;      // -1 = port, +1 = starboard, 0 = none
+int8_t manual_dir     = 0;      // -1 = Dir-B, +1 = Dir-A, 0 = none
 
 // Remote manual mode state (from Bridge via TCP)
 bool     remote_manual_active     = false;  // true when Bridge is in MANUAL mode
-uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full port, 1000=full stbd
+uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full Dir-B, 1000=full Dir-A
 
 // ---- Remote-manual brake state machine ----
 // States: 0 = DRIVING (toward target), 1 = BRAKING (timed reverse pulse), 2 = SETTLED (in deadband)
@@ -215,7 +215,7 @@ unsigned long     rm_brake_dur_ms  = 0;       // computed brake duration for thi
 const unsigned long SPEED_WINDOW_MS = 50;
 int           speed_prev_adc  = 511;          // ADC snapshot at start of window
 unsigned long speed_prev_ms   = 0;            // millis() at snapshot
-int16_t       rudder_speed_cps = 0;           // signed: +ve = increasing ADC (stbd)
+int16_t       rudder_speed_cps = 0;           // signed: +ve = increasing ADC (Dir-A)
 
 // Minimum speed (cps) below which we just coast instead of active braking.
 // Below ~60 cps coast distance is within deadband.
@@ -264,13 +264,13 @@ const unsigned long OLED_INIT_RETRY_MS = 1000UL;
 // Raw ADC counts (0..1023)
 // Hard safety endpoints for the rudder pot. These should be near the ADC rails so
 // manual jog only stops at the mechanical ends if everything else fails.
-const int RUDDER_ADC_PORT_END  = 1;     // ADC at port end (lower = port)
-const int RUDDER_ADC_STBD_END  = 1022;  // ADC at starboard end (higher = stbd)
+const int RUDDER_ADC_DIRB_END  = 1;     // ADC at Dir-B end (lower = Dir-B)
+const int RUDDER_ADC_DIRA_END  = 1022;  // ADC at Dir-A end (higher = Dir-A)
 const int RUDDER_ADC_MARGIN    = 10;    // safety margin on each end
 const int RUDDER_ADC_END_HYST  = 8;    // extra counts to CLEAR end-latch (prevents flicker)
 
 // Tolerance for centring (not used here but handy later)
-const int RUDDER_CENTRE_ADC    = (RUDDER_ADC_PORT_END + RUDDER_ADC_STBD_END) / 2;
+const int RUDDER_CENTRE_ADC    = (RUDDER_ADC_DIRB_END + RUDDER_ADC_DIRA_END) / 2;
 const int RUDDER_CENTRE_TOL    = 5;
 
 // Rudder angle display range (approx ±40°)
@@ -314,8 +314,8 @@ enum commands {
 uint16_t read_rudder_scaled();
 int read_rudder_adc();
 void service_rudder_adc();
-bool port_limit_switch_hit();
-bool stbd_limit_switch_hit();
+bool dirb_limit_switch_hit();
+bool dira_limit_switch_hit();
 bool oled_try_init(bool allow_blocking_splash);
 void send_frame(uint8_t code, uint16_t value);
 void show_overlay(const char *text);
@@ -339,11 +339,11 @@ enum {
   OVERCURRENT_FAULT   = 0x0004,
   ENGAGED             = 0x0008,
   INVALID             = 0x0010,
-  PORT_PIN_FAULT      = 0x0020,
-  STARBOARD_PIN_FAULT = 0x0040,
+  DIRB_PIN_FAULT      = 0x0020,
+  DIRA_PIN_FAULT      = 0x0040,
   BADVOLTAGE_FAULT    = 0x0080,
-  MIN_RUDDER_FAULT    = 0x0100,   // starboard end
-  MAX_RUDDER_FAULT    = 0x0200,   // port end
+  MIN_RUDDER_FAULT    = 0x0100,   // Dir-A end
+  MAX_RUDDER_FAULT    = 0x0200,   // Dir-B end
   CURRENT_RANGE       = 0x0400,
   BAD_FUSES           = 0x0800,
   COMMS_WARN_FAULT    = 0x1000,  // error rate elevated (>= 5 errors in 10-second window)
@@ -422,7 +422,7 @@ uint16_t flags            = REBOOTED;   // reported once then cleared
 uint16_t last_command_val = 1000;       // 0..2000, 1000 = neutral
 unsigned long last_command_ms = 0;
 uint16_t rudder_raw       = 0;          // 0..65535 (scaled)
-int      rudder_adc_last  = 0;          // 0..1023, inverted (higher = stbd)
+int      rudder_adc_last  = 0;          // 0..1023, inverted (higher = Dir-A)
 
 // ---- Rudder ADC FIFO moving-average state ----
 // service_rudder_adc() writes here; all other code reads rudder_adc_smoothed.
@@ -430,7 +430,7 @@ uint16_t rdr_fifo[16];                 // ring buffer — size matches RUDDER_FI
 uint8_t  rdr_fifo_idx         = 0;    // next write position
 uint32_t rdr_fifo_sum         = 0;    // running sum for O(1) average
 bool     rdr_fifo_ready       = false; // false until first Stage-1 pre-fills the FIFO
-int      rudder_adc_smoothed  = 511;  // published value, inverted (higher = stbd)
+int      rudder_adc_smoothed  = 511;  // published value, inverted (higher = Dir-A)
 int      rudder_adc_raw_disp  = 511;  // non-inverted, for OLED debug row
 
 float pi_voltage_v = 0.0f;
@@ -801,18 +801,18 @@ void oled_draw() {
 
   // --- Pre-calculate rudder overshoot (used in rows 2-3 warning and row 6 bar) ---
   bool rudder_overshoot_active = false;
-  bool rudder_over_port        = false;
-  bool rudder_over_stbd        = false;
+  bool rudder_over_dirb        = false;
+  bool rudder_over_dira        = false;
   {
-    bool lims_ok = pilot_rudder_valid && pilot_port_lim_valid && pilot_stbd_lim_valid
-                   && (pilot_stbd_lim_deg10 > pilot_port_lim_deg10);
+    bool lims_ok = pilot_rudder_valid && pilot_dirb_lim_valid && pilot_dira_lim_valid
+                   && (pilot_dira_lim_deg10 > pilot_dirb_lim_deg10);
     if (lims_ok) {
-      if (pilot_rudder_deg10 < pilot_port_lim_deg10) {
+      if (pilot_rudder_deg10 < pilot_dirb_lim_deg10) {
         rudder_overshoot_active = true;
-        rudder_over_port        = true;
-      } else if (pilot_rudder_deg10 > pilot_stbd_lim_deg10) {
+        rudder_over_dirb        = true;
+      } else if (pilot_rudder_deg10 > pilot_dira_lim_deg10) {
         rudder_overshoot_active = true;
-        rudder_over_stbd        = true;
+        rudder_over_dira        = true;
       }
     }
   }
@@ -1043,36 +1043,36 @@ void oled_draw() {
     display.clearToEOL();
   }
 
-  // Row 5: Graphical rudder bar — P---I---S
-  // 'P' = port end (col 0), 'S' = stbd end (col 20), 'I' = indicator at proportional position.
+  // Row 5: Graphical rudder bar — B---I---A
+  // 'B' = Dir-B end (col 0), 'A' = Dir-A end (col 20), 'I' = indicator at proportional position.
   // Track filled with '-'. When rudder exceeds a limit the 'I' blinks over 'P' or 'S'.
   {
     char rudbar[22];
     memset(rudbar, '-', 21);
-    rudbar[0]  = 'P';
-    rudbar[20] = 'S';
+    rudbar[0]  = 'B';
+    rudbar[20] = 'A';
     rudbar[21] = '\0';
 
-    bool lims_ok = pilot_rudder_valid && pilot_port_lim_valid && pilot_stbd_lim_valid
-                   && (pilot_stbd_lim_deg10 > pilot_port_lim_deg10);
+    bool lims_ok = pilot_rudder_valid && pilot_dirb_lim_valid && pilot_dira_lim_valid
+                   && (pilot_dira_lim_deg10 > pilot_dirb_lim_deg10);
 
     if (lims_ok) {
-      if (rudder_over_port) {
-        // Blink 'I' over 'P' (col 0)
+      if (rudder_over_dirb) {
+        // Blink 'I' over 'B' (col 0)
         static bool blink_p = true;
         static unsigned long blink_p_ms = 0;
         if (now - blink_p_ms >= 400UL) { blink_p_ms = now; blink_p = !blink_p; }
         if (blink_p) rudbar[0] = 'I';
-      } else if (rudder_over_stbd) {
-        // Blink 'I' over 'S' (col 20)
+      } else if (rudder_over_dira) {
+        // Blink 'I' over 'A' (col 20)
         static bool blink_s = true;
         static unsigned long blink_s_ms = 0;
         if (now - blink_s_ms >= 400UL) { blink_s_ms = now; blink_s = !blink_s; }
         if (blink_s) rudbar[20] = 'I';
       } else {
-        // Map pilot_rudder_deg10 in [port_lim, stbd_lim] → columns 1..19
-        int32_t num = (int32_t)(pilot_rudder_deg10 - pilot_port_lim_deg10) * 18;
-        int32_t den = pilot_stbd_lim_deg10 - pilot_port_lim_deg10;
+        // Map pilot_rudder_deg10 in [dirb_lim, dira_lim] → columns 1..19
+        int32_t num = (int32_t)(pilot_rudder_deg10 - pilot_dirb_lim_deg10) * 18;
+        int32_t den = pilot_dira_lim_deg10 - pilot_dirb_lim_deg10;
         int16_t col = (int16_t)(num / den) + 1;
         if (col < 1)  col = 1;
         if (col > 19) col = 19;
@@ -1086,7 +1086,7 @@ void oled_draw() {
       if (col > 19) col = 19;
       rudbar[col] = 'I';
     }
-    // else: no valid rudder data — show P and S only, no indicator
+    // else: no valid rudder data — show B and A only, no indicator
 
     display.setCursor(0, 5);
     display.print(rudbar);
@@ -1178,14 +1178,14 @@ bool oled_try_init(bool allow_blocking_splash) {
 
 // Read rudder pot and scale to 0..65535 for telemetry
 uint16_t read_rudder_scaled() {
-  int a = read_rudder_adc();   // 0..1023 (inverted so higher = starboard)
+  int a = read_rudder_adc();   // 0..1023 (inverted so higher = Dir-A)
   rudder_adc_last = a;              // save raw for limit logic
   return (uint16_t)a * 64;          // 0..~65472
 }
 
 int read_rudder_adc() {
   // Return the pre-averaged, channel-settled value maintained by
-  // service_rudder_adc(). Already inverted: higher counts = starboard.
+  // service_rudder_adc(). Already inverted: higher counts = Dir-A.
   return rudder_adc_smoothed;
 }
 
@@ -1228,7 +1228,7 @@ void service_rudder_adc() {
     rdr_fifo_idx = (rdr_fifo_idx + 1) % RUDDER_FIFO_SIZE;
   }
 
-  // Publish: FIFO average, inverted so higher = starboard.
+  // Publish: FIFO average, inverted so higher = Dir-A.
   uint16_t avg_raw    = (uint16_t)(rdr_fifo_sum / RUDDER_FIFO_SIZE);
   rudder_adc_smoothed = 1023 - (int)avg_raw;  // inverted for limit/motor logic
   rudder_adc_raw_disp = (int)avg_raw;          // non-inverted for OLED debug row
@@ -1236,27 +1236,27 @@ void service_rudder_adc() {
 
 // ---- Limit logic helpers ----
 // Reads the NC limit switch pins only when the feature is enabled by the bridge.
-bool port_limit_switch_hit() {
+bool dirb_limit_switch_hit() {
   if (!(feature_flags & FEATURE_LIMIT_SWITCHES)) {
     return false;  // feature disabled: use pot-based soft limits only
   }
   // NC -> GND, so HIGH = open/tripped/broken
-  return digitalRead(PORT_LIMIT_PIN) == HIGH;
+  return digitalRead(DIRB_LIMIT_PIN) == HIGH;
 }
 
-bool stbd_limit_switch_hit() {
+bool dira_limit_switch_hit() {
   if (!(feature_flags & FEATURE_LIMIT_SWITCHES)) {
     return false;
   }
-  return digitalRead(STBD_LIMIT_PIN) == HIGH;
+  return digitalRead(DIRA_LIMIT_PIN) == HIGH;
 }
 
 // ---- Motor + clutch drive based on last_command_val & flags ----
 void update_motor_from_command() {
   // Always update rudder ADC for limit logic
-  int a = read_rudder_adc();   // 0..1023 (inverted so higher = starboard)
+  int a = read_rudder_adc();   // 0..1023 (inverted so higher = Dir-A)
   rudder_adc_last = a;
-  
+
   unsigned long now = millis();
   bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
   bool ap_active = ap_enabled_remote && pi_alive;
@@ -1273,16 +1273,16 @@ void update_motor_from_command() {
     | ((uint16_t)((last_command_val >> 3) & 0xFF) << 8)
   bool pilot_limits_ok = pi_alive &&
                          pilot_rudder_valid &&
-                         pilot_port_lim_valid &&
-                         pilot_stbd_lim_valid &&
-                         (pilot_port_lim_deg10 < pilot_stbd_lim_deg10);
+                         pilot_dirb_lim_valid &&
+                         pilot_dira_lim_valid &&
+                         (pilot_dirb_lim_deg10 < pilot_dira_lim_deg10);
   const int16_t PILOT_LIMIT_HYST_DEG10 = 5;  // 0.5 deg hysteresis to avoid jitter
-  bool at_port_pilot_enter = pilot_limits_ok && (pilot_rudder_deg10 <= pilot_port_lim_deg10);
-  bool at_stbd_pilot_enter = pilot_limits_ok && (pilot_rudder_deg10 >= pilot_stbd_lim_deg10);
-  int16_t port_pilot_exit = pilot_port_lim_deg10 + PILOT_LIMIT_HYST_DEG10;
-  int16_t stbd_pilot_exit = pilot_stbd_lim_deg10 - PILOT_LIMIT_HYST_DEG10;
-  bool at_port_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 <= port_pilot_exit);
-  bool at_stbd_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 >= stbd_pilot_exit);
+  bool at_dirb_pilot_enter = pilot_limits_ok && (pilot_rudder_deg10 <= pilot_dirb_lim_deg10);
+  bool at_dira_pilot_enter = pilot_limits_ok && (pilot_rudder_deg10 >= pilot_dira_lim_deg10);
+  int16_t dirb_pilot_exit = pilot_dirb_lim_deg10 + PILOT_LIMIT_HYST_DEG10;
+  int16_t dira_pilot_exit = pilot_dira_lim_deg10 - PILOT_LIMIT_HYST_DEG10;
+  bool at_dirb_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 <= dirb_pilot_exit);
+  bool at_dira_pilot_hold = pilot_limits_ok && (pilot_rudder_deg10 >= dira_pilot_exit);
 
   int16_t delta = (int16_t)last_command_val - 1000;   // -1000..+1000
   int16_t db    = (int16_t)g_deadband;                // cast once for signed comparisons
@@ -1318,91 +1318,91 @@ void update_motor_from_command() {
   }
 
   // Enter thresholds (near the ends)
-  bool at_port_enter = port_limit_switch_hit() ||
-                       (a <= (RUDDER_ADC_PORT_END + RUDDER_ADC_MARGIN));
+  bool at_dirb_enter = dirb_limit_switch_hit() ||
+                       (a <= (RUDDER_ADC_DIRB_END + RUDDER_ADC_MARGIN));
 
-  bool at_stbd_enter = stbd_limit_switch_hit() ||
-                       (a >= (RUDDER_ADC_STBD_END - RUDDER_ADC_MARGIN));
+  bool at_dira_enter = dira_limit_switch_hit() ||
+                       (a >= (RUDDER_ADC_DIRA_END - RUDDER_ADC_MARGIN));
 
   // Exit thresholds (must move further away before we clear the latch)
-  // PORT end is low  ADC: we "hold" port-end while ADC <= port_exit
-  // STBD end is high ADC: we "hold" stbd-end while ADC >= stbd_exit
-  int port_exit = RUDDER_ADC_PORT_END + (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
-  int stbd_exit = RUDDER_ADC_STBD_END - (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
+  // Dir-B end is low ADC: we "hold" Dir-B end while ADC <= dirb_exit
+  // Dir-A end is high ADC: we "hold" Dir-A end while ADC >= dira_exit
+  int dirb_exit = RUDDER_ADC_DIRB_END + (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
+  int dira_exit = RUDDER_ADC_DIRA_END - (RUDDER_ADC_MARGIN + RUDDER_ADC_END_HYST);
 
-  bool at_port_hold = port_limit_switch_hit() || (a <= port_exit);
-  bool at_stbd_hold = stbd_limit_switch_hit() || (a >= stbd_exit);
+  bool at_dirb_hold = dirb_limit_switch_hit() || (a <= dirb_exit);
+  bool at_dira_hold = dira_limit_switch_hit() || (a >= dira_exit);
 
   // Latch ensures only one end is active; hysteresis prevents flicker/reset on jitter.
-  static uint8_t end_latch = 0;  // 0 none, 1 port, 2 stbd
+  static uint8_t end_latch = 0;  // 0 none, 1 Dir-B, 2 Dir-A
 
   switch (end_latch) {
     case 0:
-      if (at_port_enter && !at_stbd_enter) {
+      if (at_dirb_enter && !at_dira_enter) {
         end_latch = 1;
-      } else if (at_stbd_enter && !at_port_enter) {
+      } else if (at_dira_enter && !at_dirb_enter) {
         end_latch = 2;
-      } else if (at_port_enter && at_stbd_enter) {
+      } else if (at_dirb_enter && at_dira_enter) {
         // If both appear "true" (noise / overlap), pick the closer end.
-        int dist_port = abs(a - RUDDER_ADC_PORT_END);
-        int dist_stbd = abs(a - RUDDER_ADC_STBD_END);
-        end_latch = (dist_port <= dist_stbd) ? 1 : 2;
+        int dist_dirb = abs(a - RUDDER_ADC_DIRB_END);
+        int dist_dira = abs(a - RUDDER_ADC_DIRA_END);
+        end_latch = (dist_dirb <= dist_dira) ? 1 : 2;
       }
       break;
 
     case 1:
       // Stay latched until we've moved away past the EXIT threshold
-      if (!at_port_hold) end_latch = 0;
+      if (!at_dirb_hold) end_latch = 0;
       break;
 
     case 2:
-      if (!at_stbd_hold) end_latch = 0;
+      if (!at_dira_hold) end_latch = 0;
       break;
   }
 
-  bool at_port_end = (end_latch == 1) && at_port_hold;
-  bool at_stbd_end = (end_latch == 2) && at_stbd_hold;
+  bool at_dirb_end = (end_latch == 1) && at_dirb_hold;
+  bool at_dira_end = (end_latch == 2) && at_dira_hold;
 
   // Pilot limit latch mirrors the ADC end latch to avoid jitter around calibrated limits.
-  static uint8_t pilot_latch = 0;  // 0 none, 1 port, 2 stbd
+  static uint8_t pilot_latch = 0;  // 0 none, 1 Dir-B, 2 Dir-A
 
   if (!pilot_limits_ok) {
     pilot_latch = 0;
   } else {
     switch (pilot_latch) {
       case 0:
-        if (at_port_pilot_enter && !at_stbd_pilot_enter) {
+        if (at_dirb_pilot_enter && !at_dira_pilot_enter) {
           pilot_latch = 1;
-        } else if (at_stbd_pilot_enter && !at_port_pilot_enter) {
+        } else if (at_dira_pilot_enter && !at_dirb_pilot_enter) {
           pilot_latch = 2;
-        } else if (at_port_pilot_enter && at_stbd_pilot_enter) {
-          int dist_port = abs(pilot_rudder_deg10 - pilot_port_lim_deg10);
-          int dist_stbd = abs(pilot_rudder_deg10 - pilot_stbd_lim_deg10);
-          pilot_latch = (dist_port <= dist_stbd) ? 1 : 2;
+        } else if (at_dirb_pilot_enter && at_dira_pilot_enter) {
+          int dist_dirb = abs(pilot_rudder_deg10 - pilot_dirb_lim_deg10);
+          int dist_dira = abs(pilot_rudder_deg10 - pilot_dira_lim_deg10);
+          pilot_latch = (dist_dirb <= dist_dira) ? 1 : 2;
         }
         break;
 
       case 1:
-        if (!at_port_pilot_hold) pilot_latch = 0;
+        if (!at_dirb_pilot_hold) pilot_latch = 0;
         break;
 
       case 2:
-        if (!at_stbd_pilot_hold) pilot_latch = 0;
+        if (!at_dira_pilot_hold) pilot_latch = 0;
         break;
     }
   }
 
-  bool at_port_pilot = (pilot_latch == 1) && at_port_pilot_hold;
-  bool at_stbd_pilot = (pilot_latch == 2) && at_stbd_pilot_hold;
+  bool at_dirb_pilot = (pilot_latch == 1) && at_dirb_pilot_hold;
+  bool at_dira_pilot = (pilot_latch == 2) && at_dira_pilot_hold;
 
   // Update rudder fault flags (as before)
-  if (at_port_end) {
+  if (at_dirb_end) {
     flags |= MAX_RUDDER_FAULT;
   } else {
     flags &= ~MAX_RUDDER_FAULT;
   }
 
-  if (at_stbd_end) {
+  if (at_dira_end) {
     flags |= MIN_RUDDER_FAULT;
   } else {
     flags &= ~MIN_RUDDER_FAULT;
@@ -1425,19 +1425,19 @@ void update_motor_from_command() {
   //   RM_SETTLED : inside deadband, motor off
   //
   if (remote_manual_active) {
-    // Map 0..1000 target to port-end..stbd-end ADC range
-    int target_adc = RUDDER_ADC_PORT_END +
-      (int)((long)(RUDDER_ADC_STBD_END - RUDDER_ADC_PORT_END) * manual_rud_target_0_1000 / 1000);
+    // Map 0..1000 target to Dir-B end..Dir-A end ADC range
+    int target_adc = RUDDER_ADC_DIRB_END +
+      (int)((long)(RUDDER_ADC_DIRA_END - RUDDER_ADC_DIRB_END) * manual_rud_target_0_1000 / 1000);
     const int REMOTE_DEADBAND = 21;  // ADC counts — sized to absorb braking residual
 
-    int error = target_adc - a;      // positive = need to go stbd (increase ADC)
+    int error = target_adc - a;      // positive = need to go Dir-A (increase ADC)
     int abs_error = (error >= 0) ? error : -error;
 
     // --- Update rudder speed estimate ---
     if (now - speed_prev_ms >= SPEED_WINDOW_MS) {
       int delta_adc = a - speed_prev_adc;
       unsigned long dt = now - speed_prev_ms;
-      // cps = delta_adc * 1000 / dt  (signed, +ve = moving stbd)
+      // cps = delta_adc * 1000 / dt  (signed, +ve = moving Dir-A)
       rudder_speed_cps = (int16_t)((long)delta_adc * 1000L / (long)dt);
       speed_prev_adc = a;
       speed_prev_ms  = now;
@@ -1489,12 +1489,12 @@ void update_motor_from_command() {
       case RM_DRIVING: {
         // Determine drive direction
         int8_t dir = 0;
-        if      (error > 0) dir = +1;   // need stbd (increase ADC)
-        else if (error < 0) dir = -1;   // need port (decrease ADC)
+        if      (error > 0) dir = +1;   // need Dir-A (increase ADC)
+        else if (error < 0) dir = -1;   // need Dir-B (decrease ADC)
 
         // Respect hard and soft limits
-        if (dir > 0 && (at_stbd_end || at_stbd_pilot)) dir = 0;
-        if (dir < 0 && (at_port_end || at_port_pilot)) dir = 0;
+        if (dir > 0 && (at_dira_end || at_dira_pilot)) dir = 0;
+        if (dir < 0 && (at_dirb_end || at_dirb_pilot)) dir = 0;
 
         if (dir == 0) {
           // At limit or exactly on target — stop
@@ -1556,15 +1556,15 @@ void update_motor_from_command() {
   // ---- Manual override branch (AP disengaged) ----
   if (manual_jog_active) {
     // Respect limits
-    if (manual_jog_dir < 0 && (at_port_end || at_port_pilot)) {
-      // Trying to jog further to port, but at/near port end → stop
+    if (manual_jog_dir < 0 && (at_dirb_end || at_dirb_pilot)) {
+      // Trying to jog further to Dir-B, but at/near Dir-B end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
-    if (manual_jog_dir > 0 && (at_stbd_end || at_stbd_pilot)) {
-      // Trying to jog further to stbd, but at/near stbd end → stop
+    if (manual_jog_dir > 0 && (at_dira_end || at_dira_pilot)) {
+      // Trying to jog further to Dir-A, but at/near Dir-A end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1574,13 +1574,13 @@ void update_motor_from_command() {
     const uint8_t duty = 255;  // full duty for now; you can tune later
 
     if (manual_jog_dir > 0) {
-      // STBD: increase ADC
+      // Dir-A: increase ADC
       // Record activation reason: distinguish physical-button from delta-jog
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
     } else if (manual_jog_dir < 0) {
-      // PORT: decrease ADC
+      // Dir-B: decrease ADC
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
@@ -1617,13 +1617,13 @@ void update_motor_from_command() {
   }
 
   // Don't drive further into soft limits
-  if (delta > 0 && (at_stbd_end || at_stbd_pilot)) {
+  if (delta > 0 && (at_dira_end || at_dira_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
-  if (delta < 0 && (at_port_end || at_port_pilot)) {
+  if (delta < 0 && (at_dirb_end || at_dirb_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1650,7 +1650,7 @@ void update_motor_from_command() {
     duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
   }
 
-  // Direction: delta > 0 => STBD (increase ADC), delta < 0 => PORT (decrease ADC)
+  // Direction: delta > 0 => Dir-A (increase ADC), delta < 0 => Dir-B (decrease ADC)
   SET_MOTOR_REASON(MRSN_AP);  // B26: record activation reason (autopilot path)
   if (delta > 0) {
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
@@ -1739,14 +1739,14 @@ void process_packet() {
       pilot_rudder_valid = true;
       break;
 
-    case PILOT_RUDDER_PORT_LIM_CODE:
-      pilot_port_lim_deg10 = (int16_t)value;
-      pilot_port_lim_valid = true;
+    case PILOT_RUDDER_DIRB_LIM_CODE:
+      pilot_dirb_lim_deg10 = (int16_t)value;
+      pilot_dirb_lim_valid = true;
       break;
     
-    case PILOT_RUDDER_STBD_LIM_CODE:
-      pilot_stbd_lim_deg10 = (int16_t)value;
-      pilot_stbd_lim_valid = true;
+    case PILOT_RUDDER_DIRA_LIM_CODE:
+      pilot_dira_lim_deg10 = (int16_t)value;
+      pilot_dira_lim_valid = true;
       break;
 
     case MANUAL_MODE_CODE:
@@ -1801,8 +1801,8 @@ void process_packet() {
       feature_flags = new_flags;
       // Configure limit switch pins the first time they are enabled.
       if (limit_was_off && limit_now_on) {
-        pinMode(PORT_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
-        pinMode(STBD_LIMIT_PIN, INPUT_PULLUP);
+        pinMode(DIRB_LIMIT_PIN, INPUT_PULLUP);  // NC -> GND
+        pinMode(DIRA_LIMIT_PIN, INPUT_PULLUP);
       }
       break;
     }
@@ -2052,11 +2052,11 @@ if (stable_b != last_stable_button) {
 // If AP is disengaged and not in remote MANUAL mode, use buttons as manual jog
 if (!ap_engaged && !remote_manual_active) {
   if (stable_b == BTN_B1 || stable_b == BTN_B2) {
-    // Define B1/B2 as starboard jog (positive direction)
+    // Define B1/B2 as Dir-A jog (positive direction)
     manual_override = true;
     manual_dir      = +1;
   } else if (stable_b == BTN_B4 || stable_b == BTN_B5) {
-    // Define B4/B5 as port jog (negative direction)
+    // Define B4/B5 as Dir-B jog (negative direction)
     manual_override = true;
     manual_dir      = -1;
   }
