@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B47"
-INNOPILOT_BUILD_NUM = 47  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B48"
+INNOPILOT_BUILD_NUM = 48  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices

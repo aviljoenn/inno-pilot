@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B47";
-const uint16_t INNOPILOT_BUILD_NUM = 47;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B48";
+const uint16_t INNOPILOT_BUILD_NUM = 48;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -234,7 +234,7 @@ int16_t       rudder_speed_cps = 0;           // signed: +ve = increasing ADC (D
 
 // Minimum speed (cps) below which we just coast instead of active braking.
 // Below ~60 cps coast distance is within deadband.
-const int16_t BRAKE_MIN_SPEED_CPS = 60;
+const int16_t BRAKE_MIN_SPEED_CPS = 30000;  // braking disabled: threshold unreachable. To re-enable braking later, restore the value to 60.
 // AP-pressed warning (Bridge rejected AP toggle in MANUAL mode)
 bool          ap_pressed_warn_active = false;
 unsigned long ap_pressed_warn_ms     = 0;
