@@ -317,7 +317,7 @@ enum commands {
   EEPROM_READ_CODE              = 0x91,
   EEPROM_WRITE_CODE             = 0x53,  // arduino_servo protocol: lo=struct_addr, hi=data
   CLUTCH_PWM_AND_BRAKE_CODE     = 0x36,
-  BRIDGE_SETTINGS_WRITE_CODE    = 0xF2   // bridge settings push (B47+): hi=addr, lo=data
+  BRIDGE_SETTINGS_WRITE_CODE    = 0xFA   // bridge settings push (B47+): hi=addr, lo=data
 };
 
 // ---- Forward declarations ----

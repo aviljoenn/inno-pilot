@@ -160,7 +160,7 @@ FEATURE2_INVERT_MOTOR     = 0x01  # Invert H-bridge direction (storage only for 
 # 0x53 is reserved for the arduino_servo pass-through protocol (EEPROM_WRITE_CODE).
 # Using a separate code avoids the byte-order conflict: arduino_servo encodes
 # as lo=addr/hi=data, while the bridge settings push uses hi=addr/lo=data.
-BRIDGE_SETTINGS_WRITE_CODE = 0xF2  # Bridge->Nano: uint16 = (addr<<8)|data_byte
+BRIDGE_SETTINGS_WRITE_CODE = 0xFA  # Bridge->Nano: uint16 = (addr<<8)|data_byte
 
 # EEPROM binary layout constants
 EEPROM_MAGIC1             = 0xAA
