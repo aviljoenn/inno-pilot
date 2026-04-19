@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B40"
+INNOPILOT_VERSION = "v1.2.0_B39"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1636,7 +1636,7 @@ function updateUI(d) {
     ww.classList.remove('active');
     // Sync wheel visual to actual rudder position
     if (d.rdr_pct != null) {
-      wheelAngle = -(d.rdr_pct - 50) / 50 * MAX_DEG;
+      wheelAngle = (d.rdr_pct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform =
         'rotate(' + wheelAngle + 'deg)';
     }
@@ -1689,7 +1689,7 @@ function setToggle(m) {
 // jogRudder: adjust gManualRudPct by deltaPct, sync wheel visual, send RUD.
 function jogRudder(deltaPct) {
   gManualRudPct = Math.max(0, Math.min(100, gManualRudPct + deltaPct));
-  wheelAngle = -(gManualRudPct - 50) / 50 * MAX_DEG;
+  wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
   wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
   document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
   sendCmd('RUD ' + gManualRudPct.toFixed(1));
@@ -1814,7 +1814,7 @@ function handleToggleAction(action) {
       gTogglePos = 'remote';
       // Initialise commanded position from actual rudder (or midships if unknown)
       gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
-      wheelAngle = -(gManualRudPct - 50) / 50 * MAX_DEG;
+      wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
       document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
       // Immediately send the initial position so the Nano holds the current rudder
@@ -1855,7 +1855,7 @@ function wheelMove(cx, cy) {
   wheelAngle = Math.max(-MAX_DEG, Math.min(MAX_DEG, wheelAngle + delta));
   wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
 
-  var pct = (MAX_DEG - wheelAngle) / (2 * MAX_DEG) * 100;
+  var pct = (wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;
   gManualRudPct = pct;  // keep button jog state in sync with wheel drag
   document.getElementById('wheel-pct').textContent = Math.round(pct);
 
