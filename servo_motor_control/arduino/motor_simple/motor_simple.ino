@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B45";
-const uint16_t INNOPILOT_BUILD_NUM = 45;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B46";
+const uint16_t INNOPILOT_BUILD_NUM = 46;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -272,9 +272,6 @@ const int RUDDER_ADC_END_HYST  = 8;    // extra counts to CLEAR end-latch (preve
 // Tolerance for centring (not used here but handy later)
 const int RUDDER_CENTRE_ADC    = (RUDDER_ADC_DIRB_END + RUDDER_ADC_DIRA_END) / 2;
 const int RUDDER_CENTRE_TOL    = 5;
-
-// Rudder angle display range (approx ±40°)
-const float RUDDER_RANGE_DEG = 40.0f;
 
 // Feature enable flags — set by bridge via FEATURES_CODE on startup and on settings change.
 // Default 0x00: all features OFF until bridge configures them.
@@ -799,20 +796,15 @@ void oled_draw() {
     display.clearToEOL();
   }
 
-  // --- Pre-calculate rudder overshoot (used in rows 2-3 warning and row 6 bar) ---
+  // --- Pre-calculate rudder overshoot (used in rows 1-2 warning) ---
   bool rudder_overshoot_active = false;
-  bool rudder_over_dirb        = false;
-  bool rudder_over_dira        = false;
   {
     bool lims_ok = pilot_rudder_valid && pilot_dirb_lim_valid && pilot_dira_lim_valid
                    && (pilot_dira_lim_deg10 > pilot_dirb_lim_deg10);
     if (lims_ok) {
-      if (pilot_rudder_deg10 < pilot_dirb_lim_deg10) {
+      if (pilot_rudder_deg10 < pilot_dirb_lim_deg10 ||
+          pilot_rudder_deg10 > pilot_dira_lim_deg10) {
         rudder_overshoot_active = true;
-        rudder_over_dirb        = true;
-      } else if (pilot_rudder_deg10 > pilot_dira_lim_deg10) {
-        rudder_overshoot_active = true;
-        rudder_over_dira        = true;
       }
     }
   }
@@ -1043,63 +1035,21 @@ void oled_draw() {
     display.clearToEOL();
   }
 
-  // Row 5: Graphical rudder bar — B---I---A
-  // 'B' = Dir-B end (col 0), 'A' = Dir-A end (col 20), 'I' = indicator at proportional position.
-  // Track filled with '-'. When rudder exceeds a limit the 'I' blinks over 'P' or 'S'.
+  display.setCursor(0, 5); display.clearToEOL();
+
+  // --- Row 6: rudder position — label left, ADC count right-justified ---
   {
-    char rudbar[22];
-    memset(rudbar, '-', 21);
-    rudbar[0]  = 'B';
-    rudbar[20] = 'A';
-    rudbar[21] = '\0';
-
-    bool lims_ok = pilot_rudder_valid && pilot_dirb_lim_valid && pilot_dira_lim_valid
-                   && (pilot_dira_lim_deg10 > pilot_dirb_lim_deg10);
-
-    if (lims_ok) {
-      if (rudder_over_dirb) {
-        // Blink 'I' over 'B' (col 0)
-        static bool blink_p = true;
-        static unsigned long blink_p_ms = 0;
-        if (now - blink_p_ms >= 400UL) { blink_p_ms = now; blink_p = !blink_p; }
-        if (blink_p) rudbar[0] = 'I';
-      } else if (rudder_over_dira) {
-        // Blink 'I' over 'A' (col 20)
-        static bool blink_s = true;
-        static unsigned long blink_s_ms = 0;
-        if (now - blink_s_ms >= 400UL) { blink_s_ms = now; blink_s = !blink_s; }
-        if (blink_s) rudbar[20] = 'I';
-      } else {
-        // Map pilot_rudder_deg10 in [dirb_lim, dira_lim] → columns 1..19
-        int32_t num = (int32_t)(pilot_rudder_deg10 - pilot_dirb_lim_deg10) * 18;
-        int32_t den = pilot_dira_lim_deg10 - pilot_dirb_lim_deg10;
-        int16_t col = (int16_t)(num / den) + 1;
-        if (col < 1)  col = 1;
-        if (col > 19) col = 19;
-        rudbar[col] = 'I';
-      }
-    } else if (pilot_rudder_valid) {
-      // No limit data: map pilot rudder angle over ±RUDDER_RANGE_DEG assumption
-      float rdeg = pilot_rudder_deg10 / 10.0f;
-      int16_t col = 10 + (int16_t)(rdeg * 9.0f / RUDDER_RANGE_DEG + 0.5f);
-      if (col < 1)  col = 1;
-      if (col > 19) col = 19;
-      rudbar[col] = 'I';
-    }
-    // else: no valid rudder data — show B and A only, no indicator
-
-    display.setCursor(0, 5);
-    display.print(rudbar);
-    display.clearToEOL();
-  }
-  // --- Row 6: averaged A2 ADC value (rudder pot), centre-justified ---
-  {
-    int a2_raw = rudder_adc_raw_disp;  // use pre-averaged value; no extra analogRead
-    char buf[8];
-    snprintf(buf, sizeof(buf), "A2:%d", a2_raw);
-    int16_t tw = (int16_t)strlen(buf) * 6;
-    display.setCursor((SCREEN_WIDTH - tw) / 2, 6);
-    display.print(buf);
+    char row6[22];
+    memset(row6, ' ', 21);
+    row6[21] = '\0';
+    const char *label = "Rudder Position:";
+    memcpy(row6, label, 16);
+    char val[6];
+    snprintf(val, sizeof(val), "%d", rudder_adc_raw_disp);
+    uint8_t vlen = (uint8_t)strlen(val);
+    memcpy(row6 + 21 - vlen, val, vlen);
+    display.setCursor(0, 6);
+    display.print(row6);
     display.clearToEOL();
   }
 }
