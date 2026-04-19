@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B49";
-const uint16_t INNOPILOT_BUILD_NUM = 49;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B50";
+const uint16_t INNOPILOT_BUILD_NUM = 50;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -1722,6 +1722,15 @@ void process_packet() {
         speed_prev_ms     = millis();
         rudder_speed_cps  = 0;
         rm_state          = RM_SETTLED;
+        // Seed target from the Nano's own ADC so the motor holds still on entry.
+        // This is sign-convention-agnostic: the Nano knows exactly where it is.
+        {
+          long pos = (long)(rudder_adc_smoothed - RUDDER_ADC_DIRB_END) * 1000L
+                     / (RUDDER_ADC_DIRA_END - RUDDER_ADC_DIRB_END);
+          if (pos < 0)    pos = 0;
+          if (pos > 1000) pos = 1000;
+          manual_rud_target_0_1000 = (uint16_t)pos;
+        }
       }
       remote_manual_active = (value != 0);
       if (!remote_manual_active) {

@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B49"
-INNOPILOT_BUILD_NUM = 49  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B50"
+INNOPILOT_BUILD_NUM = 50  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -1036,24 +1036,14 @@ def process_remote_line(
             set_q.put(("ap.enabled", False))
             with plock:
                 pstate.ap_enabled = False
-                rudder_angle = pstate.rudder_angle
-                rudder_range = pstate.rudder_range
-            # Seed the Nano's rudder target with the current physical position so it
-            # holds still on entry instead of chasing the stale default (500/midships).
-            # MANUAL_RUD_TARGET_CODE MUST be sent before MANUAL_MODE_CODE: the Nano
-            # processes one frame per loop() so the target must be installed before
-            # remote_manual_active goes true.
-            if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
-                init_pct = (rudder_range - rudder_angle) / (2.0 * rudder_range) * 100.0
-                init_pct = max(0.0, min(100.0, init_pct))
-            else:
-                init_pct = 50.0  # position unknown — fall back to midships
-            init_target = int(round(init_pct * 10.0))
-            send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, init_target)
+            # The Nano seeds its own target from its ADC reading on receipt of
+            # MANUAL_MODE_CODE=1, so no initial MANUAL_RUD_TARGET_CODE is sent here.
+            # Sending an initial target from the bridge caused the motor to drive to
+            # the opposite side due to a sign-convention mismatch in the pct formula.
             send_nano_frame(nano, MANUAL_MODE_CODE, 1)
             bstate.mode = MODE_MANUAL
-            bstate.manual_rud_target = init_target
-            log.info("Remote -> MODE MANUAL: manual steering active (init=%d/1000)", init_target)
+            bstate.manual_rud_target = 500  # bridge placeholder; Nano seeds from its ADC
+            log.info("Remote -> MODE MANUAL: manual steering active")
 
         elif arg == "AUTO":
             if bstate.mode == MODE_MANUAL:

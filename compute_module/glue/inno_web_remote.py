@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B49"
+INNOPILOT_VERSION = "v1.2.0_B50"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1820,14 +1820,14 @@ function handleToggleAction(action) {
     sendCmd('MODE MANUAL').then(function(res) {
       if (!res.ok) return;
       gTogglePos = 'remote';
-      // Initialise commanded position from actual rudder (or midships if unknown)
+      // Sync wheel graphic to actual rudder position (same sign as telemetry update).
+      // Do NOT send an initial RUD command: the Nano seeds its own target from its
+      // ADC on MANUAL_MODE_CODE receipt, so any RUD at this point would override
+      // that correct seed with a potentially sign-inverted value.
       gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
-      wheelAngle = -((gManualRudPct - 50) / 50 * MAX_DEG);
+      wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
       document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
-      // Immediately send the initial position so the Nano holds the current rudder
-      // position instead of driving toward its default centre target (500).
-      sendCmd('RUD ' + gManualRudPct.toFixed(1));
     });
   }
 }
