@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B41"
+INNOPILOT_VERSION = "v1.2.0_B42"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1636,7 +1636,7 @@ function updateUI(d) {
     ww.classList.remove('active');
     // Sync wheel visual to actual rudder position
     if (d.rdr_pct != null) {
-      wheelAngle = -((d.rdr_pct - 50) / 50 * MAX_DEG);
+      wheelAngle = (d.rdr_pct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform =
         'rotate(' + wheelAngle + 'deg)';
     }
