@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B43";
-const uint16_t INNOPILOT_BUILD_NUM = 43;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B44";
+const uint16_t INNOPILOT_BUILD_NUM = 44;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -104,10 +104,14 @@ const uint8_t FEATURE_ON_BOARD_BUTTONS = 0x20; // physical button ladder on A6 i
 const uint8_t FEATURE_OLED_SH1106     = 0x40; // OLED uses SH1106 controller (132-col, offset 2)
 const uint8_t FEATURE_INVERT_CLUTCH   = 0x80; // Clutch relay is active-LOW (invert pin 11 logic)
 
+// Second feature-flags byte — EEPROM offset 23 (layout v2).
+// Not sent via FEATURES_CODE at runtime; EEPROM-only until logic is wired in.
+const uint8_t FEATURE2_INVERT_MOTOR   = 0x01; // Invert H-bridge direction (storage only for now)
+
 // ---- EEPROM settings layout ----
 const uint8_t EEPROM_MAGIC1          = 0xAA;
 const uint8_t EEPROM_MAGIC2          = 0x55;
-const uint8_t EEPROM_LAYOUT_VERSION  = 1;
+const uint8_t EEPROM_LAYOUT_VERSION  = 2;
 
 // Cached telemetry from pypilot (for OLED)
 bool     pilot_heading_valid = false;
@@ -276,6 +280,10 @@ const float RUDDER_RANGE_DEG = 40.0f;
 // Default 0x00: all features OFF until bridge configures them.
 // Safe-start behaviour: no limit-switch reads, no sensor fault alarms before bridge connects.
 uint8_t feature_flags = 0x00;
+// Second feature byte (EEPROM offset 23, layout v2). Loaded by eeprom_load_settings().
+// Bridge does not send this at runtime; it is EEPROM-only until direction-inversion is wired in.
+uint8_t feature_flags_2 = 0x00;
+bool    g_invert_motor  = false;
 
 // Deadband for AP command dead zone and PWM scaling (in delta units, 0–1000).
 // Loaded from EEPROM at boot (= deadband_pct × 10). Falls back to 20 if EEPROM absent.
@@ -1098,14 +1106,15 @@ void oled_draw() {
 
 // ---- EEPROM settings loader ----
 // Reads the binary settings block written by the bridge and extracts
-// feature_flags so the correct OLED driver is selected on boot.
+// feature_flags and feature_flags_2 so all hardware options are known before pin init.
 void eeprom_load_settings() {
   if (EEPROM.read(0) != EEPROM_MAGIC1 || EEPROM.read(1) != EEPROM_MAGIC2) return;
   if (EEPROM.read(2) != EEPROM_LAYOUT_VERSION) return;
 
   // Walk the variable-length tail to find total block length.
-  // Fixed part is 44 bytes (offsets 0-43), then three length-prefixed strings + CRC.
-  uint16_t pos = 44;
+  // Fixed part is 45 bytes (offsets 0-44); v2 added feature_flags_2 at offset 23,
+  // shifting the network block from 23–43 to 24–44 and variable strings to 45+.
+  uint16_t pos = 45;
   for (uint8_t i = 0; i < 3; i++) {            // SSID, WiFi key, vessel name
     uint8_t slen = EEPROM.read(pos);
     pos += 1 + slen;
@@ -1128,6 +1137,10 @@ void eeprom_load_settings() {
   // Clamp to 5–200 (0.5–20%) to match the web UI limits and prevent zero-deadband runaway.
   uint16_t db = (uint16_t)EEPROM.read(13) | ((uint16_t)EEPROM.read(14) << 8);
   if (db >= 5 && db <= 200) g_deadband = db;
+
+  // Extract second feature-flags byte (offset 23, layout v2).
+  feature_flags_2 = EEPROM.read(23);
+  g_invert_motor  = (feature_flags_2 & FEATURE2_INVERT_MOTOR) != 0;
 }
 
 bool oled_try_init(bool allow_blocking_splash) {

@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B43"
-INNOPILOT_BUILD_NUM = 43  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B44"
+INNOPILOT_BUILD_NUM = 44  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -152,13 +152,17 @@ FEATURE_ON_BOARD_BUTTONS  = 0x20  # physical button ladder on A6 is wired
 FEATURE_OLED_SH1106       = 0x40  # OLED uses SH1106 controller (vs SSD1306)
 FEATURE_INVERT_CLUTCH     = 0x80  # Clutch relay is active-LOW (invert pin 11 logic)
 
+# Second feature-flags byte (EEPROM offset 23, layout v2).
+# Not sent via FEATURES_CODE at runtime; EEPROM-only until direction-inversion logic is wired in.
+FEATURE2_INVERT_MOTOR     = 0x01  # Invert H-bridge direction (storage only for now)
+
 # Bridge -> Nano: EEPROM write (0x53)
 EEPROM_WRITE_CODE         = 0x53  # Bridge->Nano: uint16 = (addr<<8)|data_byte
 
 # EEPROM binary layout constants
 EEPROM_MAGIC1             = 0xAA
 EEPROM_MAGIC2             = 0x55
-EEPROM_LAYOUT_VERSION     = 1
+EEPROM_LAYOUT_VERSION     = 2
 
 # Nano -> Bridge pypilot result codes (parsed here, also forwarded to pypilot)
 FLAGS_CODE        = 0x8F  # Nano flags word — bridge relays fault bits to remote
@@ -211,6 +215,7 @@ _DEFAULT_PILOT_SETTINGS: dict = {
         "on_board_buttons":       False,
         "oled_sh1106":            False,
         "invert_clutch":          False,
+        "invert_motor":           False,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -694,6 +699,18 @@ def _build_features_mask(settings: dict) -> int:
     return mask
 
 
+def _build_features2_mask(settings: dict) -> int:
+    """Build the second feature bitmask (EEPROM offset 23, layout v2).
+
+    Not sent via FEATURES_CODE; persisted to EEPROM only.
+    Extend this function when additional bits are needed beyond FEATURE2_INVERT_MOTOR.
+    """
+    feats = settings.get("features", {})
+    mask = 0
+    if feats.get("invert_motor", False): mask |= FEATURE2_INVERT_MOTOR
+    return mask
+
+
 def _serialize_settings(pilot: dict, rct: dict) -> bytes:
     """Serialize all settings into the EEPROM binary layout.
 
@@ -736,7 +753,10 @@ def _serialize_settings(pilot: dict, rct: dict) -> bytes:
     buf.append(max(0, min(255, int(safety.get("comms_warn_threshold_pct", 10)))))
     buf.append(max(0, min(255, int(safety.get("comms_crit_threshold_pct", 25)))))
 
-    # Network (offsets 23-43)
+    # Second feature-flags byte (offset 23, layout v2)
+    buf.append(_build_features2_mask(pilot))
+
+    # Network (offsets 24-44)
     net = pilot.get("network", {})
     buf.append(0 if net.get("ip_mode", "dhcp") == "dhcp" else 1)
     buf.extend(_ip_to_bytes(net.get("ip", "")))
