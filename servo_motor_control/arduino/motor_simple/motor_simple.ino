@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B42";
-const uint16_t INNOPILOT_BUILD_NUM = 42;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B43";
+const uint16_t INNOPILOT_BUILD_NUM = 43;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -1808,6 +1808,11 @@ void process_packet() {
 }
 
 void setup() {
+  // Read EEPROM first so feature_flags (clutch polarity, OLED type, etc.) is
+  // known before any pin is configured. No peripherals needed — EEPROM.read()
+  // works immediately after reset.
+  eeprom_load_settings();
+
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
@@ -1821,9 +1826,11 @@ void setup() {
   digitalWrite(HBRIDGE_LPWM_PIN, LOW);
   analogWrite(HBRIDGE_PWM_PIN, 0);   // motor off
 
-  // Clutch
+  // Clutch — pre-load PORT latch with the disengaged level BEFORE enabling the
+  // output driver so the pin never glitches to the engaged state even for one
+  // clock cycle. Polarity is read from EEPROM above; default (no EEPROM) is LOW.
+  digitalWrite(CLUTCH_PIN, (feature_flags & FEATURE_INVERT_CLUTCH) ? HIGH : LOW);
   pinMode(CLUTCH_PIN, OUTPUT);
-  digitalWrite(CLUTCH_PIN, LOW);    // clutch disengaged (active-HIGH)
 
   // Limit switch pins: configured when FEATURES_CODE arrives from bridge.
   // At boot feature_flags=0x00 so these pins are not activated yet.
@@ -1853,7 +1860,6 @@ void setup() {
   temp_cycle_ms = 0;
 
   Wire.begin();
-  eeprom_load_settings();       // load feature_flags from EEPROM before OLED init
   oled_last_init_ms = millis();
   oled_try_init(true);
 
