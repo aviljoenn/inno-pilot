@@ -600,7 +600,7 @@ body{
 .oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;line-height:1}
 .oled-data{
   color:#00d4ff;
-  font-size:1.52em;
+  font-size:1.14em;
   font-weight:700;
   font-family:'Courier New',monospace;
   display:flex;
