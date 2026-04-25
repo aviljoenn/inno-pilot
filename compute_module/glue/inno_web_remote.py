@@ -600,7 +600,7 @@ body{
 .oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;line-height:1}
 .oled-data{
   color:#00d4ff;
-  font-size:1.14em;
+  font-size:0.76em;
   font-weight:700;
   font-family:'Courier New',monospace;
   display:flex;
@@ -1056,11 +1056,6 @@ body{
   <div class="oled">
     <div class="oled-title">Inno-Web-Remote</div>
 
-    <div class="oled-data">
-      <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
-      <span>Head:&nbsp;<span id="o-hdg">---</span></span>
-    </div>
-
     <!-- Rudder position bar -->
     <div class="rdr-bar">
       <div class="rdr-track">
@@ -1070,6 +1065,12 @@ body{
     </div>
 
     <div class="oled-mode" id="oled-mode-row">MODE: <b id="o-mode">IDLE</b></div>
+
+    <div class="oled-data">
+      <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
+      <span>RDR:&nbsp;<span id="o-rdr">---</span>%</span>
+      <span>Head:&nbsp;<span id="o-hdg">---</span></span>
+    </div>
 
     <div class="oled-status">
       <span id="o-ver">---</span>
