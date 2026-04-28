@@ -45,11 +45,50 @@ info() { echo; echo ">>> $*"; echo; }
 # network index download (which would hang silently and OOM the Pi).
 if [ -d "$HOME/.arduino15/packages/arduino/hardware/avr" ]; then
     ARDUINO=("$ARDUINO_CLI")
+    ARDUINO15_ROOT="$HOME/.arduino15"
     log "arduino-cli: using user core (~/.arduino15)"
 else
     ARDUINO=(sudo "$ARDUINO_CLI")
+    ARDUINO15_ROOT="/root/.arduino15"
     log "arduino-cli: user core absent, falling back to sudo (root core)"
 fi
+# ------------------------------------------------------
+
+# --------------- ARMv6 avrdude compatibility fix ---------------
+# arduino-cli downloads avrdude compiled for armhf (ARMv7+). On ARMv6 (Pi Zero),
+# executing an armhf binary causes SIGILL ("illegal instruction"). The system
+# avrdude (apt package avrdude) is compiled for ARMv6 and works correctly.
+# This function replaces the bundled binary with a symlink to the system one.
+# The symlink is idempotent and survives reboots; it is only overwritten if
+# arduino-cli explicitly reinstalls its avrdude package.
+fix_avrdude_for_armv6() {
+    local bundled
+    bundled=$(find "$ARDUINO15_ROOT/packages/arduino/tools/avrdude" \
+              -name avrdude -type f 2>/dev/null | head -1)
+    if [[ -z "$bundled" ]]; then
+        # Core tools not yet downloaded — nothing to fix; upload would fail anyway.
+        log "avrdude compat: bundled avrdude not found in $ARDUINO15_ROOT — skipping fix."
+        return
+    fi
+    if [[ -L "$bundled" ]]; then
+        log "avrdude compat: bundled avrdude is already a symlink ($(readlink "$bundled")) — OK."
+        return
+    fi
+    # Ensure the system avrdude package is present.
+    if ! command -v avrdude &>/dev/null; then
+        log "avrdude compat: system avrdude not installed — installing via apt ..."
+        sudo apt-get install -y avrdude
+    fi
+    local system_avrdude
+    system_avrdude=$(command -v avrdude)
+    log "avrdude compat: replacing armhf bundled avrdude with symlink -> $system_avrdude"
+    if [[ "$bundled" == /root/* ]]; then
+        sudo ln -sf "$system_avrdude" "$bundled"
+    else
+        ln -sf "$system_avrdude" "$bundled"
+    fi
+    log "avrdude compat: fix applied ($(readlink -f "$bundled"))."
+}
 # ------------------------------------------------------
 
 # Guard: refuse to run on the dev workstation
@@ -111,6 +150,12 @@ log "Glue deploy complete."
 # ---------------------------------------------------------------------------
 info "Step 5 — Flash Nano firmware"
 # ---------------------------------------------------------------------------
+# On ARMv6 (Pi Zero) arduino-cli bundles an armhf avrdude that crashes with
+# SIGILL. Replace it with a symlink to the system avrdude before upload.
+if [[ "$(uname -m)" == "armv6l" ]]; then
+    fix_avrdude_for_armv6
+fi
+
 # NOTE: HUPCL is not relevant here because arduino-cli handles the reset pulse
 # intentionally (needed for programming). After upload completes and arduino-cli
 # closes the port, the Nano will reset once more — that is the boot we wait for
