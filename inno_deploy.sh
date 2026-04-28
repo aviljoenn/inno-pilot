@@ -64,7 +64,7 @@ fi
 fix_avrdude_for_armv6() {
     local bundled_bin bundled_conf
     bundled_bin=$(find "$ARDUINO15_ROOT/packages/arduino/tools/avrdude" \
-                  -name avrdude -type f 2>/dev/null | head -1)
+                  -name avrdude \( -type f -o -type l \) 2>/dev/null | head -1)
     if [[ -z "$bundled_bin" ]]; then
         # Core tools not yet downloaded — nothing to fix; upload would fail anyway.
         log "avrdude compat: bundled avrdude not found in $ARDUINO15_ROOT — skipping fix."
