@@ -62,32 +62,56 @@ fi
 # The symlink is idempotent and survives reboots; it is only overwritten if
 # arduino-cli explicitly reinstalls its avrdude package.
 fix_avrdude_for_armv6() {
-    local bundled
-    bundled=$(find "$ARDUINO15_ROOT/packages/arduino/tools/avrdude" \
-              -name avrdude -type f 2>/dev/null | head -1)
-    if [[ -z "$bundled" ]]; then
+    local bundled_bin bundled_conf
+    bundled_bin=$(find "$ARDUINO15_ROOT/packages/arduino/tools/avrdude" \
+                  -name avrdude -type f 2>/dev/null | head -1)
+    if [[ -z "$bundled_bin" ]]; then
         # Core tools not yet downloaded — nothing to fix; upload would fail anyway.
         log "avrdude compat: bundled avrdude not found in $ARDUINO15_ROOT — skipping fix."
         return
     fi
-    if [[ -L "$bundled" ]]; then
-        log "avrdude compat: bundled avrdude is already a symlink ($(readlink "$bundled")) — OK."
-        return
-    fi
+
     # Ensure the system avrdude package is present.
     if ! command -v avrdude &>/dev/null; then
         log "avrdude compat: system avrdude not installed — installing via apt ..."
         sudo apt-get install -y avrdude
     fi
-    local system_avrdude
+    local system_avrdude system_conf
     system_avrdude=$(command -v avrdude)
-    log "avrdude compat: replacing armhf bundled avrdude with symlink -> $system_avrdude"
-    if [[ "$bundled" == /root/* ]]; then
-        sudo ln -sf "$system_avrdude" "$bundled"
+    # System avrdude config is at /etc/avrdude.conf
+    system_conf="/etc/avrdude.conf"
+
+    # --- binary ---
+    if [[ -L "$bundled_bin" ]]; then
+        log "avrdude compat: binary already symlinked ($(readlink "$bundled_bin")) — OK."
     else
-        ln -sf "$system_avrdude" "$bundled"
+        log "avrdude compat: symlinking binary -> $system_avrdude"
+        if [[ "$bundled_bin" == /root/* ]]; then
+            sudo ln -sf "$system_avrdude" "$bundled_bin"
+        else
+            ln -sf "$system_avrdude" "$bundled_bin"
+        fi
     fi
-    log "avrdude compat: fix applied ($(readlink -f "$bundled"))."
+
+    # --- config file ---
+    # arduino-cli passes the bundled etc/avrdude.conf explicitly via -C. The 8.0.0
+    # config format is incompatible with the system avrdude 7.x. Symlink it to the
+    # system config so the versions stay in sync.
+    bundled_conf="$(dirname "$(dirname "$bundled_bin")")/etc/avrdude.conf"
+    if [[ -L "$bundled_conf" ]]; then
+        log "avrdude compat: config already symlinked ($(readlink "$bundled_conf")) — OK."
+    elif [[ ! -f "$system_conf" ]]; then
+        log "avrdude compat: WARNING — system config $system_conf not found; upload may fail."
+    else
+        log "avrdude compat: symlinking config -> $system_conf"
+        if [[ "$bundled_conf" == /root/* ]]; then
+            sudo ln -sf "$system_conf" "$bundled_conf"
+        else
+            ln -sf "$system_conf" "$bundled_conf"
+        fi
+    fi
+
+    log "avrdude compat: fix applied."
 }
 # ------------------------------------------------------
 
