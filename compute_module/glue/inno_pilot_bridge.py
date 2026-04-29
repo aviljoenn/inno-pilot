@@ -269,9 +269,11 @@ BRIDGE_VERSION_CODE   = 0xF2  # Bridge -> Nano: build number (uint16)
 # ---------------------------------------------------------------------------
 # Bridge mode identifiers
 # ---------------------------------------------------------------------------
-MODE_IDLE   = "IDLE"
-MODE_AP     = "AP"
-MODE_MANUAL = "MANUAL"
+MODE_IDLE    = "IDLE"
+MODE_AP      = "AP"
+MODE_MANUAL  = "MANUAL"
+MODE_RAM_OFF = "RAM_OFF"   # RAM test armed, waiting for B3
+MODE_RAM_ON  = "RAM_ON"    # RAM test actively reciprocating
 
 # ---------------------------------------------------------------------------
 # Timing
@@ -342,6 +344,9 @@ class BridgeState:
     rct_last_rdr_send:   float = 0.0        # monotonic time of last RDR_PCT forward to remote
     test_mode:            bool = False       # True while a TEST <id> is running (pwm_test.ino)
     servo_cmd_dir:         int  = 0         # last pypilot servo command direction: -1=port, 0=neutral, 1=stbd
+    ram_test_deg:          int  = 0         # RAM test: degrees each side of centre to sweep
+    ram_test_running:      bool = False      # RAM test: actively reciprocating
+    ram_test_direction:    int  = 1          # RAM test: current sweep direction +1=stbd, -1=port
 
 
 # ===========================================================================
@@ -985,7 +990,12 @@ def process_remote_line(
         set_q.put(("ap.enabled", False))
         with plock:
             pstate.ap_enabled = False
-        if bstate.mode == MODE_MANUAL:
+        if bstate.mode in (MODE_RAM_OFF, MODE_RAM_ON):
+            bstate.ram_test_running = False
+            send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+            bstate.mode = MODE_IDLE
+            log.info("Remote -> ESTOP: RAM test aborted")
+        elif bstate.mode == MODE_MANUAL:
             send_nano_frame(nano, MANUAL_MODE_CODE, 0)
             bstate.mode = MODE_IDLE
         elif bstate.mode == MODE_AP:
@@ -998,6 +1008,19 @@ def process_remote_line(
         arg = parts[1].upper()
 
         if arg == "TOGGLE":
+            # RAM test: B3 starts or stops the reciprocating motion
+            if bstate.mode in (MODE_RAM_OFF, MODE_RAM_ON):
+                bstate.ram_test_running = not bstate.ram_test_running
+                if bstate.ram_test_running:
+                    bstate.mode = MODE_RAM_ON
+                    bstate.ram_test_direction = 1  # always start sweeping stbd
+                    log.info("RAM test STARTED at ±%d°", bstate.ram_test_deg)
+                else:
+                    bstate.mode = MODE_RAM_OFF
+                    # Return rudder to centre
+                    send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, 500)
+                    log.info("RAM test STOPPED — rudder target set to centre")
+                return
             with plock:
                 current = pstate.ap_enabled
             target = True if current is None else (not current)
@@ -1114,6 +1137,30 @@ def process_remote_line(
         except Exception as exc:
             log.warning("Nano TEST write failed: %s", exc)
             remote_send(remote_sock, f"TEST_LINE ERROR: serial write failed: {exc}")
+
+    elif cmd == "RAM_SETUP":
+        # RAM_SETUP <degrees> — arm the RAM test with the given sweep amplitude.
+        # Disables AP, puts Nano in MANUAL mode, enters RAM_OFF standby.
+        if len(parts) < 2:
+            log.warning("Remote RAM_SETUP: missing degrees, ignored")
+            return
+        try:
+            deg = int(round(float(parts[1])))
+        except ValueError:
+            log.warning("Remote RAM_SETUP: invalid degrees '%s', ignored", parts[1])
+            return
+        rng = int(_pilot_settings.get("vessel", {}).get("rudder_range_deg", 35))
+        deg = max(1, min(deg, rng))
+        # Disengage AP and enter MANUAL mode on Nano for direct position control
+        set_q.put(("ap.enabled", False))
+        with plock:
+            pstate.ap_enabled = False
+        send_nano_frame(nano, MANUAL_MODE_CODE, 1)
+        bstate.ram_test_deg       = deg
+        bstate.ram_test_running   = False
+        bstate.ram_test_direction = 1
+        bstate.mode               = MODE_RAM_OFF
+        log.info("RAM test armed: ±%d° (rudder_range=%d°) — press B3 to start", deg, rng)
 
     elif cmd == "SETTINGS":
         sub = parts[1].upper() if len(parts) > 1 else ""
@@ -1302,6 +1349,30 @@ def main() -> None:
             log.debug("Telemetry -> Nano: hdg=%s cmd=%s rud=%s",
                       heading, heading_cmd, rudder_angle)
 
+            # ---- RAM test: reciprocating motion ----
+            if bstate.ram_test_running and rudder_angle is not None:
+                rng = float(abs(rudder_range)) if rudder_range else float(
+                    _pilot_settings.get("vessel", {}).get("rudder_range_deg", 35))
+                deg = min(float(bstate.ram_test_deg), rng)
+                # pypilot convention: positive rudder_angle = port, negative = stbd
+                # ram_test_direction +1=stbd → target_angle_pypilot = -deg
+                # ram_test_direction -1=port → target_angle_pypilot = +deg
+                target_angle_pypilot = -bstate.ram_test_direction * deg
+                REACH_DEG = 2.0   # reverse when within 2° of target
+                if bstate.ram_test_direction == 1:   # heading stbd
+                    if rudder_angle <= target_angle_pypilot + REACH_DEG:
+                        bstate.ram_test_direction = -1
+                        target_angle_pypilot = deg   # now heading port
+                else:                                # heading port
+                    if rudder_angle >= target_angle_pypilot - REACH_DEG:
+                        bstate.ram_test_direction = 1
+                        target_angle_pypilot = -deg  # now heading stbd
+                target_pct = (rng - target_angle_pypilot) / (2.0 * rng) * 100.0
+                target_pct = max(0.0, min(100.0, target_pct))
+                target_0_1000 = int(round(target_pct * 10.0))
+                send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
+                bstate.rct_target = target_0_1000
+
             # ---- Remote telemetry (text lines to all TCP clients) ----
             if remote_clients:
                 failed: set[socket.socket] = set()
@@ -1377,9 +1448,9 @@ def main() -> None:
                         srv_val = candidate[1] | (candidate[2] << 8)
                         DEADBAND = 20
                         if srv_val > 1000 + DEADBAND:
-                            bstate.servo_cmd_dir = 1    # starboard
-                        elif srv_val < 1000 - DEADBAND:
                             bstate.servo_cmd_dir = -1   # port
+                        elif srv_val < 1000 - DEADBAND:
+                            bstate.servo_cmd_dir = 1    # starboard
                         else:
                             bstate.servo_cmd_dir = 0    # neutral / at target
                 else:

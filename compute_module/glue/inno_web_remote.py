@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 inno_web_remote.py — Browser-based Inno-Remote UI (port 8888).
 
@@ -1154,7 +1154,7 @@ body{
   <!-- TEST button — opens hardware test catalogue -->
   <div class="settings-footer">
     <button class="gear-btn" id="gear-btn" title="Settings (OFF mode only)">&#9881;</button>
-    <button class="test-btn" id="test-btn" title="Hardware tests">TEST</button>
+    <button class="test-btn" id="test-btn" title="Hardware tests">Test</button>
   </div>
 
 </div><!-- .remote -->
@@ -1363,6 +1363,23 @@ body{
         </div>
       </div>
 
+      <!-- View 2b: RAM Test config -->
+      <div class="tdet-view" id="tram-view">
+        <div class="tdet-name">1. RAM Test</div>
+        <div class="tdet-section">What it does</div>
+        <div class="tdet-text">Sweeps the rudder continuously left and right between &#177;N&#176; of centre to stress-test the hydraulic ram. Uses the standard motor_simple firmware &#8212; no reflashing needed.</div>
+        <div class="tdet-section">Sweep amplitude</div>
+        <div style="display:flex;align-items:center;gap:10px;padding:6px 0 10px">
+          <input type="number" id="ram-deg-inp" min="1" max="35" value="10"
+                 style="width:64px;background:#080f20;border:1px solid #1e3450;border-radius:4px;color:#00d4ff;font-family:'Courier New',monospace;font-size:.95em;padding:4px 6px;outline:none;text-align:center">
+          <span style="color:#90a8c0;font-size:.78em">degrees each side of centre<br><span id="ram-deg-hint" style="color:#354860"></span></span>
+        </div>
+        <div class="tdet-confirm">
+          <button class="tdet-btn yes" id="tram-yes">PROCEED</button>
+          <button class="tdet-btn no"  id="tram-no">BACK</button>
+        </div>
+      </div>
+
       <!-- View 3: Results / output streaming -->
       <div class="tres-view" id="tres-view">
         <div class="tres-name"   id="tres-name"></div>
@@ -1401,6 +1418,7 @@ var gSettingsOpen = false; // true while settings panel is visible
 var gTestOpen     = false; // true while test modal is visible
 var gSelectedTest = null;  // id of test currently shown in detail/results view
 var gTestRunning  = false; // true while a test is streaming results
+var gRamTestDeg   = 10;    // last configured RAM test amplitude (degrees)
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
@@ -1421,6 +1439,14 @@ function sendCmd(cmd) {
 // ── Hardware test catalogue ───────────────────────────────────────────────
 var TESTS = [
   { id: 1,
+    name: 'RAM Test',
+    desc: 'Sweeps the rudder continuously between \u00b1N\u00b0 of centre to stress-test the hydraulic ram. Runs on the standard motor_simple firmware \u2014 no reflashing needed.',
+    purpose: 'Verify the ram moves freely and reliably across its full working range under continuous load.',
+    output: 'Live rudder position on the bar. Start/stop with B3. Emergency stop with STOP button.',
+    fw: 'motor_simple.ino (standard firmware \u2014 already flashed)',
+    trigger: 'B3 to start / stop'
+  },
+  { id: 2,
     name: 'Binary Search \u2014 Min Starting PWM',
     desc: 'Bisects the PWM range (0\u2013255) in both STBD and PORT directions to find the lowest duty cycle that actually moves the rudder from standstill.',
     purpose: 'Establish the motor deadband floor. Below this PWM the hydraulic valve does not crack open. Required before any closed-loop control tuning.',
@@ -1436,7 +1462,7 @@ var TESTS = [
     fw: 'pwm_test.ino  (default compile \u2014 no extra #define)',
     trigger: 'Automatic'
   },
-  { id: 3,
+  { id: 4,
     name: 'Coast / Ramp-Down Test',
     desc: 'For PWM 150, 190, and 255: (A) hard-cuts the motor at a trigger point and measures overshoot; (B) applies a proportional ramp-down and measures the improvement side-by-side.',
     purpose: 'Quantify overshoot from hard-cut versus speed-proportional ramp braking. Determines whether ramp braking is worth implementing for this vessel.',
@@ -1444,7 +1470,7 @@ var TESTS = [
     fw: 'pwm_test.ino  (default compile \u2014 no extra #define)',
     trigger: 'Automatic'
   },
-  { id: 4,
+  { id: 5,
     name: 'Comprehensive Characterisation Table',
     desc: 'For each of 15 PWM levels (120 \u2192 255): measures coast count on hard-cut, minimum pulse width (binary search), speed (cps), and reverse-brake ms needed for dead-stop.',
     purpose: 'Produce the master reference table. This is the single most important calibration run \u2014 its output feeds all control algorithm parameters.',
@@ -1452,7 +1478,7 @@ var TESTS = [
     fw: 'pwm_test.ino  (default compile \u2014 no extra #define)',
     trigger: 'Automatic'
   },
-  { id: 5,
+  { id: 6,
     name: 'Interactive Target Test',
     desc: 'Drives 450-count runs alternating STBD/PORT (6 total). B3 triggers each run. Two algorithms: ALG 0 = hard-cut baseline; ALG 1 = speed-aware braking (replica of motor_simple B5). Reports overshoot, drive time, speed at brake trigger, brake ms used.',
     purpose: 'Validate the closed-loop stopping algorithm against a fixed target under realistic conditions. Directly measures real-world overshoot.',
@@ -1460,7 +1486,7 @@ var TESTS = [
     fw: 'pwm_test.ino  #define RUN_INTERACTIVE_TEST',
     trigger: 'B3 button to start each run'
   },
-  { id: 6,
+  { id: 7,
     name: 'Burst Sweep Test',
     desc: '24 burst durations (10\u2013600 ms) \xd7 2 directions = 48 fully automatic runs after one B3 press. PWM=255, hard-cut. Records ADC start/final and net counts per burst.',
     purpose: 'Map the hydraulic cracking threshold \u2014 below what pulse duration does the rudder not move? Reveals burst duration vs. displacement relationship.',
@@ -1468,7 +1494,7 @@ var TESTS = [
     fw: 'pwm_test.ino  #define RUN_BURST_SWEEP_TEST',
     trigger: 'B3 once to start \u2014 then fully automatic'
   },
-  { id: 7,
+  { id: 8,
     name: 'Fine Burst Test',
     desc: 'Steps 15\u201325 ms in 1 ms increments, 10 reps per step, both directions. PWM=255, hard-cut. Characterises fine-pulse resolution at the low end of burst duration.',
     purpose: 'Find the minimum repeatable pulse that moves the rudder by at least 1 ADC count. Critical for precision micro-corrections in closed-loop control.',
@@ -1476,7 +1502,7 @@ var TESTS = [
     fw: 'pwm_test.ino  #define RUN_FINE_BURST_TEST',
     trigger: 'B3 once to start \u2014 then fully automatic'
   },
-  { id: 8,
+  { id: 9,
     name: 'Remote Control Test (RCT)',
     desc: 'Bridge-integrated positioning trial with 3 sub-modes: ADJUST (B2/B4 scroll settings, B1/B5 change value, B3 save); TEST (bridge sends TGT <pct>, Nano chases target using 7 RCT settings); RATIFY (real-time remote steering). Settings persist to EEPROM.',
     purpose: 'End-to-end validation of the full closed-loop positioning system from web remote through bridge to Nano, including EEPROM-persisted tuning parameters.',
@@ -1501,11 +1527,13 @@ function closeTestMenu() {
   gSelectedTest = null;
   document.getElementById('test-btn').classList.remove('test-open');
   document.getElementById('tov').classList.add('hidden');
+  document.getElementById('tram-view').classList.remove('active');
 }
 
 function showTestCatalogue() {
   document.getElementById('tov-title').textContent = '\u2697 HARDWARE TESTS';
   document.getElementById('tov-hint').textContent  = 'Select a test to view description';
+  document.getElementById('tram-view').classList.remove('active');
   // Populate catalogue list on first call (idempotent)
   var catView = document.getElementById('tcat-view');
   catView.innerHTML = '';
@@ -1528,7 +1556,24 @@ function showTestCatalogue() {
   document.getElementById('tov-back').style.display = 'none';
 }
 
+function showRamTestConfig() {
+  gSelectedTest = 1;
+  var rng = (gSettings && gSettings.vessel && gSettings.vessel.rudder_range_deg)
+            ? gSettings.vessel.rudder_range_deg : 35;
+  document.getElementById('ram-deg-inp').max   = rng;
+  document.getElementById('ram-deg-inp').value = Math.min(gRamTestDeg, rng);
+  document.getElementById('ram-deg-hint').textContent = 'max ' + rng + '° (travel limit)';
+  document.getElementById('tov-title').textContent = 'RAM Test';
+  document.getElementById('tov-hint').textContent  = 'Set sweep amplitude then press PROCEED';
+  document.getElementById('tcat-view').classList.add('hidden');
+  document.getElementById('tdet-view').classList.remove('active');
+  document.getElementById('tres-view').classList.remove('active');
+  document.getElementById('tram-view').classList.add('active');
+  document.getElementById('tov-back').style.display = '';
+}
+
 function selectTest(id) {
+  if (id === 1) { showRamTestConfig(); return; }
   var t = TESTS.find(function(x) { return x.id === id; });
   if (!t) return;
   gSelectedTest = id;
@@ -1552,8 +1597,8 @@ function runTest(id) {
   document.getElementById('tres-name').textContent   = t.id + '.  ' + t.name;
   document.getElementById('tres-log').textContent    = '';
   document.getElementById('tres-status').textContent = 'Sending TEST ' + id + ' to Nano\u2026';
-  // Show B3 button for tests that require it
-  var needsB3 = (id >= 5);
+  // Show B3 button for tests that require it (ids 6-8 after renumber)
+  var needsB3 = (id >= 6);
   document.getElementById('tres-b3').classList.toggle('visible', needsB3);
   document.getElementById('tdet-view').classList.remove('active');
   document.getElementById('tres-view').classList.add('active');
@@ -1593,6 +1638,18 @@ document.getElementById('tdet-yes').addEventListener('click', function() {
   if (gSelectedTest) runTest(gSelectedTest);
 });
 document.getElementById('tdet-no').addEventListener('click', showTestCatalogue);
+document.getElementById('tram-no').addEventListener('click', showTestCatalogue);
+document.getElementById('tram-yes').addEventListener('click', function() {
+  var rng = (gSettings && gSettings.vessel && gSettings.vessel.rudder_range_deg)
+            ? gSettings.vessel.rudder_range_deg : 35;
+  var deg = parseInt(document.getElementById('ram-deg-inp').value, 10) || 10;
+  deg = Math.max(1, Math.min(deg, rng));
+  gRamTestDeg = deg;
+  closeTestMenu();
+  // Switch toggle to auto position so B3 is labelled correctly
+  if (gTogglePos !== 'auto') handleToggleAction('auto');
+  sendCmd('RAM_SETUP ' + deg);
+});
 document.getElementById('tres-b3').addEventListener('click', function() {
   // Send B3 (BTN TOGGLE) — trigger for tests 5, 6, 7
   sendCmd('BTN TOGGLE');
@@ -1618,10 +1675,19 @@ function updateUI(d) {
 
   // OLED mode line — AUTO: show AP ON/OFF with oversized "AP"; other modes: plain label
   var modeRow = document.getElementById('oled-mode-row');
-  if (gMode === 'AP' && gApOn) {
+  var b3btn   = document.querySelector('.hw-btn.b3');
+  if (gMode === 'RAM_ON') {
+    modeRow.innerHTML = 'MODE: <b style="color:#ff6a00">RAM Test ON</b>';
+    if (b3btn) b3btn.textContent = 'Stop';
+  } else if (gMode === 'RAM_OFF') {
+    modeRow.innerHTML = 'MODE: <b style="color:#e09000">RAM Test OFF</b>';
+    if (b3btn) b3btn.textContent = 'Run';
+  } else if (gMode === 'AP' && gApOn) {
     modeRow.innerHTML = 'MODE: <span class="ap-label">AP</span>\u00a0ON';
+    if (b3btn) b3btn.textContent = 'Go';
   } else {
     modeRow.innerHTML = 'MODE: <b id="o-mode">' + (gMode || 'IDLE') + '</b>';
+    if (b3btn) b3btn.textContent = 'Go';
   }
 
   // Heading / RDR / CMD — always displayed
