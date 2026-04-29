@@ -341,6 +341,7 @@ class BridgeState:
     rct_target:            int  = 500        # last TGT sent to Nano (pct×10, 0-1000)
     rct_last_rdr_send:   float = 0.0        # monotonic time of last RDR_PCT forward to remote
     test_mode:            bool = False       # True while a TEST <id> is running (pwm_test.ino)
+    servo_cmd_dir:         int  = 0         # last pypilot servo command direction: -1=port, 0=neutral, 1=stbd
 
 
 # ===========================================================================
@@ -1318,6 +1319,9 @@ def main() -> None:
                     rudder_pct = (rudder_range - rudder_angle) / (2.0 * rudder_range) * 100.0
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
                     failed.update(remote_send_many(remote_clients, f"RDR_PCT {rudder_pct:.1f}"))
+                # Servo command direction: only meaningful in AP mode; force 0 otherwise.
+                rdr_cmd_dir = bstate.servo_cmd_dir if bstate.mode == MODE_AP else 0
+                failed.update(remote_send_many(remote_clients, f"RDR_CMD {rdr_cmd_dir}"))
                 if bstate.nano_comms_crit:
                     failed.update(remote_send_many(remote_clients, "COMMS CRIT"))
                 elif bstate.nano_comms_warn:
@@ -1361,11 +1365,23 @@ def main() -> None:
                         with plock:
                             pstate.ap_enabled = False
                         log.info("pypilot relay: DISENGAGE received — mode -> IDLE")
-                    elif relay_code == PYPILOT_COMMAND_CODE and bstate.mode == MODE_IDLE:
-                        bstate.mode = MODE_AP
-                        with plock:
-                            pstate.ap_enabled = True
-                        log.info("pypilot relay: COMMAND received — mode -> AP")
+                    elif relay_code == PYPILOT_COMMAND_CODE:
+                        if bstate.mode == MODE_IDLE:
+                            bstate.mode = MODE_AP
+                            with plock:
+                                pstate.ap_enabled = True
+                            log.info("pypilot relay: COMMAND received — mode -> AP")
+                        # Decode servo command direction for remote triangle indicator.
+                        # Value encodes (servo_command + 1) * 1000; 1000 = neutral.
+                        # Deadband ±20 (~servo_command ±0.02) avoids jitter at centre.
+                        srv_val = candidate[1] | (candidate[2] << 8)
+                        DEADBAND = 20
+                        if srv_val > 1000 + DEADBAND:
+                            bstate.servo_cmd_dir = 1    # starboard
+                        elif srv_val < 1000 - DEADBAND:
+                            bstate.servo_cmd_dir = -1   # port
+                        else:
+                            bstate.servo_cmd_dir = 0    # neutral / at target
                 else:
                     # Alignment error — drop one byte and rescan
                     log.debug("pilot relay DROP  byte=0x%02X  cand=%s"

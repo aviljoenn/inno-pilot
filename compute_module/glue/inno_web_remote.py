@@ -138,6 +138,7 @@ _state: dict = {
     "cmd":        None,     # float degrees (AP heading command)
     "rdr":        None,     # float degrees (actual rudder angle from pypilot)
     "rdr_pct":    None,     # float 0–100  (actual rudder position %)
+    "rdr_cmd":    0,        # int: pypilot servo command direction -1=port, 0=neutral, 1=stbd
     "db":         3.0,
     "comms":      "OK",     # OK | WARN | CRIT
     "warn":       None,
@@ -234,6 +235,12 @@ def _parse_bridge_line(line: str) -> None:
     elif c == "RDR_PCT":
         try:
             _update(rdr_pct=float(parts[1]))
+        except (IndexError, ValueError):
+            pass
+
+    elif c == "RDR_CMD":
+        try:
+            _update(rdr_cmd=int(parts[1]))
         except (IndexError, ValueError):
             pass
 
@@ -591,6 +598,26 @@ body{
   left:50%;
   transform:translate(-50%,-50%);
   transition:left 0.12s ease;
+}
+
+/* Rudder command direction triangle */
+.rdr-cmd-arrow{
+  position:absolute;
+  top:50%;
+  transform:translateY(-50%);
+  width:0;
+  height:0;
+  border-top:7px solid transparent;
+  border-bottom:7px solid transparent;
+  display:none;        /* hidden by default; shown by JS */
+}
+.rdr-cmd-arrow.port{
+  left:4px;
+  border-right:12px solid #ff6a00;  /* orange, points left */
+}
+.rdr-cmd-arrow.stbd{
+  right:4px;
+  border-left:12px solid #ff6a00;   /* orange, points right */
 }
 
 /* line-height:1.5 pre-reserves height for the 1.5× AP label so layout never shifts */
@@ -1061,6 +1088,8 @@ body{
       <div class="rdr-track">
         <div class="rdr-center-tick"></div>
         <div class="rdr-marker" id="rdr-marker"></div>
+        <div class="rdr-cmd-arrow port" id="rdr-arrow-port"></div>
+        <div class="rdr-cmd-arrow stbd" id="rdr-arrow-stbd"></div>
       </div>
     </div>
 
@@ -1606,6 +1635,12 @@ function updateUI(d) {
   // Rudder position bar (uses rdr_pct; falls back to 50% centre)
   var pct = d.rdr_pct != null ? Math.max(0, Math.min(100, d.rdr_pct)) : 50;
   document.getElementById('rdr-marker').style.left = pct + '%';
+
+  // Servo command direction triangle: show port or stbd arrow, hide both when neutral
+  var arrowPort = document.getElementById('rdr-arrow-port');
+  var arrowStbd = document.getElementById('rdr-arrow-stbd');
+  arrowPort.style.display = (d.rdr_cmd === -1) ? 'block' : 'none';
+  arrowStbd.style.display = (d.rdr_cmd ===  1) ? 'block' : 'none';
 
   // Version + comms status
   document.getElementById('o-ver').textContent = d.bridge_ver || d.version || '---';
