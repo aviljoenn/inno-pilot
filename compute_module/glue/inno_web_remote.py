@@ -1068,7 +1068,7 @@ body{
 
     <div class="oled-data">
       <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
-      <span>RDR:&nbsp;<span id="o-rdr">---</span>%</span>
+      <span>RDR:&nbsp;<span id="o-rdr">---</span>&#176;</span>
       <span>Head:&nbsp;<span id="o-hdg">---</span></span>
     </div>
 
@@ -1118,7 +1118,7 @@ body{
         $$WHEEL_SVG$$
       </svg>
     </div>
-    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in REMOTE mode</div>
+    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>&#176; &mdash; drag wheel in REMOTE mode</div>
   </div>
 
   <!-- Settings gear button — only active while toggle is in OFF position -->
@@ -1599,7 +1599,7 @@ function updateUI(d) {
   document.getElementById('o-hdg').textContent =
     d.hdg != null ? d.hdg.toFixed(1) : '---';
   document.getElementById('o-rdr').textContent =
-    d.rdr_pct != null ? d.rdr_pct.toFixed(1) : '---';
+    d.rdr != null ? Math.round(d.rdr) : '---';
   document.getElementById('o-cmd').textContent =
     d.cmd != null ? d.cmd.toFixed(1) : '---';
 
@@ -1649,7 +1649,7 @@ function updateUI(d) {
         'rotate(' + wheelAngle + 'deg)';
     }
     document.getElementById('wheel-pct').textContent =
-      d.rdr_pct != null ? d.rdr_pct.toFixed(0) : '--';
+      d.rdr != null ? Math.round(d.rdr) : '--';
   }
 
   // Test result streaming — bridge relays TEST_LINE / TEST_DONE from Nano
