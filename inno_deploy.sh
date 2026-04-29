@@ -172,6 +172,19 @@ bash "$GLUE_DEPLOY"
 log "Glue deploy complete."
 
 # ---------------------------------------------------------------------------
+info "Step 4b — Install pypilot Python package (web templates, JS, core)"
+# ---------------------------------------------------------------------------
+# The pypilot web interface files (templates/, static/) are part of the pypilot
+# Python package and are only picked up by the running service after a fresh
+# `setup.py install`. A plain `git pull` updates the repo but not the installed
+# package — this step closes that gap.
+PYPILOT_DIR="$REPO_DIR/compute_module/pypilot"
+log "Running setup.py install in $PYPILOT_DIR ..."
+cd "$PYPILOT_DIR"
+sudo python3 setup.py install --quiet
+log "pypilot package installed."
+
+# ---------------------------------------------------------------------------
 info "Step 5 — Flash Nano firmware"
 # ---------------------------------------------------------------------------
 # On ARMv6 (Pi Zero) arduino-cli bundles an armhf avrdude that crashes with

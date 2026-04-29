@@ -512,6 +512,7 @@ $(document).ready(function() {
                            'rudder.scale': 'Scale',
                            'rudder.nonlinearity': 'Non Linearity'};
         if('rudder.angle' in data) {
+            $('#rudder_angle_status').text(Math.round(data['rudder.angle']));
             $('#rudder').text(data['rudder.angle']);
             $('#rudder').append('<p>')
             for(var name in rudder_dict)
@@ -807,7 +808,7 @@ $(document).ready(function() {
     // should be called if tab changes
     setup_watches = function() {
         var tab = currentTab;
-        pypilot_watches(['ap.heading', 'rudder.source'], tab == 'Control', 0.5);
+        pypilot_watches(['ap.heading', 'rudder.source', 'rudder.angle'], tab == 'Control', 0.5);
         pypilot_watches(gains, tab == 'Gain', 1);
         pypilot_watches(['imu.heading', 'imu.pitch', 'imu.roll', 'rudder.angle'], tab == 'Calibration', .5);
         pypilot_watches(conf_names, tab == 'Configuration', 1);

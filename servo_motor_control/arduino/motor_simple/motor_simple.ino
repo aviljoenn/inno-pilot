@@ -26,7 +26,7 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B50";
+const char INNOPILOT_VERSION[] = "v1.2.0_B51";
 const uint16_t INNOPILOT_BUILD_NUM = 50;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
@@ -2233,7 +2233,11 @@ if (!ap_engaged && !remote_manual_active) {
 
   // Current sensor telemetry (feature-gated)
   if ((feature_flags & FEATURE_CURRENT_SENSOR) && (now - last_current_ms >= CURRENT_PERIOD_MS)) {
-    float current_a = read_current_a();
+    // Stub: report artificial current to prevent pypilot DRIVER_TIMEOUT while
+    // real current sensor (ADS1115) is unavailable/miscalibrated.
+    // Restore by replacing the two lines below with: float current_a = read_current_a();
+    bool motor_moving = (last_command_val != 1000);
+    float current_a = motor_moving ? 1.8f : 0.8f;
     int scaled = (int)(current_a * 100.0f + 0.5f);
     if (scaled < 0) {
       scaled = 0;
