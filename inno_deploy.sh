@@ -255,6 +255,11 @@ fi
 # ---------------------------------------------------------------------------
 info "Step 8 — Service status summary"
 # ---------------------------------------------------------------------------
+# Give all services a moment to finish activating before checking status.
+# inno-pilot-web-remote in particular takes a few seconds to establish its
+# TCP connection to the bridge and reach the "active" steady state.
+log "  Waiting 6s for services to reach steady state ..."
+sleep 6
 SVCS=(inno-pilot-socat inno-pilot-fixlink inno-pilot-bridge inno-pilot-web-remote pypilot pypilot_web)
 all_ok=true
 for svc in "${SVCS[@]}"; do
