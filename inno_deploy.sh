@@ -197,12 +197,38 @@ fi
 # intentionally (needed for programming). After upload completes and arduino-cli
 # closes the port, the Nano will reset once more — that is the boot we wait for
 # in Step 6.
+#
+# Drain the serial RX buffer before uploading. When the bridge stopped (Step 3)
+# HUPCL reset the Nano; since then the Nano has been running its firmware and
+# writing telemetry frames that nobody has been reading. Those bytes sit in the
+# kernel's RX ring buffer and can bleed into avrdude's bootloader dialogue,
+# causing "programmer is out of sync" part-way through a page write. Opening
+# the port in non-blocking read mode flushes the buffer without triggering
+# another reset (no DTR/HUPCL transition involved in a read-only open).
+log "Draining serial RX buffer before flash ..."
+stty -F "$NANO_PORT" 115200 -hupcl 2>/dev/null || true
+dd if="$NANO_PORT" of=/dev/null bs=4096 count=1 iflag=nonblock 2>/dev/null || true
+sleep 1
+
+# Upload with one automatic retry — a transient sync error on the first
+# attempt is rare but recoverable; a second failure is a real problem.
 cd "$NANO_SKETCH_DIR"
 log "Flashing Nano on $NANO_PORT ..."
-"${ARDUINO[@]}" upload \
-    -p "$NANO_PORT" \
-    --fqbn "$NANO_FQBN" \
-    .
+upload_ok=false
+for attempt in 1 2; do
+    if "${ARDUINO[@]}" upload \
+           -p "$NANO_PORT" \
+           --fqbn "$NANO_FQBN" \
+           .; then
+        upload_ok=true
+        break
+    fi
+    if [[ "$attempt" -eq 1 ]]; then
+        log "Upload attempt 1 failed — waiting 3s and retrying ..."
+        sleep 3
+    fi
+done
+$upload_ok || die "Nano upload failed after 2 attempts."
 log "Flash complete."
 
 # ---------------------------------------------------------------------------
