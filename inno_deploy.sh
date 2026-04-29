@@ -280,3 +280,20 @@ else
     log "=== Deployment finished — one or more services need attention (see above) ==="
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+info "Step 9 — Self-update ~/inno_deploy.sh from repo"
+# ---------------------------------------------------------------------------
+# Placed last so bash has already read the entire script before we overwrite it.
+SELF_IN_REPO="$REPO_DIR/inno_deploy.sh"
+if [[ -f "$SELF_IN_REPO" ]]; then
+    if ! diff -q "$SELF_IN_REPO" "$HOME/inno_deploy.sh" > /dev/null 2>&1; then
+        cp "$SELF_IN_REPO" "$HOME/inno_deploy.sh"
+        chmod 755 "$HOME/inno_deploy.sh"
+        log "~/inno_deploy.sh updated from repo."
+    else
+        log "~/inno_deploy.sh already up to date."
+    fi
+else
+    log "WARNING: $SELF_IN_REPO not found — skipping self-update."
+fi
