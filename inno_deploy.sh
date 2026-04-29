@@ -197,6 +197,7 @@ fi
 # intentionally (needed for programming). After upload completes and arduino-cli
 # closes the port, the Nano will reset once more — that is the boot we wait for
 # in Step 6.
+cd "$NANO_SKETCH_DIR"
 log "Flashing Nano on $NANO_PORT ..."
 "${ARDUINO[@]}" upload \
     -p "$NANO_PORT" \
