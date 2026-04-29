@@ -115,6 +115,13 @@ fix_avrdude_for_armv6() {
 }
 # ------------------------------------------------------
 
+# Wrap all executable logic in main() so that bash reads the entire file into
+# memory before starting execution. This is necessary for the Step 9 self-update:
+# without the wrapper, bash reads the script in chunks from disk and if the file
+# is overwritten mid-execution it reads the new content at the wrong offset,
+# causing "syntax error near unexpected token" on whatever lands at that position.
+main() {
+
 # Guard: refuse to run on the dev workstation
 case "$(uname -m)" in
   arm* | aarch64) ;;
@@ -198,17 +205,14 @@ fi
 # closes the port, the Nano will reset once more — that is the boot we wait for
 # in Step 6.
 #
-# Drain the serial RX buffer before uploading. When the bridge stopped (Step 3)
-# HUPCL reset the Nano; since then the Nano has been running its firmware and
-# writing telemetry frames that nobody has been reading. Those bytes sit in the
-# kernel's RX ring buffer and can bleed into avrdude's bootloader dialogue,
-# causing "programmer is out of sync" part-way through a page write. Opening
-# the port in non-blocking read mode flushes the buffer without triggering
-# another reset (no DTR/HUPCL transition involved in a read-only open).
-log "Draining serial RX buffer before flash ..."
-stty -F "$NANO_PORT" 115200 -hupcl 2>/dev/null || true
-dd if="$NANO_PORT" of=/dev/null bs=4096 count=1 iflag=nonblock 2>/dev/null || true
-sleep 1
+# Re-stop serial-port services before flashing. inno-pilot-bridge has a systemd
+# Restart= policy and can auto-restart itself during the long Step 4b pypilot
+# install, so it may be activating again by the time we reach Step 5. A bridge
+# that holds or has recently held /dev/ttyUSB0 corrupts the avrdude bootloader
+# dialogue, causing "programmer is out of sync".
+log "Re-stopping bridge/socat to ensure serial port is free ..."
+sudo systemctl stop inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
+sleep 2
 
 # Upload with one automatic retry — a transient sync error on the first
 # attempt is rare but recoverable; a second failure is a real problem.
@@ -329,3 +333,7 @@ if [[ -f "$SELF_IN_REPO" ]]; then
 else
     log "WARNING: $SELF_IN_REPO not found — skipping self-update."
 fi
+
+} # end main()
+
+main "$@"

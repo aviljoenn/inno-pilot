@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B50"
+INNOPILOT_VERSION = "v1.2.0_B51"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -804,6 +804,34 @@ body{
 }
 .wheel-lbl b{color:#444}
 
+/* ── Nudge buttons (port/stbd, flank the helm wheel) ── */
+.wheel-nudge-row{
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+.nudge-btn{
+  width:52px;height:52px;
+  border-radius:10px;
+  background:#12192e;
+  border:2px solid #2e5490;
+  color:#5bb8ff;
+  font-size:1.5em;
+  line-height:1;
+  cursor:pointer;
+  touch-action:manipulation;
+  flex-shrink:0;
+  transition:background .12s,opacity .2s,border-color .2s;
+  -webkit-user-select:none;user-select:none;
+}
+.nudge-btn:active{background:#0d2a50;border-color:#5bb8ff}
+.nudge-btn:disabled{
+  opacity:0.22;
+  cursor:not-allowed;
+  border-color:#2a2a2a;
+  color:#444;
+}
+
 /* ── "No bridge" overlay ── */
 .no-bridge-overlay{
   position:fixed;
@@ -1141,11 +1169,16 @@ body{
   </div>
 
   <!-- Ship's wheel (rotatable, active in MANUAL mode) -->
+  <!-- Nudge buttons (port/stbd) flank the wheel; active in AUTO mode only -->
   <div class="wheel-section">
-    <div class="wheel-wrap" id="wheel-wrap">
-      <svg id="wheel-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
-        $$WHEEL_SVG$$
-      </svg>
+    <div class="wheel-nudge-row">
+      <button class="nudge-btn" id="nudge-port" title="Port nudge 500 ms" disabled>&#9664;</button>
+      <div class="wheel-wrap" id="wheel-wrap">
+        <svg id="wheel-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          $$WHEEL_SVG$$
+        </svg>
+      </div>
+      <button class="nudge-btn" id="nudge-stbd" title="Stbd nudge 500 ms" disabled>&#9654;</button>
     </div>
     <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>&#176; &mdash; drag wheel in REMOTE mode</div>
   </div>
@@ -1768,6 +1801,11 @@ function setToggle(m) {
     el.classList.toggle('active', el.dataset.action === m);
   });
 
+  // Nudge buttons: enabled only in AUTO mode (covers both IDLE and AP ON)
+  var nudgeEnabled = (m === 'auto');
+  document.getElementById('nudge-port').disabled = !nudgeEnabled;
+  document.getElementById('nudge-stbd').disabled = !nudgeEnabled;
+
   // Physical button labels — shown in AUTO and REMOTE modes only
   var btns = [
     document.querySelector('.hw-btn.b1'),
@@ -1880,6 +1918,21 @@ document.getElementById('stop-btn').addEventListener('click', function() {
 document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
   e.preventDefault(); sendCmd('ESTOP');
 }, {passive: false});
+
+// ── Nudge buttons — one-shot 500 ms motor jog, active in AUTO mode only ──
+(function() {
+  function sendNudge(dir) {
+    // Guard: reject if not in AUTO mode (belt-and-suspenders alongside disabled attr)
+    if (gTogglePos !== 'auto') return;
+    sendCmd('NUDGE ' + dir);
+  }
+  var portBtn = document.getElementById('nudge-port');
+  var stbdBtn = document.getElementById('nudge-stbd');
+  portBtn.addEventListener('click',      function()  { sendNudge('PORT'); });
+  portBtn.addEventListener('touchstart', function(e) { e.preventDefault(); sendNudge('PORT'); }, {passive: false});
+  stbdBtn.addEventListener('click',      function()  { sendNudge('STBD'); });
+  stbdBtn.addEventListener('touchstart', function(e) { e.preventDefault(); sendNudge('STBD'); }, {passive: false});
+}());
 
 // Mode radio button clicks
 document.querySelectorAll('.mode-radio').forEach(function(el) {

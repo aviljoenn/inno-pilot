@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B50"
-INNOPILOT_BUILD_NUM = 50  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B51"
+INNOPILOT_BUILD_NUM = 51  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -347,6 +347,11 @@ class BridgeState:
     ram_test_deg:          int  = 0         # RAM test: degrees each side of centre to sweep
     ram_test_running:      bool = False      # RAM test: actively reciprocating
     ram_test_direction:    int  = 1          # RAM test: current sweep direction +1=stbd, -1=port
+    # Nudge state — brief full-power motor jog without disengaging pypilot
+    nudge_until:          float = 0.0       # monotonic expiry; 0 = inactive
+    nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 0=full port, 2000=full stbd
+    nudge_was_idle:        bool = False      # True if mode was IDLE when nudge was triggered
+    nudge_last_sent:      float = 0.0       # monotonic time of last synthetic COMMAND frame sent
 
 
 # ===========================================================================
@@ -959,6 +964,7 @@ def process_remote_line(
       MODE MANUAL       -> enter remote manual steering
       MODE AUTO         -> exit remote manual steering
       RUD <pct>         -> rudder target 0-100% (only in MANUAL mode)
+      NUDGE PORT|STBD   -> 500 ms full-power motor jog (IDLE or AP mode only)
     """
     parts = line.strip().split()
     if not parts:
@@ -1161,6 +1167,31 @@ def process_remote_line(
         bstate.ram_test_direction = 1
         bstate.mode               = MODE_RAM_OFF
         log.info("RAM test armed: ±%d° (rudder_range=%d°) — press B3 to start", deg, rng)
+
+    elif cmd == "NUDGE":
+        # NUDGE PORT | NUDGE STBD
+        # Drives the motor at full power for 500 ms without disengaging pypilot.
+        # In IDLE: engages the clutch for the nudge, then disengages it again.
+        # In AP:   suppresses pypilot relay for the nudge window; AP resumes after.
+        if len(parts) < 2:
+            return
+        direction = parts[1].upper()
+        if direction not in ("PORT", "STBD"):
+            log.warning("Remote NUDGE: invalid direction '%s', ignored", parts[1])
+            return
+        if bstate.mode not in (MODE_IDLE, MODE_AP):
+            log.warning("Remote NUDGE: ignored — mode is %s (must be IDLE or AP)", bstate.mode)
+            return
+        # Full power: PYPILOT_COMMAND_CODE value encodes (servo_command + 1) * 1000
+        #   servo_command = -1 → value = 0   (full port)
+        #   servo_command = +1 → value = 2000 (full stbd)
+        cmd_val = 0 if direction == "PORT" else 2000
+        bstate.nudge_was_idle  = (bstate.mode == MODE_IDLE)
+        bstate.nudge_cmd_val   = cmd_val
+        bstate.nudge_last_sent = 0.0  # force immediate first frame
+        bstate.nudge_until     = time.monotonic() + 0.500
+        log.info("Remote NUDGE %s: cmd_val=%d, was_idle=%s, expires in 500 ms",
+                 direction, cmd_val, bstate.nudge_was_idle)
 
     elif cmd == "SETTINGS":
         sub = parts[1].upper() if len(parts) > 1 else ""
@@ -1409,7 +1440,52 @@ def main() -> None:
 
         # ================================================================
         # 4. Relay: pypilot -> Nano (CRC-validated, self-aligning)
+        #    During an active nudge, pypilot frames are consumed but not
+        #    forwarded; a synthetic COMMAND frame drives the motor instead.
         # ================================================================
+
+        # ---- Nudge: expiry, limit-check, and frame injection ----
+        nudge_active = bstate.nudge_until > 0.0
+        if nudge_active:
+            if now >= bstate.nudge_until:
+                # Timer expired — terminate nudge cleanly
+                if bstate.nudge_was_idle:
+                    send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
+                    log.info("NUDGE expired: mode was IDLE — sent DISENGAGE to Nano")
+                else:
+                    log.info("NUDGE expired: mode was AP — pypilot relay resumed")
+                bstate.nudge_until = 0.0
+                nudge_active = False
+            else:
+                # Cancel early if rudder has reached the software limit
+                if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
+                    current_pct = (rudder_range - rudder_angle) / (2.0 * rudder_range) * 100.0
+                    ap_cfg = _pilot_settings.get("autopilot", {})
+                    limit_hit = False
+                    if bstate.nudge_cmd_val == 0:   # port nudge
+                        port_lim = float(ap_cfg.get("rudder_limit_port_pct", 0))
+                        if current_pct <= port_lim:
+                            limit_hit = True
+                            log.info("NUDGE PORT: port limit reached (%.1f%% <= %.1f%%), stopping",
+                                     current_pct, port_lim)
+                    else:                            # stbd nudge
+                        stbd_lim = float(ap_cfg.get("rudder_limit_stbd_pct", 100))
+                        if current_pct >= stbd_lim:
+                            limit_hit = True
+                            log.info("NUDGE STBD: stbd limit reached (%.1f%% >= %.1f%%), stopping",
+                                     current_pct, stbd_lim)
+                    if limit_hit:
+                        if bstate.nudge_was_idle:
+                            send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
+                        bstate.nudge_until = 0.0
+                        nudge_active = False
+
+                # Send synthetic motor command at ≤20 Hz while nudge is running
+                if nudge_active and (now - bstate.nudge_last_sent) >= 0.05:
+                    send_nano_frame(nano, PYPILOT_COMMAND_CODE, bstate.nudge_cmd_val)
+                    bstate.nudge_last_sent = now
+                    log.debug("NUDGE synthetic COMMAND val=%d", bstate.nudge_cmd_val)
+
         data_from_pilot = pilot.read(256)
         if data_from_pilot:
             log.debug("pilot RX  %d bytes: %s", len(data_from_pilot),
@@ -1419,40 +1495,45 @@ def main() -> None:
                 candidate = bytes(pilot_buf[:4])
                 crc_calc = crc8_msb(candidate[:3])
                 if crc_calc == candidate[3]:
-                    # Valid pypilot frame — wrap with magic header and forward
-                    wrapped = wrap_frame(candidate)
-                    nano.write(wrapped)
-                    log.debug("pilot->nano RELAY  code=0x%02X  raw=%s  wrapped=%s",
-                              candidate[0], candidate.hex(), wrapped.hex())
                     del pilot_buf[:4]
                     relay_good += 1
+                    if nudge_active:
+                        # Nudge in progress: consume frame but do not forward to Nano.
+                        # pypilot's frames are silently dropped for the 500 ms window.
+                        log.debug("pilot->nano NUDGE_DROP  code=0x%02X", candidate[0])
+                    else:
+                        # Normal path: wrap with magic header and forward to Nano
+                        wrapped = wrap_frame(candidate)
+                        nano.write(wrapped)
+                        log.debug("pilot->nano RELAY  code=0x%02X  raw=%s  wrapped=%s",
+                                  candidate[0], candidate.hex(), wrapped.hex())
 
-                    # Sync bridge mode from pypilot's own engage/disengage signals.
-                    # This keeps bstate.mode correct when pypilot changes AP state
-                    # independently (fault, external client, etc.).
-                    relay_code = candidate[0]
-                    if relay_code == PYPILOT_DISENGAGE_CODE and bstate.mode == MODE_AP:
-                        bstate.mode = MODE_IDLE
-                        with plock:
-                            pstate.ap_enabled = False
-                        log.info("pypilot relay: DISENGAGE received — mode -> IDLE")
-                    elif relay_code == PYPILOT_COMMAND_CODE:
-                        if bstate.mode == MODE_IDLE:
-                            bstate.mode = MODE_AP
+                        # Sync bridge mode from pypilot's own engage/disengage signals.
+                        # This keeps bstate.mode correct when pypilot changes AP state
+                        # independently (fault, external client, etc.).
+                        relay_code = candidate[0]
+                        if relay_code == PYPILOT_DISENGAGE_CODE and bstate.mode == MODE_AP:
+                            bstate.mode = MODE_IDLE
                             with plock:
-                                pstate.ap_enabled = True
-                            log.info("pypilot relay: COMMAND received — mode -> AP")
-                        # Decode servo command direction for remote triangle indicator.
-                        # Value encodes (servo_command + 1) * 1000; 1000 = neutral.
-                        # Deadband ±20 (~servo_command ±0.02) avoids jitter at centre.
-                        srv_val = candidate[1] | (candidate[2] << 8)
-                        DEADBAND = 20
-                        if srv_val > 1000 + DEADBAND:
-                            bstate.servo_cmd_dir = -1   # port
-                        elif srv_val < 1000 - DEADBAND:
-                            bstate.servo_cmd_dir = 1    # starboard
-                        else:
-                            bstate.servo_cmd_dir = 0    # neutral / at target
+                                pstate.ap_enabled = False
+                            log.info("pypilot relay: DISENGAGE received — mode -> IDLE")
+                        elif relay_code == PYPILOT_COMMAND_CODE:
+                            if bstate.mode == MODE_IDLE:
+                                bstate.mode = MODE_AP
+                                with plock:
+                                    pstate.ap_enabled = True
+                                log.info("pypilot relay: COMMAND received — mode -> AP")
+                            # Decode servo command direction for remote triangle indicator.
+                            # Value encodes (servo_command + 1) * 1000; 1000 = neutral.
+                            # Deadband ±20 (~servo_command ±0.02) avoids jitter at centre.
+                            srv_val = candidate[1] | (candidate[2] << 8)
+                            DEADBAND = 20
+                            if srv_val > 1000 + DEADBAND:
+                                bstate.servo_cmd_dir = -1   # port
+                            elif srv_val < 1000 - DEADBAND:
+                                bstate.servo_cmd_dir = 1    # starboard
+                            else:
+                                bstate.servo_cmd_dir = 0    # neutral / at target
                 else:
                     # Alignment error — drop one byte and rescan
                     log.debug("pilot relay DROP  byte=0x%02X  cand=%s"
