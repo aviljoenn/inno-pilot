@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 inno_web_remote.py — Browser-based Inno-Remote UI (port 8888).
 
