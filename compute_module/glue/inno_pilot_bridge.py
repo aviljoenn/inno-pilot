@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B51"
-INNOPILOT_BUILD_NUM = 51  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B52"
+INNOPILOT_BUILD_NUM = 52  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -104,15 +104,20 @@ BAUD       = 38400
 # Bridge -> Nano commands
 PILOT_HEADING_CODE         = 0xE2  # imu.heading * 10 (uint16, 0-3600)
 PILOT_COMMAND_CODE         = 0xE3  # ap.heading_command * 10 (uint16)
-PILOT_RUDDER_CODE          = 0xE4  # -rudder.angle * 10 (int16): Nano convention positive=stbd
-PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # -rudder.range * 10 (int16, negative: port is the lower end)
-PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # +rudder.range * 10 (int16, positive: stbd is the upper end)
+PILOT_RUDDER_CODE          = 0xE4  # -rudder.angle * 10 (int16). Bridge negates to translate
+                                   # pypilot's positive=port (canonical) into the Nano's internal
+                                   # coordinate (positive=Dir-A end). Coord-system bridge only —
+                                   # not a convention violation.
+PILOT_RUDDER_PORT_LIM_CODE = 0xE5  # -rudder.range * 10 (int16, negative: port is the lower end
+                                   # of the Nano's internal Dir-A/Dir-B degree axis)
+PILOT_RUDDER_STBD_LIM_CODE = 0xE6  # +rudder.range * 10 (int16, positive: stbd is the upper end
+                                   # of the Nano's internal Dir-A/Dir-B degree axis)
 # NOTE: 0xE7 is RESET_CODE in pypilot servo protocol — do NOT use for bridge commands
 
 # pypilot servo protocol codes (relayed verbatim to Nano via PILOT_PORT)
 PYPILOT_COMMAND_CODE   = 0xC7  # motor position command — implies AP engaged
 PYPILOT_DISENGAGE_CODE = 0x68  # motor disengage — implies AP off
-MANUAL_RUD_TARGET_CODE     = 0xE8  # manual rudder target: 0-1000 (0=full port, 1000=full stbd)
+MANUAL_RUD_TARGET_CODE     = 0xE8  # manual rudder target: 0-1000 (0=full stbd, 1000=full port)
 MANUAL_MODE_CODE           = 0xE9  # remote manual mode active: 0/1  (was 0xE7, changed to avoid RESET_CODE conflict)
 WARNING_CODE               = 0xEA  # warning type to display/beep on Nano
 
@@ -224,8 +229,11 @@ _DEFAULT_PILOT_SETTINGS: dict = {
         "deadband_pct":           3.0,
         "pgain":                  1.0,
         "off_course_alarm_deg":   20,
-        "rudder_limit_port_pct":  0,
-        "rudder_limit_stbd_pct":  100,
+        # Convention: pct=100 = full port, pct=0 = full stbd (matches conv. 1, 2, 7).
+        # rudder_limit_port_pct is therefore the *upper* allowed pct (default 100 = no limit).
+        # rudder_limit_stbd_pct is the *lower* allowed pct (default 0 = no limit).
+        "rudder_limit_port_pct":  100,
+        "rudder_limit_stbd_pct":  0,
     },
     "safety": {
         "auto_disengage_on_fault":  True,
@@ -352,6 +360,9 @@ class BridgeState:
     nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 0=full port, 2000=full stbd
     nudge_was_idle:        bool = False      # True if mode was IDLE when nudge was triggered
     nudge_last_sent:      float = 0.0       # monotonic time of last synthetic COMMAND frame sent
+    # Fix #5c two-way sync: tracks the last pypilot rudder.range value mirrored into
+    # _pilot_settings, to avoid re-persisting and re-pushing on every loop iteration.
+    last_synced_rudder_range: float = -1.0
 
 
 # ===========================================================================
@@ -642,6 +653,25 @@ def load_pilot_settings() -> dict:
                     s[sec] = vals
         except Exception as exc:
             log.warning("Pilot settings load failed (%s) — using defaults", exc)
+
+    # B52 one-shot migration (Fix #3a): pre-B52 stored port_pct as the *lower*
+    # bound and stbd_pct as the *upper* bound. The convention has flipped so
+    # port_pct is now the upper bound. Detect the old layout by port < stbd
+    # and swap+complement so the user's intent (limit fraction of full throw)
+    # is preserved.
+    ap = s.get("autopilot", {})
+    try:
+        port_v = float(ap.get("rudder_limit_port_pct", 100))
+        stbd_v = float(ap.get("rudder_limit_stbd_pct", 0))
+        if port_v < stbd_v:
+            ap["rudder_limit_port_pct"] = int(round(100 - port_v))
+            ap["rudder_limit_stbd_pct"] = int(round(100 - stbd_v))
+            log.info("B52 migration: rudder limits flipped to canonical "
+                     "convention (port=%s, stbd=%s)",
+                     ap["rudder_limit_port_pct"], ap["rudder_limit_stbd_pct"])
+    except Exception:
+        pass
+
     return s
 
 
@@ -748,7 +778,7 @@ def _serialize_settings(pilot: dict, rct: dict) -> bytes:
     # Vessel (offsets 11-12)
     vessel = pilot.get("vessel", {})
     buf.append(0 if vessel.get("type", "sail") == "sail" else 1)
-    buf.append(max(10, min(60, int(vessel.get("rudder_range_deg", 35)))))
+    buf.append(max(10, min(100, int(vessel.get("rudder_range_deg", 35)))))
 
     # Autopilot (offsets 13-19)
     ap = pilot.get("autopilot", {})
@@ -757,8 +787,8 @@ def _serialize_settings(pilot: dict, rct: dict) -> bytes:
     pg10 = max(0, min(65535, int(round(float(ap.get("pgain", 1.0)) * 10))))
     buf.extend(pg10.to_bytes(2, "little"))
     buf.append(max(0, min(255, int(ap.get("off_course_alarm_deg", 20)))))
-    buf.append(max(0, min(255, int(ap.get("rudder_limit_port_pct", 0)))))
-    buf.append(max(0, min(255, int(ap.get("rudder_limit_stbd_pct", 100)))))
+    buf.append(max(0, min(255, int(ap.get("rudder_limit_port_pct", 100)))))
+    buf.append(max(0, min(255, int(ap.get("rudder_limit_stbd_pct", 0)))))
 
     # Safety (offsets 20-22)
     safety = pilot.get("safety", {})
@@ -1082,7 +1112,8 @@ def process_remote_line(
                 log.info("Remote -> MODE AUTO: manual steering released")
 
     elif cmd == "RUD":
-        # Rudder target percentage: 0.0 = full port, 100.0 = full stbd
+        # Rudder target percentage: 100.0 = full port, 0.0 = full stbd
+        # (canonical convention: larger value = port; matches conv. 1, 2)
         if len(parts) < 2:
             return
         try:
@@ -1104,7 +1135,7 @@ def process_remote_line(
         send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
 
     elif cmd == "TGT":
-        # RCT test target: 0.0-100.0 % (0=port limit, 50=midships, 100=stbd limit)
+        # RCT test target: 0.0-100.0 % (100=port limit, 50=midships, 0=stbd limit)
         # Forwarded to Nano as RCT_TARGET_CODE (pct×10, 0-1000).
         # Accepted in any bridge mode — the Nano test sketch decides when to act on it.
         if len(parts) < 2:
@@ -1219,6 +1250,17 @@ def process_remote_line(
                         _pilot_settings[sec] = vals
                 _persist_pilot_settings(_pilot_settings)
                 _apply_pilot_settings(_pilot_settings, nano=nano)
+                # Two-way sync (Fix #5c): if rudder_range_deg was updated, push it to
+                # pypilot so the calibration GUI on port 8000 stays in step.
+                vessel_in = new_settings.get("vessel", {}) if isinstance(new_settings, dict) else {}
+                if isinstance(vessel_in, dict) and "rudder_range_deg" in vessel_in:
+                    try:
+                        set_q.put(("rudder.range",
+                                   float(_pilot_settings["vessel"]["rudder_range_deg"])))
+                        log.info("SETTINGS SET: pushed rudder.range=%s to pypilot",
+                                 _pilot_settings["vessel"]["rudder_range_deg"])
+                    except Exception as exc:
+                        log.warning("Failed to push rudder.range to pypilot: %s", exc)
                 # Push all settings to Nano EEPROM and reboot so they take effect
                 if nano is not None:
                     rct_now = load_or_create_rct_settings()
@@ -1356,6 +1398,29 @@ def main() -> None:
             rudder_angle = pstate.rudder_angle
             rudder_range = pstate.rudder_range
 
+        # ----------------------------------------------------------------
+        # Fix #5c two-way sync: when pypilot publishes a new rudder.range
+        # value, mirror it into _pilot_settings, persist to disk, and push
+        # the updated settings block to the Nano. Guarded by a 1° dead-zone
+        # and a sync-tracker so we don't write on every iteration.
+        # ----------------------------------------------------------------
+        if rudder_range is not None and rudder_range > 0:
+            stored = float(_pilot_settings.get("vessel", {}).get(
+                "rudder_range_deg", 35))
+            if (abs(rudder_range - stored) >= 1.0 and
+                    abs(rudder_range - bstate.last_synced_rudder_range) >= 1.0):
+                new_val = int(round(rudder_range))
+                _pilot_settings.setdefault("vessel", {})["rudder_range_deg"] = new_val
+                bstate.last_synced_rudder_range = float(new_val)
+                try:
+                    _persist_pilot_settings(_pilot_settings)
+                    rct_now = load_or_create_rct_settings()
+                    push_all_settings_to_nano_eeprom(nano, _pilot_settings, rct_now)
+                    log.info("pypilot -> settings sync: rudder_range_deg=%d "
+                             "(persisted + pushed to Nano)", new_val)
+                except Exception as exc:
+                    log.warning("rudder_range sync failed: %s", exc)
+
         # ================================================================
         # 3. Push telemetry to Nano and Remote at 5 Hz
         # ================================================================
@@ -1368,10 +1433,14 @@ def main() -> None:
             if heading_cmd is not None:
                 send_nano_frame(nano, PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd))
             if rudder_angle is not None:
-                # Negate: pypilot positive=port; Nano expects positive=stbd.
+                # Coord-system bridge (see PILOT_RUDDER_CODE comment): negate to
+                # translate pypilot's canonical positive=port into the Nano's
+                # internal positive=Dir-A (high ADC) degree axis.
                 send_nano_frame(nano, PILOT_RUDDER_CODE, enc_deg10_i16(-rudder_angle))
             if rudder_range is not None:
-                # Port limit is negative (lower end), stbd limit is positive (upper end).
+                # On the Nano's Dir-A/Dir-B degree axis: Dir-B (port end) is the
+                # lower end (negative) and Dir-A (stbd end) is the upper end
+                # (positive). Bridge ↔ Nano coord-system mapping only.
                 port_lim = -abs(rudder_range)
                 stbd_lim =  abs(rudder_range)
                 send_nano_frame(nano, PILOT_RUDDER_PORT_LIM_CODE, enc_deg10_i16(port_lim))
@@ -1398,7 +1467,8 @@ def main() -> None:
                     if rudder_angle >= target_angle_pypilot - REACH_DEG:
                         bstate.ram_test_direction = 1
                         target_angle_pypilot = -deg  # now heading stbd
-                target_pct = (rng - target_angle_pypilot) / (2.0 * rng) * 100.0
+                # Convention: pct=100=port, pct=0=stbd. pypilot angle positive=port.
+                target_pct = (rng + target_angle_pypilot) / (2.0 * rng) * 100.0
                 target_pct = max(0.0, min(100.0, target_pct))
                 target_0_1000 = int(round(target_pct * 10.0))
                 send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
@@ -1414,11 +1484,12 @@ def main() -> None:
                 if heading_cmd is not None:
                     failed.update(remote_send_many(remote_clients, f"CMD {heading_cmd:.1f}"))
                 if rudder_angle is not None:
-                    # Negate so remote receives positive=stbd (matching RUD command convention).
-                    failed.update(remote_send_many(remote_clients, f"RDR {-rudder_angle:.1f}"))
+                    # Pass through unchanged: pypilot's positive=port matches the canonical
+                    # convention (conv. 2) and the new RUD/RDR_PCT scale (port=high).
+                    failed.update(remote_send_many(remote_clients, f"RDR {rudder_angle:.1f}"))
                 if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
-                    # 0% = full port, 100% = full stbd (consistent with RUD command input).
-                    rudder_pct = (rudder_range - rudder_angle) / (2.0 * rudder_range) * 100.0
+                    # 100% = full port, 0% = full stbd (consistent with RUD command input).
+                    rudder_pct = (rudder_range + rudder_angle) / (2.0 * rudder_range) * 100.0
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
                     failed.update(remote_send_many(remote_clients, f"RDR_PCT {rudder_pct:.1f}"))
                 # Servo command direction: only meaningful in AP mode; force 0 otherwise.
@@ -1459,20 +1530,23 @@ def main() -> None:
             else:
                 # Cancel early if rudder has reached the software limit
                 if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
-                    current_pct = (rudder_range - rudder_angle) / (2.0 * rudder_range) * 100.0
+                    # Convention: pct=100=port, pct=0=stbd.
+                    current_pct = (rudder_range + rudder_angle) / (2.0 * rudder_range) * 100.0
                     ap_cfg = _pilot_settings.get("autopilot", {})
                     limit_hit = False
                     if bstate.nudge_cmd_val == 0:   # port nudge
-                        port_lim = float(ap_cfg.get("rudder_limit_port_pct", 0))
-                        if current_pct <= port_lim:
+                        # port_lim is the *upper* allowed pct (default 100 = no limit).
+                        port_lim = float(ap_cfg.get("rudder_limit_port_pct", 100))
+                        if current_pct >= port_lim:
                             limit_hit = True
-                            log.info("NUDGE PORT: port limit reached (%.1f%% <= %.1f%%), stopping",
+                            log.info("NUDGE PORT: port limit reached (%.1f%% >= %.1f%%), stopping",
                                      current_pct, port_lim)
                     else:                            # stbd nudge
-                        stbd_lim = float(ap_cfg.get("rudder_limit_stbd_pct", 100))
-                        if current_pct >= stbd_lim:
+                        # stbd_lim is the *lower* allowed pct (default 0 = no limit).
+                        stbd_lim = float(ap_cfg.get("rudder_limit_stbd_pct", 0))
+                        if current_pct <= stbd_lim:
                             limit_hit = True
-                            log.info("NUDGE STBD: stbd limit reached (%.1f%% >= %.1f%%), stopping",
+                            log.info("NUDGE STBD: stbd limit reached (%.1f%% <= %.1f%%), stopping",
                                      current_pct, stbd_lim)
                     if limit_hit:
                         if bstate.nudge_was_idle:

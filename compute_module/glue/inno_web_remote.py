@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B51"
+INNOPILOT_VERSION = "v1.2.0_B52"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -87,8 +87,11 @@ _DEFAULT_SETTINGS: dict = {
         "deadband_pct":           3.0,
         "pgain":                  1.0,  # proportional heading gain
         "off_course_alarm_deg":   20,   # degrees off-course before alert
-        "rudder_limit_port_pct":  0,    # software port stop (%)
-        "rudder_limit_stbd_pct":  100,  # software stbd stop (%)
+        # Convention: pct=100=full port, pct=0=full stbd. Therefore
+        # rudder_limit_port_pct is the *upper* allowed pct (default 100=no limit)
+        # and rudder_limit_stbd_pct is the *lower* allowed pct (default 0=no limit).
+        "rudder_limit_port_pct":  100,  # software port stop (%) — upper bound
+        "rudder_limit_stbd_pct":  0,    # software stbd stop (%) — lower bound
     },
     "safety": {
         "auto_disengage_on_fault":  True,
@@ -1180,7 +1183,7 @@ body{
       </div>
       <button class="nudge-btn" id="nudge-stbd" title="Stbd nudge 500 ms" disabled>&#9654;</button>
     </div>
-    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>&#176; &mdash; drag wheel in REMOTE mode</div>
+    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in REMOTE mode</div>
   </div>
 
   <!-- Settings gear button — only active while toggle is in OFF position -->
@@ -1252,7 +1255,7 @@ body{
       </div>
       <div class="sf-row" data-sfid="rudder_range_deg">
         <span class="sf-lbl">Rudder Range (&#176;)</span>
-        <input class="sf-inp" type="number" id="sf-rudder_range_deg" min="10" max="60" step="1">
+        <input class="sf-inp" type="number" id="sf-rudder_range_deg" min="10" max="100" step="1">
       </div>
 
       <div class="ss-title">CONNECTIONS &amp; FEATURES</div>
@@ -1335,11 +1338,11 @@ body{
       </div>
       <div class="sf-row" data-sfid="rudder_limit_port_pct">
         <span class="sf-lbl">Port Limit (%)</span>
-        <input class="sf-inp" type="number" id="sf-rudder_limit_port_pct" min="0" max="45" step="1">
+        <input class="sf-inp" type="number" id="sf-rudder_limit_port_pct" min="55" max="100" step="1">
       </div>
       <div class="sf-row" data-sfid="rudder_limit_stbd_pct">
         <span class="sf-lbl">Stbd Limit (%)</span>
-        <input class="sf-inp" type="number" id="sf-rudder_limit_stbd_pct" min="55" max="100" step="1">
+        <input class="sf-inp" type="number" id="sf-rudder_limit_stbd_pct" min="0" max="45" step="1">
       </div>
 
       <div class="ss-title">SAFETY</div>
@@ -1732,8 +1735,10 @@ function updateUI(d) {
     d.cmd != null ? d.cmd.toFixed(1) : '---';
 
   // Rudder position bar (uses rdr_pct; falls back to 50% centre)
+  // Convention: rdr_pct=100=port (left of bar), rdr_pct=0=stbd (right of bar)
+  // — see conv. 4 (linear graphic: port=left, stbd=right).
   var pct = d.rdr_pct != null ? Math.max(0, Math.min(100, d.rdr_pct)) : 50;
-  document.getElementById('rdr-marker').style.left = pct + '%';
+  document.getElementById('rdr-marker').style.left = (100 - pct) + '%';
 
   // Servo command direction triangle: show port or stbd arrow, hide both when neutral
   var arrowPort = document.getElementById('rdr-arrow-port');
@@ -1776,14 +1781,18 @@ function updateUI(d) {
     // In MANUAL: keep wheel at drag position, don't override with telemetry
   } else {
     ww.classList.remove('active');
-    // Sync wheel visual to actual rudder position
+    // Sync wheel visual to actual rudder position.
+    // Convention 3: CW (positive CSS rotate) = stbd. With rdr_pct=100=port,
+    // we negate so port (high pct) maps to CCW.
     if (d.rdr_pct != null) {
-      wheelAngle = (d.rdr_pct - 50) / 50 * MAX_DEG;
+      wheelAngle = -(d.rdr_pct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform =
         'rotate(' + wheelAngle + 'deg)';
     }
+    // Show rudder position as percentage (0=stbd, 100=port) — matches the
+    // wheel-lbl '%' suffix and the MANUAL/REMOTE wheel-pct values below.
     document.getElementById('wheel-pct').textContent =
-      d.rdr != null ? Math.round(d.rdr) : '--';
+      d.rdr_pct != null ? Math.round(d.rdr_pct) : '--';
   }
 
   // Test result streaming — bridge relays TEST_LINE / TEST_DONE from Nano
@@ -1979,7 +1988,8 @@ function handleToggleAction(action) {
       // ADC on MANUAL_MODE_CODE receipt, so any RUD at this point would override
       // that correct seed with a potentially sign-inverted value.
       gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
-      wheelAngle = (gManualRudPct - 50) / 50 * MAX_DEG;
+      // Same sign as telemetry sync: gManualRudPct=100 (port) → CCW.
+      wheelAngle = -(gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
       document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
     });

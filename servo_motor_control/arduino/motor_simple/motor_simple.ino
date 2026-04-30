@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B51";
-const uint16_t INNOPILOT_BUILD_NUM = 50;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B52";
+const uint16_t INNOPILOT_BUILD_NUM = 52;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -215,7 +215,9 @@ int8_t manual_dir     = 0;      // -1 = Dir-B, +1 = Dir-A, 0 = none
 
 // Remote manual mode state (from Bridge via TCP)
 bool     remote_manual_active     = false;  // true when Bridge is in MANUAL mode
-uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full Dir-B, 1000=full Dir-A
+uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full Dir-A, 1000=full Dir-B
+                                            // (canonical convention: 1000=port end, 0=stbd end;
+                                            // matches web/bridge pct=100=port)
 
 // ---- Remote-manual brake state machine ----
 // States: 0 = DRIVING (toward target), 1 = BRAKING (timed reverse pulse), 2 = SETTLED (in deadband)
@@ -355,8 +357,11 @@ enum {
   DIRB_PIN_FAULT      = 0x0020,
   DIRA_PIN_FAULT      = 0x0040,
   BADVOLTAGE_FAULT    = 0x0080,
-  MIN_RUDDER_FAULT    = 0x0100,   // Dir-A end
-  MAX_RUDDER_FAULT    = 0x0200,   // Dir-B end
+  // Bit values are pypilot-protocol constants and must not change. Local names
+  // were renamed (Fix #6a) so the Nano source reads in the canonical convention:
+  // larger value = port end, smaller value = stbd end.
+  STBD_END_FAULT      = 0x0100,   // = pypilot MIN_RUDDER_FAULT — Dir-A (high ADC) end
+  PORT_END_FAULT      = 0x0200,   // = pypilot MAX_RUDDER_FAULT — Dir-B (low ADC) end
   CURRENT_RANGE       = 0x0400,
   BAD_FUSES           = 0x0800,
   COMMS_WARN_FAULT    = 0x1000,  // error rate elevated (>= 5 errors in 10-second window)
@@ -1363,15 +1368,15 @@ void update_motor_from_command() {
 
   // Update rudder fault flags (as before)
   if (at_dirb_end) {
-    flags |= MAX_RUDDER_FAULT;
+    flags |= PORT_END_FAULT;
   } else {
-    flags &= ~MAX_RUDDER_FAULT;
+    flags &= ~PORT_END_FAULT;
   }
 
   if (at_dira_end) {
-    flags |= MIN_RUDDER_FAULT;
+    flags |= STBD_END_FAULT;
   } else {
-    flags &= ~MIN_RUDDER_FAULT;
+    flags &= ~STBD_END_FAULT;
   }
 
   // ---- Remote MANUAL mode: drive at 255 PWM with active reverse-braking ----
@@ -1391,9 +1396,12 @@ void update_motor_from_command() {
   //   RM_SETTLED : inside deadband, motor off
   //
   if (remote_manual_active) {
-    // Map 0..1000 target to Dir-B end..Dir-A end ADC range
-    int target_adc = RUDDER_ADC_DIRB_END +
-      (int)((long)(RUDDER_ADC_DIRA_END - RUDDER_ADC_DIRB_END) * manual_rud_target_0_1000 / 1000);
+    // Map 0..1000 target to ADC range. Convention: target=0 -> Dir-A end (stbd,
+    // high ADC), target=1000 -> Dir-B end (port, low ADC). Linear interpolation
+    // anchored at Dir-A so larger target value drives toward port — matching
+    // the canonical convention enforced across bridge + web UI.
+    int target_adc = RUDDER_ADC_DIRA_END +
+      (int)((long)(RUDDER_ADC_DIRB_END - RUDDER_ADC_DIRA_END) * manual_rud_target_0_1000 / 1000);
     const int REMOTE_DEADBAND = 21;  // ADC counts — sized to absorb braking residual
 
     int error = target_adc - a;      // positive = need to go Dir-A (increase ADC)
@@ -1723,9 +1731,11 @@ void process_packet() {
         rudder_speed_cps  = 0;
         rm_state          = RM_SETTLED;
         // Seed target from the Nano's own ADC so the motor holds still on entry.
-        // This is sign-convention-agnostic: the Nano knows exactly where it is.
+        // Anchored at Dir-A (high ADC) so pos=0 at Dir-A end and pos=1000 at
+        // Dir-B end, matching manual_rud_target_0_1000's canonical convention
+        // (1000=port end, 0=stbd end).
         {
-          long pos = (long)(rudder_adc_smoothed - RUDDER_ADC_DIRB_END) * 1000L
+          long pos = (long)(RUDDER_ADC_DIRA_END - rudder_adc_smoothed) * 1000L
                      / (RUDDER_ADC_DIRA_END - RUDDER_ADC_DIRB_END);
           if (pos < 0)    pos = 0;
           if (pos > 1000) pos = 1000;
