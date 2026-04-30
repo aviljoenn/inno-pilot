@@ -1261,12 +1261,13 @@ void update_motor_from_command() {
   bool manual_jog_active = manual_override;
   int8_t manual_jog_dir = manual_dir;
   if (!manual_override && !ap_active && !remote_manual_active && pi_alive && command_recent) {
+    // Conv 1: larger value = port. delta > 0 means port; Dir-B = manual_jog_dir -1.
     if (delta > db) {
       manual_jog_active = true;
-      manual_jog_dir = +1;
+      manual_jog_dir = -1;
     } else if (delta < -db) {
       manual_jog_active = true;
-      manual_jog_dir = -1;
+      manual_jog_dir = +1;
     }
   }
 
@@ -1590,14 +1591,15 @@ void update_motor_from_command() {
     return;
   }
 
-  // Don't drive further into soft limits
-  if (delta > 0 && (at_dira_end || at_dira_pilot)) {
+  // Don't drive further into soft limits.
+  // Conv 1: delta > 0 = port (Dir-B); delta < 0 = stbd (Dir-A).
+  if (delta > 0 && (at_dirb_end || at_dirb_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
-  if (delta < 0 && (at_dirb_end || at_dirb_pilot)) {
+  if (delta < 0 && (at_dira_end || at_dira_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1624,14 +1626,14 @@ void update_motor_from_command() {
     duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
   }
 
-  // Direction: delta > 0 => Dir-A (increase ADC), delta < 0 => Dir-B (decrease ADC)
+  // Direction: conv 1: delta > 0 = large value = port => Dir-B (RPWM); delta < 0 = stbd => Dir-A (LPWM)
   SET_MOTOR_REASON(MRSN_AP);  // B26: record activation reason (autopilot path)
   if (delta > 0) {
-    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-  } else {
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+  } else {
+    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+    digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
   }
 
   analogWrite(HBRIDGE_PWM_PIN, duty);

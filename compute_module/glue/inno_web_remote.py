@@ -141,7 +141,7 @@ _state: dict = {
     "cmd":        None,     # float degrees (AP heading command)
     "rdr":        None,     # float degrees (actual rudder angle from pypilot)
     "rdr_pct":    None,     # float 0–100  (actual rudder position %)
-    "rdr_cmd":    0,        # int: pypilot servo command direction -1=port, 0=neutral, 1=stbd
+    "rdr_cmd":    0,        # int: pypilot servo command direction +1=port, 0=neutral, -1=stbd (conv 2)
     "db":         3.0,
     "comms":      "OK",     # OK | WARN | CRIT
     "warn":       None,
@@ -1747,8 +1747,8 @@ function updateUI(d) {
   // Servo command direction triangle: show port or stbd arrow, hide both when neutral
   var arrowPort = document.getElementById('rdr-arrow-port');
   var arrowStbd = document.getElementById('rdr-arrow-stbd');
-  arrowPort.style.display = (d.rdr_cmd === -1) ? 'block' : 'none';
-  arrowStbd.style.display = (d.rdr_cmd ===  1) ? 'block' : 'none';
+  arrowPort.style.display = (d.rdr_cmd ===  1) ? 'block' : 'none';
+  arrowStbd.style.display = (d.rdr_cmd === -1) ? 'block' : 'none';
 
   // Version + comms status
   document.getElementById('o-ver').textContent = d.bridge_ver || d.version || '---';

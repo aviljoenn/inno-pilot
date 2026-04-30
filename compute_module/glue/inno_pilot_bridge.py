@@ -357,7 +357,7 @@ class BridgeState:
     ram_test_direction:    int  = 1          # RAM test: current sweep direction +1=stbd, -1=port
     # Nudge state — brief full-power motor jog without disengaging pypilot
     nudge_until:          float = 0.0       # monotonic expiry; 0 = inactive
-    nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 0=full port, 2000=full stbd
+    nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 2000=full port, 0=full stbd (conv 1)
     nudge_was_idle:        bool = False      # True if mode was IDLE when nudge was triggered
     nudge_last_sent:      float = 0.0       # monotonic time of last synthetic COMMAND frame sent
     # Fix #5c two-way sync: tracks the last pypilot rudder.range value mirrored into
@@ -1213,10 +1213,10 @@ def process_remote_line(
         if bstate.mode not in (MODE_IDLE, MODE_AP):
             log.warning("Remote NUDGE: ignored — mode is %s (must be IDLE or AP)", bstate.mode)
             return
-        # Full power: PYPILOT_COMMAND_CODE value encodes (servo_command + 1) * 1000
-        #   servo_command = -1 → value = 0   (full port)
-        #   servo_command = +1 → value = 2000 (full stbd)
-        cmd_val = 0 if direction == "PORT" else 2000
+        # Conv 1: larger value = port. PYPILOT_COMMAND_CODE value encodes (servo_command + 1) * 1000.
+        #   servo_command = +1 → value = 2000 (full port)
+        #   servo_command = -1 → value = 0    (full stbd)
+        cmd_val = 2000 if direction == "PORT" else 0
         bstate.nudge_was_idle  = (bstate.mode == MODE_IDLE)
         bstate.nudge_cmd_val   = cmd_val
         bstate.nudge_last_sent = 0.0  # force immediate first frame
@@ -1534,7 +1534,7 @@ def main() -> None:
                     current_pct = (rudder_range + rudder_angle) / (2.0 * rudder_range) * 100.0
                     ap_cfg = _pilot_settings.get("autopilot", {})
                     limit_hit = False
-                    if bstate.nudge_cmd_val == 0:   # port nudge
+                    if bstate.nudge_cmd_val == 2000:   # port nudge (conv 1: larger = port)
                         # port_lim is the *upper* allowed pct (default 100 = no limit).
                         port_lim = float(ap_cfg.get("rudder_limit_port_pct", 100))
                         if current_pct >= port_lim:
@@ -1602,10 +1602,11 @@ def main() -> None:
                             # Deadband ±20 (~servo_command ±0.02) avoids jitter at centre.
                             srv_val = candidate[1] | (candidate[2] << 8)
                             DEADBAND = 20
+                            # Conv 2: positive = port, negative = stbd.
                             if srv_val > 1000 + DEADBAND:
-                                bstate.servo_cmd_dir = -1   # port
+                                bstate.servo_cmd_dir = 1    # port
                             elif srv_val < 1000 - DEADBAND:
-                                bstate.servo_cmd_dir = 1    # starboard
+                                bstate.servo_cmd_dir = -1   # starboard
                             else:
                                 bstate.servo_cmd_dir = 0    # neutral / at target
                 else:
