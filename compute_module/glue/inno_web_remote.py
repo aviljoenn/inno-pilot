@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B52"
+INNOPILOT_VERSION = "v1.2.0_B53"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1440,6 +1440,8 @@ var gMode      = 'IDLE';
 var gConnected = false;
 var gApOn      = false;      // true when AP is actually engaged (d.ap === 1)
 var gTogglePos = 'on';       // mode radio position: 'auto' | 'remote' | 'on' | 'off'
+var gHdg       = null;       // latest heading from bridge telemetry (degrees)
+var gCmd       = null;       // latest AP heading command from bridge telemetry (degrees)
 var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DEG
 var isDragging = false;
 var prevPtrAngle = null;
@@ -1702,6 +1704,8 @@ function updateUI(d) {
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
   gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
+  if (d.hdg != null) gHdg = d.hdg;
+  if (d.cmd != null) gCmd = d.cmd;
   if (d.ui_mode) gTogglePos = d.ui_mode;
 
   // Suppress overlay when connected, or when disconnect is intentional (OFF).
@@ -1902,6 +1906,14 @@ function stopJog() {
         } else {
           startJog(cfg.delta, cfg.interval);
         }
+      } else if (cfg.cls === 'b3' && gTogglePos === 'auto' && !gApOn) {
+        // GO in AUTO mode while AP is off: lock onto current heading then engage.
+        sendCmd('AP_ENGAGE_AT_HDG').then(function(res) {
+          if (!res.ok || res.body.ok === false) {
+            var msg = (res.body && res.body.error) ? res.body.error : 'AP engage failed';
+            showWarning(msg);
+          }
+        });
       } else {
         sendCmd(cfg.cmd);
       }
@@ -2175,12 +2187,17 @@ function setSovStatus(msg, type) {
   el.className = 'shdr-status' + (type ? ' s-' + type : '');
 }
 
+// showWarning: display a transient warning toast in the centre of the screen.
+function showWarning(msg) {
+  var t = document.getElementById('sw-toast');
+  t.innerHTML = msg;
+  t.classList.add('visible');
+  setTimeout(function() { t.classList.remove('visible'); }, 2500);
+}
+
 function openSettings() {
   if (gTogglePos !== 'off') {
-    // Flash warning — settings only accessible in OFF mode
-    var t = document.getElementById('sw-toast');
-    t.classList.add('visible');
-    setTimeout(function() { t.classList.remove('visible'); }, 2200);
+    showWarning('Settings only<br>available in OFF mode');
     return;
   }
   gSettingsOpen = true;
@@ -2487,6 +2504,38 @@ class _Handler(BaseHTTPRequestHandler):
                     _update(ap=0, mode="IDLE")
                 else:
                     _update(ap=1, mode="AP")
+
+        # ── AP_ENGAGE_AT_HDG: lock CMD to current heading then engage AP ──────
+        # Reads hdg and cmd atomically, computes the shortest-path delta, and
+        # queues BTN <delta> + BTN TOGGLE back-to-back so the bridge sees them
+        # as a consecutive pair with no commands interleaved.
+        # Note: a bridge-side AP_ENGAGE_AT_HDG command that does this in a
+        # single operation would be strictly more atomic; this is the best we
+        # can do from the web-remote side without changing the bridge.
+        if tok and tok[0] == "AP_ENGAGE_AT_HDG":
+            with _state_lock:
+                hdg = _state["hdg"]
+                cmd = _state["cmd"]
+            if hdg is None:
+                self._send_json(200, {"ok": False, "error": "No heading signal—compass not ready"})
+                return
+            if cmd is None:
+                self._send_json(200, {"ok": False, "error": "AP heading unknown—try again"})
+                return
+            # Shortest-path delta so the heading command wraps correctly at 0/360.
+            delta = ((hdg - cmd) + 180.0) % 360.0 - 180.0
+            try:
+                _cmd_q.put_nowait(f"BTN {delta:.1f}")
+                _cmd_q.put_nowait("BTN TOGGLE")
+            except queue.Full:
+                log.warning("AP_ENGAGE_AT_HDG: cmd queue full")
+                self._send_json(200, {"ok": False, "error": "Command queue full—try again"})
+                return
+            # Optimistic local state update (bridge confirms via telemetry ~200 ms later)
+            _update(ap=1, mode="AP")
+            log.info("AP_ENGAGE_AT_HDG: hdg=%.1f cmd=%.1f delta=%.1f -> engage", hdg, cmd, delta)
+            self._send_json(200, {"ok": True})
+            return
 
         # Forward command to bridge via _cmd_q (bridge thread reads this)
         try:
