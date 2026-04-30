@@ -613,13 +613,12 @@ body{
   border-top:7px solid transparent;
   border-bottom:7px solid transparent;
   display:none;        /* hidden by default; shown by JS */
+  transition:left 0.12s ease;   /* match rdr-marker so arrow glides in lockstep */
 }
 .rdr-cmd-arrow.port{
-  left:4px;
   border-right:12px solid #ff6a00;  /* orange, points left */
 }
 .rdr-cmd-arrow.stbd{
-  right:4px;
   border-left:12px solid #ff6a00;   /* orange, points right */
 }
 
@@ -1724,10 +1723,10 @@ function updateUI(d) {
     if (b3btn) b3btn.textContent = 'Run';
   } else if (gMode === 'AP' && gApOn) {
     modeRow.innerHTML = 'MODE: <span class="ap-label">AP</span>\u00a0ON';
-    if (b3btn) b3btn.textContent = 'Go';
+    if (b3btn) b3btn.textContent = 'Off';  // AP is engaged; pressing will disengage
   } else {
     modeRow.innerHTML = 'MODE: <b id="o-mode">' + (gMode || 'IDLE') + '</b>';
-    if (b3btn) b3btn.textContent = 'Go';
+    if (b3btn) b3btn.textContent = gTogglePos === 'auto' ? 'On' : 'Go';  // AUTO: engage; other modes: generic
   }
 
   // Heading / RDR / CMD — always displayed
@@ -1744,9 +1743,15 @@ function updateUI(d) {
   var pct = d.rdr_pct != null ? Math.max(0, Math.min(100, d.rdr_pct)) : 50;
   document.getElementById('rdr-marker').style.left = (100 - pct) + '%';
 
-  // Servo command direction triangle: show port or stbd arrow, hide both when neutral
+  // Servo command direction triangle: track the marker position so the arrow sits
+  // directly against the position block rather than fixed at the bar ends.
+  // markerLeft is the same coordinate used for rdr-marker; port arrow sits 18px to
+  // the left (6px half-marker + 12px arrow width), stbd sits 6px to the right.
   var arrowPort = document.getElementById('rdr-arrow-port');
   var arrowStbd = document.getElementById('rdr-arrow-stbd');
+  var markerLeft = (100 - pct) + '%';
+  arrowPort.style.left = 'calc(' + markerLeft + ' - 18px)';
+  arrowStbd.style.left = 'calc(' + markerLeft + ' + 6px)';
   arrowPort.style.display = (d.rdr_cmd ===  1) ? 'block' : 'none';
   arrowStbd.style.display = (d.rdr_cmd === -1) ? 'block' : 'none';
 
