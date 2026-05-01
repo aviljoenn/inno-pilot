@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B61"
-INNOPILOT_BUILD_NUM = 61  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B62"
+INNOPILOT_BUILD_NUM = 62  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -290,6 +290,14 @@ HELLO_PERIOD_S    = 1.0   # Nano keepalive — Nano requires 3 frames within 5 s
 TELEM_PERIOD_S    = 0.2   # 5 Hz telemetry to Nano and remote
 
 # ---------------------------------------------------------------------------
+# Rudder-stall detection
+# ---------------------------------------------------------------------------
+# Minimum rdr_pct change per 200 ms telemetry cycle to count as "moving".
+# Set conservatively for slow hydraulic rams (< 5%/s rated speed).
+STALL_MOVEMENT_PCT       = 0.5   # pct per cycle (≈ 2.5%/s minimum detectable movement)
+STALL_CONSECUTIVE_CYCLES = 5     # consecutive no-movement commanded cycles → fault
+
+# ---------------------------------------------------------------------------
 # Remote TCP server
 # ---------------------------------------------------------------------------
 REMOTE_TCP_PORT        = 8555
@@ -363,6 +371,10 @@ class BridgeState:
     # Fix #5c two-way sync: tracks the last pypilot rudder.range value mirrored into
     # _pilot_settings, to avoid re-persisting and re-pushing on every loop iteration.
     last_synced_rudder_range: float = -1.0
+    # Rudder-stall detection: motor commanded but position not changing
+    rudder_stall:       bool           = False  # True when stall confirmed
+    stall_cmd_count:    int            = 0      # consecutive commanded-but-no-movement cycles
+    stall_prev_rdr_pct: Optional[float] = None  # rdr_pct at previous 5 Hz tick
 
 
 # ===========================================================================
@@ -1487,11 +1499,57 @@ def main() -> None:
                     # Pass through unchanged: pypilot's positive=port matches the canonical
                     # convention (conv. 2) and the new RUD/RDR_PCT scale (port=high).
                     failed.update(remote_send_many(remote_clients, f"RDR {rudder_angle:.1f}"))
+                rudder_pct: Optional[float] = None
                 if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
                     # 100% = full port, 0% = full stbd (consistent with RUD command input).
                     rudder_pct = (rudder_range + rudder_angle) / (2.0 * rudder_range) * 100.0
                     rudder_pct = max(0.0, min(100.0, rudder_pct))
                     failed.update(remote_send_many(remote_clients, f"RDR_PCT {rudder_pct:.1f}"))
+
+                # ---- Rudder-stall detection ----
+                # "Commanded" means the motor should be actively driving the rudder.
+                deadband_pct = float(
+                    _pilot_settings.get("autopilot", {}).get("deadband_pct", 3.0)
+                )
+                is_commanded = (
+                    (bstate.mode == MODE_AP and bstate.servo_cmd_dir != 0)
+                    or (bstate.nudge_until > 0.0)
+                    or (
+                        bstate.mode == MODE_MANUAL
+                        and rudder_pct is not None
+                        and abs(bstate.manual_rud_target / 10.0 - rudder_pct) > deadband_pct
+                    )
+                    or bstate.ram_test_running
+                )
+                if rudder_pct is not None:
+                    if is_commanded and bstate.stall_prev_rdr_pct is not None:
+                        if abs(rudder_pct - bstate.stall_prev_rdr_pct) < STALL_MOVEMENT_PCT:
+                            bstate.stall_cmd_count += 1
+                        else:
+                            # Rudder moved — reset counter and clear any existing fault
+                            bstate.stall_cmd_count = 0
+                            bstate.rudder_stall    = False
+                    else:
+                        # Not commanded, or no previous reference yet — reset
+                        bstate.stall_cmd_count = 0
+                        bstate.rudder_stall    = False
+                    if bstate.stall_cmd_count >= STALL_CONSECUTIVE_CYCLES:
+                        if not bstate.rudder_stall:
+                            log.warning(
+                                "RUDDER STALL: commanded but no movement for %d cycles "
+                                "(prev=%.1f%% cur=%.1f%%)",
+                                bstate.stall_cmd_count,
+                                bstate.stall_prev_rdr_pct or 0.0,
+                                rudder_pct,
+                            )
+                        bstate.rudder_stall = True
+                    bstate.stall_prev_rdr_pct = rudder_pct
+                else:
+                    # No position reading — cannot detect stall
+                    bstate.stall_cmd_count    = 0
+                    bstate.rudder_stall       = False
+                    bstate.stall_prev_rdr_pct = None
+
                 # Servo command direction: only meaningful in AP mode; force 0 otherwise.
                 rdr_cmd_dir = bstate.servo_cmd_dir if bstate.mode == MODE_AP else 0
                 failed.update(remote_send_many(remote_clients, f"RDR_CMD {rdr_cmd_dir}"))
@@ -1501,6 +1559,16 @@ def main() -> None:
                     failed.update(remote_send_many(remote_clients, f"COMMS WARN {bstate.nano_err_window}"))
                 else:
                     failed.update(remote_send_many(remote_clients, "COMMS OK"))
+                failed.update(remote_send_many(
+                    remote_clients,
+                    f"RUDDER_STALL {1 if bstate.rudder_stall else 0}",
+                ))
+                with plock:
+                    pp_ok = pstate.connected
+                failed.update(remote_send_many(
+                    remote_clients,
+                    f"PYPILOT {'OK' if pp_ok else 'DEAD'}",
+                ))
 
                 for sock in failed:
                     meta = remote_clients.pop(sock, {})

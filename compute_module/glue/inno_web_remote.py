@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B61"
+INNOPILOT_VERSION = "v1.2.0_B62"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -143,11 +143,13 @@ _state: dict = {
     "rdr_pct":    None,     # float 0–100  (actual rudder position %)
     "rdr_cmd":    0,        # int: pypilot servo command direction +1=port, 0=neutral, -1=stbd (conv 2)
     "db":         3.0,
-    "comms":      "OK",     # OK | WARN | CRIT
-    "warn":       None,
-    "bridge_ver": None,
-    "version":    INNOPILOT_VERSION,
-    "ui_mode":    "on",     # web remote selector state: auto | remote | on | off
+    "comms":        "OK",     # OK | WARN | CRIT
+    "warn":         None,
+    "bridge_ver":   None,
+    "version":      INNOPILOT_VERSION,
+    "ui_mode":      "on",     # web remote selector state: auto | remote | on | off
+    "rudder_stall": False,    # True when motor commanded but rudder not moving
+    "pypilot_ok":   True,     # False when pypilot process has lost its connection
 }
 _state_lock = threading.Lock()
 
@@ -277,6 +279,18 @@ def _parse_bridge_line(line: str) -> None:
             except (json.JSONDecodeError, queue.Full) as exc:
                 log.warning("SETTINGS response parse error: %s", exc)
 
+    elif c == "RUDDER_STALL":
+        # Bridge sends RUDDER_STALL 0|1 every telemetry cycle.
+        try:
+            _update(rudder_stall=bool(int(parts[1])))
+        except (IndexError, ValueError):
+            pass
+
+    elif c == "PYPILOT":
+        # Bridge sends PYPILOT OK|DEAD every telemetry cycle.
+        if len(parts) > 1:
+            _update(pypilot_ok=(parts[1].upper() == "OK"))
+
     elif c == "TEST_LINE":
         # Bridge relays a plain-text result line from the Nano test firmware.
         # Broadcast transiently — does NOT persist in _state (avoids replay on reconnect).
@@ -376,6 +390,7 @@ def bridge_client() -> None:
                     connected=False, hdg=None, cmd=None,
                     rdr=None, rdr_pct=None, ap=0,
                     mode="IDLE", comms="OK", warn=None,
+                    rudder_stall=False, pypilot_ok=True,
                 )
                 log.info("Reconnecting in %ds...", RECONNECT_DELAY_S)
                 time.sleep(RECONNECT_DELAY_S)
@@ -1442,6 +1457,7 @@ var MAX_DEG = 150;       // ±150° maps 0..100% rudder
 var gManualRudPct = 50.0;  // commanded rudder % in MANUAL mode (0–100%)
 var gRdrPct       = null;  // latest rdr_pct from bridge telemetry
 var gJogTimer     = null;  // setInterval handle for hold-jog repeat
+var gHdgLastSeen  = Date.now();  // timestamp of last non-null HDG from bridge (grace period on load)
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
 var gSettingsOpen = false; // true while settings panel is visible
@@ -1696,7 +1712,7 @@ function updateUI(d) {
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
   gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
-  if (d.hdg != null) gHdg = d.hdg;
+  if (d.hdg != null) { gHdg = d.hdg; gHdgLastSeen = Date.now(); }
   if (d.cmd != null) gCmd = d.cmd;
   if (d.ui_mode) gTogglePos = d.ui_mode;
 
@@ -1746,27 +1762,34 @@ function updateUI(d) {
   arrowPort.style.display = (d.rdr_cmd ===  1) ? 'block' : 'none';
   arrowStbd.style.display = (d.rdr_cmd === -1) ? 'block' : 'none';
 
-  // Version + comms status
+  // Version + status line (priority order: stall > no-bridge > motor-fault > no-heading > comms-warn > ok)
   document.getElementById('o-ver').textContent = d.bridge_ver || d.version || '---';
   var connEl = document.getElementById('o-conn');
-  if (d.connected) {
-    var comms = (d.comms || 'OK').toUpperCase();
-    if (comms === 'CRIT') {
-      connEl.textContent = 'COMMS CRIT';
-      connEl.className = 'crit';
-    } else if (comms === 'WARN') {
-      connEl.textContent = 'COMMS WARN';
-      connEl.className = 'warn';
-    } else {
-      connEl.textContent = 'CONNECTED';
-      connEl.className = 'ok';
-    }
-  } else if (gMode === 'OFF') {
-    connEl.textContent = 'OFFLINE';
-    connEl.className = 'warn';   // amber — intentional, not a fault
-  } else {
+  var comms  = (d.comms || 'OK').toUpperCase();
+  if (d.connected && d.rudder_stall) {
+    // Highest priority: motor commanded but rudder position not changing
+    connEl.textContent = 'RUDDER NOT RESPONDING';
+    connEl.className   = 'crit';
+  } else if (!d.connected && gTogglePos !== 'off') {
     connEl.textContent = 'NO BRIDGE';
-    connEl.className = 'crit';
+    connEl.className   = 'crit';
+  } else if (d.connected && comms === 'CRIT') {
+    // Motor driver CRC error rate at critical level
+    connEl.textContent = 'MOTOR FAULT';
+    connEl.className   = 'crit';
+  } else if (d.connected && d.pypilot_ok === false) {
+    // pypilot process has lost its internal connection
+    connEl.textContent = 'NO HEADING';
+    connEl.className   = 'warn';
+  } else if (d.connected && comms === 'WARN') {
+    connEl.textContent = 'COMMS WARN';
+    connEl.className   = 'warn';
+  } else if (d.connected) {
+    connEl.textContent = 'CONNECTED';
+    connEl.className   = 'ok';
+  } else {
+    connEl.textContent = 'OFFLINE';
+    connEl.className   = 'warn';   // amber — intentional disconnect (OFF mode)
   }
 
   // Mode radio selector — driven by physical position, not bridge mode
