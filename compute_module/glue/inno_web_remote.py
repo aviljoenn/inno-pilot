@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B58"
+INNOPILOT_VERSION = "v1.2.0_B59"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1118,13 +1118,12 @@ body{
       </div>
     </div>
 
-    <div class="oled-mode" id="oled-mode-row">MODE: <b id="o-mode">IDLE</b></div>
-
     <div class="oled-data">
       <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
-      <span>RDR:&nbsp;<span id="o-rdr">---</span>&#176;</span>
-      <span>Head:&nbsp;<span id="o-hdg">---</span></span>
+      <span>Head:&nbsp;<span id="o-hdg">---</span>&deg;</span>
     </div>
+
+    <div class="oled-mode" id="oled-mode-row">MODE: <b id="o-mode">IDLE</b></div>
 
     <div class="oled-status">
       <span id="o-ver">---</span>
@@ -1723,13 +1722,11 @@ function updateUI(d) {
     if (b3btn) b3btn.textContent = gTogglePos === 'auto' ? 'On' : 'Go';  // AUTO: engage; other modes: generic
   }
 
-  // Heading / RDR / CMD — always displayed
+  // Heading / CMD — always displayed; integer degrees, right-aligned in 3-char field
   document.getElementById('o-hdg').textContent =
-    d.hdg != null ? d.hdg.toFixed(1) : '---';
-  document.getElementById('o-rdr').textContent =
-    d.rdr != null ? Math.round(d.rdr) : '---';
+    d.hdg != null ? String(Math.round(d.hdg)).padStart(3) : '---';
   document.getElementById('o-cmd').textContent =
-    d.cmd != null ? d.cmd.toFixed(1) : '---';
+    d.cmd != null ? String(Math.round(d.cmd)).padStart(3) : '---';
 
   // Rudder position bar (uses rdr_pct; falls back to 50% centre)
   // Convention: rdr_pct=100=port (left of bar), rdr_pct=0=stbd (right of bar)
