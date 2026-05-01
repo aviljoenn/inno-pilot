@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B57"
+INNOPILOT_VERSION = "v1.2.0_B58"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -558,6 +558,7 @@ body{
   flex-direction:column;
   gap:0;
   justify-content:space-between;
+  height:138px; /* content-box height; rendered total ≈ 146px (est. base +50px) */
 }
 .oled-title{
   color:#00d4ff;
