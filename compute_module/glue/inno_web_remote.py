@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B55"
+INNOPILOT_VERSION = "v1.2.0_B56"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -799,12 +799,6 @@ body{
 }
 .wheel-wrap.active:active{cursor:grabbing}
 #wheel-svg{width:100%;height:100%;display:block}
-.wheel-lbl{
-  font-size:.76em;
-  color:#888;
-  text-align:center;
-}
-.wheel-lbl b{color:#444}
 
 /* ── Nudge buttons (port/stbd, flank the helm wheel) ── */
 .wheel-nudge-row{
@@ -1182,7 +1176,6 @@ body{
       </div>
       <button class="nudge-btn" id="nudge-stbd" title="Stbd nudge 500 ms" disabled>&#9654;</button>
     </div>
-    <div class="wheel-lbl">Rudder: <b id="wheel-pct">--</b>% &mdash; drag wheel in REMOTE mode</div>
   </div>
 
   <!-- Settings gear button — only active while toggle is in OFF position -->
@@ -1798,10 +1791,6 @@ function updateUI(d) {
       document.getElementById('wheel-svg').style.transform =
         'rotate(' + wheelAngle + 'deg)';
     }
-    // Show rudder position as percentage (0=stbd, 100=port) — matches the
-    // wheel-lbl '%' suffix and the MANUAL/REMOTE wheel-pct values below.
-    document.getElementById('wheel-pct').textContent =
-      d.rdr_pct != null ? Math.round(d.rdr_pct) : '--';
   }
 
   // Test result streaming — bridge relays TEST_LINE / TEST_DONE from Nano
@@ -1856,7 +1845,6 @@ function jogRudder(deltaPct) {
   gManualRudPct = Math.max(0, Math.min(100, gManualRudPct + deltaPct));
   wheelAngle = -((gManualRudPct - 50) / 50 * MAX_DEG);
   wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
-  document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
   sendCmd('RUD ' + gManualRudPct.toFixed(1));
 }
 
@@ -1906,7 +1894,6 @@ function stopJog() {
           gManualRudPct = 50.0;
           wheelAngle    = 0;
           wheelSvg.style.transform = 'rotate(0deg)';
-          document.getElementById('wheel-pct').textContent = '50';
           sendCmd('RUD 50.0');
         } else {
           startJog(cfg.delta, cfg.interval);
@@ -2008,7 +1995,6 @@ function handleToggleAction(action) {
       // Same sign as telemetry sync: gManualRudPct=100 (port) → CCW.
       wheelAngle = -(gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
-      document.getElementById('wheel-pct').textContent = Math.round(gManualRudPct);
     });
   }
 }
@@ -2046,7 +2032,6 @@ function wheelMove(cx, cy) {
 
   var pct = (-wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;
   gManualRudPct = pct;  // keep button jog state in sync with wheel drag
-  document.getElementById('wheel-pct').textContent = Math.round(pct);
 
   // Send RUD at max 5 Hz
   var now = Date.now();
