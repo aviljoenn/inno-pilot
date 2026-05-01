@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B62"
-INNOPILOT_BUILD_NUM = 62  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B63"
+INNOPILOT_BUILD_NUM = 63  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -292,10 +292,14 @@ TELEM_PERIOD_S    = 0.2   # 5 Hz telemetry to Nano and remote
 # ---------------------------------------------------------------------------
 # Rudder-stall detection
 # ---------------------------------------------------------------------------
-# Minimum rdr_pct change per 200 ms telemetry cycle to count as "moving".
-# Set conservatively for slow hydraulic rams (< 5%/s rated speed).
-STALL_MOVEMENT_PCT       = 0.5   # pct per cycle (≈ 2.5%/s minimum detectable movement)
-STALL_CONSECUTIVE_CYCLES = 5     # consecutive no-movement commanded cycles → fault
+# A "fail" is one 200 ms commanded cycle where the rudder did not move ≥ 2°
+# from the current reference angle in the commanded direction.  The fail count
+# is direction-agnostic (SB fail + PORT fail + … all accumulate together).
+# A "success" is a commanded cycle where ≥ 2° of movement WAS achieved; two
+# consecutive successes clear the fault and reset all counters.
+STALL_FAIL_THRESHOLD = 5    # direction-agnostic fails to trip fault
+STALL_SUCC_THRESHOLD = 2    # successes (any direction) to clear fault
+STALL_MOVE_DEG       = 2.0  # minimum rudder travel (degrees) per cycle to count as a success
 
 # ---------------------------------------------------------------------------
 # Remote TCP server
@@ -371,10 +375,12 @@ class BridgeState:
     # Fix #5c two-way sync: tracks the last pypilot rudder.range value mirrored into
     # _pilot_settings, to avoid re-persisting and re-pushing on every loop iteration.
     last_synced_rudder_range: float = -1.0
-    # Rudder-stall detection: motor commanded but position not changing
-    rudder_stall:       bool           = False  # True when stall confirmed
-    stall_cmd_count:    int            = 0      # consecutive commanded-but-no-movement cycles
-    stall_prev_rdr_pct: Optional[float] = None  # rdr_pct at previous 5 Hz tick
+    # Rudder-stall detection
+    rudder_stall:     bool           = False  # True when stall fault is active
+    stall_fail_count: int            = 0      # direction-agnostic fail count (trips at STALL_FAIL_THRESHOLD)
+    stall_succ_count: int            = 0      # success count (direction-agnostic; clears fault at STALL_SUCC_THRESHOLD)
+    stall_ref_angle:  Optional[float] = None  # rudder_angle snapshot; reset on direction change or idle
+    stall_prev_dir:   int            = 0      # commanded direction at previous cycle (+1/0/-1)
 
 
 # ===========================================================================
@@ -1507,48 +1513,79 @@ def main() -> None:
                     failed.update(remote_send_many(remote_clients, f"RDR_PCT {rudder_pct:.1f}"))
 
                 # ---- Rudder-stall detection ----
-                # "Commanded" means the motor should be actively driving the rudder.
+                # Determine the commanded direction this cycle: +1=port, -1=stbd, 0=idle.
+                # Uses rudder_angle (degrees, pypilot convention: positive=port) for the
+                # 2° comparison so the threshold is independent of rudder_range calibration.
                 deadband_pct = float(
                     _pilot_settings.get("autopilot", {}).get("deadband_pct", 3.0)
                 )
-                is_commanded = (
-                    (bstate.mode == MODE_AP and bstate.servo_cmd_dir != 0)
-                    or (bstate.nudge_until > 0.0)
-                    or (
-                        bstate.mode == MODE_MANUAL
-                        and rudder_pct is not None
-                        and abs(bstate.manual_rud_target / 10.0 - rudder_pct) > deadband_pct
-                    )
-                    or bstate.ram_test_running
-                )
-                if rudder_pct is not None:
-                    if is_commanded and bstate.stall_prev_rdr_pct is not None:
-                        if abs(rudder_pct - bstate.stall_prev_rdr_pct) < STALL_MOVEMENT_PCT:
-                            bstate.stall_cmd_count += 1
-                        else:
-                            # Rudder moved — reset counter and clear any existing fault
-                            bstate.stall_cmd_count = 0
-                            bstate.rudder_stall    = False
-                    else:
-                        # Not commanded, or no previous reference yet — reset
-                        bstate.stall_cmd_count = 0
-                        bstate.rudder_stall    = False
-                    if bstate.stall_cmd_count >= STALL_CONSECUTIVE_CYCLES:
-                        if not bstate.rudder_stall:
-                            log.warning(
-                                "RUDDER STALL: commanded but no movement for %d cycles "
-                                "(prev=%.1f%% cur=%.1f%%)",
-                                bstate.stall_cmd_count,
-                                bstate.stall_prev_rdr_pct or 0.0,
-                                rudder_pct,
-                            )
-                        bstate.rudder_stall = True
-                    bstate.stall_prev_rdr_pct = rudder_pct
+                if bstate.mode == MODE_AP and bstate.servo_cmd_dir != 0:
+                    # servo_cmd_dir: +1=port (increasing angle), -1=stbd (decreasing angle)
+                    commanded_dir = bstate.servo_cmd_dir
+                elif bstate.nudge_until > 0.0:
+                    # nudge_cmd_val: 2000=full port, 0=full stbd (conv 1: larger=port)
+                    commanded_dir = 1 if bstate.nudge_cmd_val > 1000 else -1
+                elif (
+                    bstate.mode == MODE_MANUAL
+                    and rudder_pct is not None
+                    and abs(bstate.manual_rud_target / 10.0 - rudder_pct) > deadband_pct
+                ):
+                    # Higher pct = port = increasing rudder_angle
+                    commanded_dir = 1 if bstate.manual_rud_target / 10.0 > rudder_pct else -1
+                elif bstate.ram_test_running:
+                    # ram_test_direction: +1=driving toward stbd, -1=driving toward port.
+                    # Negate to get pypilot-convention direction (positive=port).
+                    commanded_dir = -bstate.ram_test_direction
                 else:
-                    # No position reading — cannot detect stall
-                    bstate.stall_cmd_count    = 0
-                    bstate.rudder_stall       = False
-                    bstate.stall_prev_rdr_pct = None
+                    commanded_dir = 0
+
+                if commanded_dir != 0 and rudder_angle is not None:
+                    # Direction changed → reset reference angle; counters carry over (direction-agnostic).
+                    if commanded_dir != bstate.stall_prev_dir and bstate.stall_prev_dir != 0:
+                        bstate.stall_ref_angle = rudder_angle
+
+                    # Capture reference at the start of a new commanded bout
+                    if bstate.stall_ref_angle is None:
+                        bstate.stall_ref_angle = rudder_angle
+
+                    # Signed delta: positive = moved in commanded direction
+                    delta = (rudder_angle - bstate.stall_ref_angle) * commanded_dir
+
+                    if delta >= STALL_MOVE_DEG:
+                        # Success: ≥ 2° movement achieved in commanded direction
+                        bstate.stall_succ_count += 1
+                        bstate.stall_fail_count  = 0
+                        bstate.stall_ref_angle   = rudder_angle  # slide window for next 2°
+                        if bstate.stall_succ_count >= STALL_SUCC_THRESHOLD:
+                            if bstate.rudder_stall:
+                                log.info("RUDDER STALL cleared after %d successful moves",
+                                         bstate.stall_succ_count)
+                            bstate.rudder_stall     = False
+                            bstate.stall_succ_count = 0
+                            bstate.stall_fail_count = 0
+                            bstate.stall_ref_angle  = None
+                    else:
+                        # Fail: rudder did not move ≥ 2° from reference in commanded direction
+                        bstate.stall_fail_count += 1
+                        if bstate.stall_fail_count >= STALL_FAIL_THRESHOLD and not bstate.rudder_stall:
+                            log.warning(
+                                "RUDDER STALL: %d direction-agnostic fails "
+                                "(ref=%.1f° cur=%.1f° dir=%+d)",
+                                bstate.stall_fail_count,
+                                bstate.stall_ref_angle,
+                                rudder_angle,
+                                commanded_dir,
+                            )
+                            bstate.rudder_stall = True
+
+                    bstate.stall_prev_dir = commanded_dir
+                else:
+                    # Not commanded or no position reading — reset all stall state
+                    bstate.stall_fail_count = 0
+                    bstate.stall_succ_count = 0
+                    bstate.stall_ref_angle  = None
+                    bstate.stall_prev_dir   = 0
+                    bstate.rudder_stall     = False
 
                 # Servo command direction: only meaningful in AP mode; force 0 otherwise.
                 rdr_cmd_dir = bstate.servo_cmd_dir if bstate.mode == MODE_AP else 0
