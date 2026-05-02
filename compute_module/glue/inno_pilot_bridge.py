@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B63"
-INNOPILOT_BUILD_NUM = 63  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B64"
+INNOPILOT_BUILD_NUM = 64  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -1219,7 +1219,9 @@ def process_remote_line(
 
     elif cmd == "NUDGE":
         # NUDGE PORT | NUDGE STBD
-        # Drives the motor at full power for 500 ms without disengaging pypilot.
+        # Drives the motor at full power for a minimum of 500 ms without disengaging pypilot.
+        # The web UI sends heartbeats every 200 ms while the button is held; each heartbeat
+        # resets nudge_until to now+500ms, extending the jog for as long as the button is held.
         # In IDLE: engages the clutch for the nudge, then disengages it again.
         # In AP:   suppresses pypilot relay for the nudge window; AP resumes after.
         if len(parts) < 2:
@@ -1239,7 +1241,7 @@ def process_remote_line(
         bstate.nudge_cmd_val   = cmd_val
         bstate.nudge_last_sent = 0.0  # force immediate first frame
         bstate.nudge_until     = time.monotonic() + 0.500
-        log.info("Remote NUDGE %s: cmd_val=%d, was_idle=%s, expires in 500 ms",
+        log.info("Remote NUDGE %s: cmd_val=%d, was_idle=%s, expiry extended to now+500ms",
                  direction, cmd_val, bstate.nudge_was_idle)
 
     elif cmd == "SETTINGS":

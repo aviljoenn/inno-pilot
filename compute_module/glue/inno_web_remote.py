@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 inno_web_remote.py — Browser-based Inno-Remote UI (port 8888).
 
@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B63"
+INNOPILOT_VERSION = "v1.2.0_B64"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1183,13 +1183,13 @@ body{
   <!-- Nudge buttons (port/stbd) flank the wheel; active in AUTO mode only -->
   <div class="wheel-section">
     <div class="wheel-nudge-row">
-      <button class="nudge-btn" id="nudge-port" title="Port nudge 500 ms" disabled>&#9664;</button>
+      <button class="nudge-btn" id="nudge-port" title="Port nudge — hold to extend (min 500 ms)" disabled>&#9664;</button>
       <div class="wheel-wrap" id="wheel-wrap">
         <svg id="wheel-svg" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
           $$WHEEL_SVG$$
         </svg>
       </div>
-      <button class="nudge-btn" id="nudge-stbd" title="Stbd nudge 500 ms" disabled>&#9654;</button>
+      <button class="nudge-btn" id="nudge-stbd" title="Stbd nudge — hold to extend (min 500 ms)" disabled>&#9654;</button>
     </div>
   </div>
 
@@ -1953,19 +1953,42 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
   e.preventDefault(); sendCmd('ESTOP');
 }, {passive: false});
 
-// ── Nudge buttons — one-shot 500 ms motor jog, active in AUTO mode only ──
+// ── Nudge buttons — hold-to-extend jog (min 500 ms), active in AUTO mode only ──
+// TEST: hold-to-extend behaviour. Revert with: git revert <this commit sha>
 (function() {
-  function sendNudge(dir) {
+  var gNudgeTimer = null;  // heartbeat interval while button is held
+
+  function startNudge(dir) {
     // Guard: reject if not in AUTO mode (belt-and-suspenders alongside disabled attr)
     if (gTogglePos !== 'auto') return;
-    sendCmd('NUDGE ' + dir);
+    if (gNudgeTimer !== null) return;  // already running
+    sendCmd('NUDGE ' + dir);  // immediate first send
+    gNudgeTimer = setInterval(function() {
+      if (gTogglePos !== 'auto') { stopNudgeHold(); return; }
+      sendCmd('NUDGE ' + dir);
+    }, 200);
   }
+
+  function stopNudgeHold() {
+    if (gNudgeTimer !== null) { clearInterval(gNudgeTimer); gNudgeTimer = null; }
+  }
+
   var portBtn = document.getElementById('nudge-port');
   var stbdBtn = document.getElementById('nudge-stbd');
-  portBtn.addEventListener('click',      function()  { sendNudge('PORT'); });
-  portBtn.addEventListener('touchstart', function(e) { e.preventDefault(); sendNudge('PORT'); }, {passive: false});
-  stbdBtn.addEventListener('click',      function()  { sendNudge('STBD'); });
-  stbdBtn.addEventListener('touchstart', function(e) { e.preventDefault(); sendNudge('STBD'); }, {passive: false});
+
+  portBtn.addEventListener('mousedown',   function()  { startNudge('PORT'); });
+  portBtn.addEventListener('mouseup',     stopNudgeHold);
+  portBtn.addEventListener('mouseleave',  stopNudgeHold);
+  portBtn.addEventListener('touchstart',  function(e) { e.preventDefault(); startNudge('PORT'); }, {passive: false});
+  portBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudgeHold(); }, {passive: false});
+  portBtn.addEventListener('touchcancel', stopNudgeHold);
+
+  stbdBtn.addEventListener('mousedown',   function()  { startNudge('STBD'); });
+  stbdBtn.addEventListener('mouseup',     stopNudgeHold);
+  stbdBtn.addEventListener('mouseleave',  stopNudgeHold);
+  stbdBtn.addEventListener('touchstart',  function(e) { e.preventDefault(); startNudge('STBD'); }, {passive: false});
+  stbdBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudgeHold(); }, {passive: false});
+  stbdBtn.addEventListener('touchcancel', stopNudgeHold);
 }());
 
 // Mode radio button clicks
