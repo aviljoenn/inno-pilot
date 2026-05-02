@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B67";
-const uint16_t INNOPILOT_BUILD_NUM = 67;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B68";
+const uint16_t INNOPILOT_BUILD_NUM = 68;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -241,6 +241,7 @@ const int16_t BRAKE_MIN_SPEED_CPS = 30000;  // braking disabled: threshold unrea
 bool          ap_pressed_warn_active = false;
 unsigned long ap_pressed_warn_ms     = 0;
 const unsigned long AP_PRESSED_WARN_MS = 5000UL; // 5s OLED flash duration
+const unsigned long CLUTCH_SETTLE_MS   = 50UL;   // ms to wait after clutch engages before allowing motor EN
 unsigned long ap_warn_beep_end_ms    = 0;         // when single beep ends
 // Steer-loss warning (remote TCP dropped while in MANUAL mode)
 bool steer_loss_active   = false;
@@ -1281,9 +1282,28 @@ void update_motor_from_command() {
   bool clutch_pin_high = clutch_should ^ (bool)(feature_flags & FEATURE_INVERT_CLUTCH);
   digitalWrite(CLUTCH_PIN, clutch_pin_high ? HIGH : LOW);
 
+  // Clutch settling: hold EN=0 for CLUTCH_SETTLE_MS after clutch engages.
+  // Prevents motor current from flowing before the relay/solenoid is fully closed,
+  // which causes the initial vibration pulse observed on first AP engagement.
+  static bool          s_clutch_was_on    = false;
+  static unsigned long s_clutch_engage_ms = 0;
+  if (clutch_pin_high && !s_clutch_was_on) {
+    s_clutch_engage_ms = now;
+  }
+  s_clutch_was_on = clutch_pin_high;
+  bool clutch_settled = !clutch_pin_high ||
+                        (now - s_clutch_engage_ms >= CLUTCH_SETTLE_MS);
+
+  // Direction-change guard: zero EN before switching H-bridge direction pins.
+  // Without this, the opposite output briefly fires whenever the code transitions
+  // between directions while EN is already HIGH (e.g. manual-jog → AP drive or
+  // AP direction reversal), producing the opposite-LED flash on button release.
+  static int8_t last_drive_dir = 0;  // 0=stopped, +1=Dir-A (LPWM=HIGH), -1=Dir-B (RPWM=HIGH)
+
   // If in a fault state, don't drive the motor at all
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
+    last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
@@ -1436,6 +1456,7 @@ void update_motor_from_command() {
         if (now - rm_brake_start_ms >= rm_brake_dur_ms) {
           // Brake pulse complete — cut motor
           analogWrite(HBRIDGE_PWM_PIN, 0);
+          last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
           // Check where we ended up
@@ -1453,6 +1474,7 @@ void update_motor_from_command() {
         } else {
           // Motor off, hold position via hydraulic lock
           analogWrite(HBRIDGE_PWM_PIN, 0);
+          last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
           break;
@@ -1474,6 +1496,7 @@ void update_motor_from_command() {
         if (dir == 0) {
           // At limit or exactly on target — stop
           analogWrite(HBRIDGE_PWM_PIN, 0);
+          last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
           rm_state = RM_SETTLED;
@@ -1498,27 +1521,41 @@ void update_motor_from_command() {
 
           // Set H-bridge to brake direction at full duty
           SET_MOTOR_REASON(MRSN_RM_BRAKE);  // B26: record activation reason
-          if (rm_brake_dir > 0) {
+          {
+            int8_t brake_dir = (rm_brake_dir > 0) ? +1 : -1;
+            if (brake_dir != last_drive_dir && last_drive_dir != 0) {
+              analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+            }
+            if (rm_brake_dir > 0) {
+              digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+              digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+            } else {
+              digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+              digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+            }
+            last_drive_dir = brake_dir;
+          }
+          analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? 255 : 0);
+          break;
+        }
+
+        // Not yet at brake point — drive toward target at full duty
+        SET_MOTOR_REASON(MRSN_RM_DRIVE);  // B26: record activation reason
+        {
+          int8_t rm_new_dir = (dir > 0) ? +1 : -1;
+          if (rm_new_dir != last_drive_dir && last_drive_dir != 0) {
+            analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+          }
+          if (dir > 0) {
             digitalWrite(HBRIDGE_RPWM_PIN, LOW);
             digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
           } else {
             digitalWrite(HBRIDGE_LPWM_PIN, LOW);
             digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
           }
-          analogWrite(HBRIDGE_PWM_PIN, 255);
-          break;
+          last_drive_dir = rm_new_dir;
         }
-
-        // Not yet at brake point — drive toward target at full duty
-        SET_MOTOR_REASON(MRSN_RM_DRIVE);  // B26: record activation reason
-        if (dir > 0) {
-          digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-          digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
-        } else {
-          digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-          digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
-        }
-        analogWrite(HBRIDGE_PWM_PIN, 255);
+        analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? 255 : 0);
         break;
       }
     }
@@ -1534,6 +1571,7 @@ void update_motor_from_command() {
     if (manual_jog_dir < 0 && (at_dirb_end || at_dirb_pilot)) {
       // Trying to jog further to Dir-B, but at/near Dir-B end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
+      last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
@@ -1541,6 +1579,7 @@ void update_motor_from_command() {
     if (manual_jog_dir > 0 && (at_dira_end || at_dira_pilot)) {
       // Trying to jog further to Dir-A, but at/near Dir-A end → stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
+      last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
@@ -1552,22 +1591,27 @@ void update_motor_from_command() {
       // Dir-A: increase ADC
       // Record activation reason: distinguish physical-button from delta-jog
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
+      if (last_drive_dir == -1) analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+      last_drive_dir = +1;
     } else if (manual_jog_dir < 0) {
       // Dir-B: decrease ADC
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
+      if (last_drive_dir == +1) analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+      last_drive_dir = -1;
     } else {
       // No direction -> stop
       analogWrite(HBRIDGE_PWM_PIN, 0);
+      last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
 
-    analogWrite(HBRIDGE_PWM_PIN, duty);
+    analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? duty : 0);
     return;  // do not fall through to autopilot logic
   }
 
@@ -1576,6 +1620,7 @@ void update_motor_from_command() {
   // If AP is not active (remote ap.enabled false or Pi offline), don't drive motor
   if (!ap_active) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
+    last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
@@ -1586,6 +1631,7 @@ void update_motor_from_command() {
   // Deadband around neutral
   if (delta > -db && delta < db) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
+    last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
@@ -1595,12 +1641,14 @@ void update_motor_from_command() {
   // Conv 1: delta > 0 = port (Dir-B); delta < 0 = stbd (Dir-A).
   if (delta > 0 && (at_dirb_end || at_dirb_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
+    last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
   if (delta < 0 && (at_dira_end || at_dira_pilot)) {
     analogWrite(HBRIDGE_PWM_PIN, 0);
+    last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
@@ -1628,15 +1676,22 @@ void update_motor_from_command() {
 
   // Direction: conv 1: delta > 0 = large value = port => Dir-B (RPWM); delta < 0 = stbd => Dir-A (LPWM)
   SET_MOTOR_REASON(MRSN_AP);  // B26: record activation reason (autopilot path)
-  if (delta > 0) {
-    digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
-  } else {
-    digitalWrite(HBRIDGE_RPWM_PIN, LOW);
-    digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+  {
+    int8_t ap_new_dir = (delta > 0) ? -1 : +1;
+    if (ap_new_dir != last_drive_dir && last_drive_dir != 0) {
+      analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+    }
+    if (delta > 0) {
+      digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
+    } else {
+      digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+      digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
+    }
+    last_drive_dir = ap_new_dir;
   }
 
-  analogWrite(HBRIDGE_PWM_PIN, duty);
+  analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? duty : 0);
 }
 
 // Process one CRC-valid frame
@@ -2201,7 +2256,7 @@ if (!ap_engaged && !remote_manual_active) {
       uint8_t crc_calc = crc8(in_bytes, 3);
       if (crc_rx == crc_calc) {
         // CRC-valid frame
-        if (in_sync_count >= 2) {
+        if (in_sync_count >= 1) {
           process_packet();
           rx_good_count++;
         } else {
