@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B65"
+INNOPILOT_VERSION = "v1.2.0_B66"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1953,42 +1953,43 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
   e.preventDefault(); sendCmd('ESTOP');
 }, {passive: false});
 
-// ── Nudge buttons — hold-to-extend jog (min 500 ms), active in AUTO mode only ──
-// TEST: hold-to-extend behaviour. Revert with: git revert <this commit sha>
+// ── Nudge buttons — hold-to-run, active in AUTO mode only ──
+// TEST: hold-to-run behaviour. Revert with: git revert <nudge test commit>
+// Press sends NUDGE PORT/STBD once; release sends NUDGE STOP once.
+// Bridge runs motor until STOP arrives or 10 s safety timeout expires.
 (function() {
-  var gNudgeTimer = null;  // heartbeat interval while button is held
+  var gNudgeActive = false;  // true while a nudge is in progress
 
   function startNudge(dir) {
     // Guard: reject if not in AUTO mode (belt-and-suspenders alongside disabled attr)
     if (gTogglePos !== 'auto') return;
-    if (gNudgeTimer !== null) return;  // already running
-    sendCmd('NUDGE ' + dir);  // immediate first send
-    gNudgeTimer = setInterval(function() {
-      if (gTogglePos !== 'auto') { stopNudgeHold(); return; }
-      sendCmd('NUDGE ' + dir);
-    }, 200);
+    if (gNudgeActive) return;
+    gNudgeActive = true;
+    sendCmd('NUDGE ' + dir);
   }
 
-  function stopNudgeHold() {
-    if (gNudgeTimer !== null) { clearInterval(gNudgeTimer); gNudgeTimer = null; }
+  function stopNudge() {
+    if (!gNudgeActive) return;
+    gNudgeActive = false;
+    sendCmd('NUDGE STOP');
   }
 
   var portBtn = document.getElementById('nudge-port');
   var stbdBtn = document.getElementById('nudge-stbd');
 
   portBtn.addEventListener('mousedown',   function()  { startNudge('PORT'); });
-  portBtn.addEventListener('mouseup',     stopNudgeHold);
-  portBtn.addEventListener('mouseleave',  stopNudgeHold);
+  portBtn.addEventListener('mouseup',     stopNudge);
+  portBtn.addEventListener('mouseleave',  stopNudge);
   portBtn.addEventListener('touchstart',  function(e) { e.preventDefault(); startNudge('PORT'); }, {passive: false});
-  portBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudgeHold(); }, {passive: false});
-  portBtn.addEventListener('touchcancel', stopNudgeHold);
+  portBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudge(); }, {passive: false});
+  portBtn.addEventListener('touchcancel', stopNudge);
 
   stbdBtn.addEventListener('mousedown',   function()  { startNudge('STBD'); });
-  stbdBtn.addEventListener('mouseup',     stopNudgeHold);
-  stbdBtn.addEventListener('mouseleave',  stopNudgeHold);
+  stbdBtn.addEventListener('mouseup',     stopNudge);
+  stbdBtn.addEventListener('mouseleave',  stopNudge);
   stbdBtn.addEventListener('touchstart',  function(e) { e.preventDefault(); startNudge('STBD'); }, {passive: false});
-  stbdBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudgeHold(); }, {passive: false});
-  stbdBtn.addEventListener('touchcancel', stopNudgeHold);
+  stbdBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudge(); }, {passive: false});
+  stbdBtn.addEventListener('touchcancel', stopNudge);
 }());
 
 // Mode radio button clicks

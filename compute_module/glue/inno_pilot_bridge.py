@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B65"
-INNOPILOT_BUILD_NUM = 65  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B66"
+INNOPILOT_BUILD_NUM = 66  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -1218,30 +1218,48 @@ def process_remote_line(
         log.info("RAM test armed: ±%d° (rudder_range=%d°) — press B3 to start", deg, rng)
 
     elif cmd == "NUDGE":
-        # NUDGE PORT | NUDGE STBD
-        # Drives the motor at full power for a minimum of 500 ms without disengaging pypilot.
-        # The web UI sends heartbeats every 200 ms while the button is held; each heartbeat
-        # resets nudge_until to now+500ms, extending the jog for as long as the button is held.
-        # In IDLE: engages the clutch for the nudge, then disengages it again.
-        # In AP:   suppresses pypilot relay for the nudge window; AP resumes after.
+        # NUDGE PORT | NUDGE STBD — start sustained motor jog (hold-to-run).
+        # NUDGE STOP             — stop the active jog immediately.
+        #
+        # The web UI sends NUDGE PORT/STBD once on button press and NUDGE STOP
+        # once on button release.  No heartbeats are used.  A 10 s safety timeout
+        # auto-stops the jog if NUDGE STOP is never received (e.g. browser crash).
+        #
+        # In IDLE: engages the clutch for the jog duration, then disengages on stop.
+        # In AP:   suppresses pypilot relay while jog is active; AP resumes after.
+        #
+        # Conv 1: PYPILOT_COMMAND_CODE value encodes (servo_command + 1) * 1000.
+        #   servo_command = +1 → value = 2000 (full port)
+        #   servo_command = -1 → value = 0    (full stbd)
         if len(parts) < 2:
             return
         direction = parts[1].upper()
+
+        if direction == "STOP":
+            # Explicit stop from button release — terminate nudge immediately.
+            if bstate.nudge_until > 0.0:
+                if bstate.nudge_was_idle:
+                    send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
+                    log.info("NUDGE STOP received: mode was IDLE — sent DISENGAGE to Nano")
+                else:
+                    log.info("NUDGE STOP received: mode was AP — pypilot relay resumed")
+                bstate.nudge_until = 0.0
+            else:
+                log.debug("NUDGE STOP received: no active nudge, ignored")
+            return
+
         if direction not in ("PORT", "STBD"):
             log.warning("Remote NUDGE: invalid direction '%s', ignored", parts[1])
             return
         if bstate.mode not in (MODE_IDLE, MODE_AP):
             log.warning("Remote NUDGE: ignored — mode is %s (must be IDLE or AP)", bstate.mode)
             return
-        # Conv 1: larger value = port. PYPILOT_COMMAND_CODE value encodes (servo_command + 1) * 1000.
-        #   servo_command = +1 → value = 2000 (full port)
-        #   servo_command = -1 → value = 0    (full stbd)
         cmd_val = 2000 if direction == "PORT" else 0
         bstate.nudge_was_idle  = (bstate.mode == MODE_IDLE)
         bstate.nudge_cmd_val   = cmd_val
         bstate.nudge_last_sent = 0.0  # force immediate first frame
-        bstate.nudge_until     = time.monotonic() + 0.500
-        log.info("Remote NUDGE %s: cmd_val=%d, was_idle=%s, expiry extended to now+500ms",
+        bstate.nudge_until     = time.monotonic() + 10.0  # 10 s safety timeout
+        log.info("NUDGE %s started: cmd_val=%d, was_idle=%s, safety timeout=10s",
                  direction, cmd_val, bstate.nudge_was_idle)
 
     elif cmd == "SETTINGS":
