@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B66"
-INNOPILOT_BUILD_NUM = 66  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B67"
+INNOPILOT_BUILD_NUM = 67  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -1509,6 +1509,10 @@ def main() -> None:
                 target_pct = (rng + target_angle_pypilot) / (2.0 * rng) * 100.0
                 target_pct = max(0.0, min(100.0, target_pct))
                 target_0_1000 = int(round(target_pct * 10.0))
+                # Re-assert MANUAL mode every tick before sending the target position.
+                # Any stray COMMAND_CODE that reaches the Nano (race/boot) sets
+                # ap_enabled_remote=true; this re-assertion clears it within 200 ms.
+                send_nano_frame(nano, MANUAL_MODE_CODE, 1)
                 send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
                 bstate.rct_target = target_0_1000
 
@@ -1700,6 +1704,12 @@ def main() -> None:
                         # Nudge in progress: consume frame but do not forward to Nano.
                         # pypilot's frames are silently dropped for the 500 ms window.
                         log.debug("pilot->nano NUDGE_DROP  code=0x%02X", candidate[0])
+                    elif bstate.ram_test_running and candidate[0] == PYPILOT_COMMAND_CODE:
+                        # RAM test active: each COMMAND_CODE received by the Nano sets
+                        # ap_enabled_remote=true and re-engages AP, which fights MANUAL
+                        # mode and drives the rudder to the hard limit. Drop it.
+                        log.debug("pilot->nano RAM_DROP  code=0x%02X (COMMAND suppressed during RAM test)",
+                                  candidate[0])
                     else:
                         # Normal path: wrap with magic header and forward to Nano
                         wrapped = wrap_frame(candidate)
