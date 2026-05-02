@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B68";
-const uint16_t INNOPILOT_BUILD_NUM = 68;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B69";
+const uint16_t INNOPILOT_BUILD_NUM = 69;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -461,9 +461,10 @@ bool  pi_fault_alarm_silenced = false;
 // Main supply (Vin) voltage faults
 const float VIN_LOW_FAULT_V  = 10.9f;   // below this: undercharge / brown-out
 const float VIN_HIGH_FAULT_V = 15.1f;   // above this: overcharge risk
-float vin_v = 0.0f;
-bool  vin_low_fault  = false;
-bool  vin_high_fault = false;
+float    vin_v            = 0.0f;
+bool     vin_low_fault    = false;
+bool     vin_high_fault   = false;
+uint32_t vin_low_since_ms = 0;  // millis() when Vin first dropped below threshold; 0 = not low
 
 float temp_c = NAN;
 bool temp_pending = false;
@@ -1997,12 +1998,22 @@ void loop() {
     // Main supply (Vin) voltage fault detection (feature-gated)
     if (feature_flags & FEATURE_BATTERY_VOLTAGE) {
       vin_v          = read_voltage_v();
-      vin_low_fault  = (vin_v < VIN_LOW_FAULT_V);
+      // 100 ms debounce: a single ADC sample during motor inrush must not latch the fault.
+      // The voltage must stay below VIN_LOW_FAULT_V continuously for 100 ms before the
+      // fault is declared. It clears immediately when voltage recovers.
+      if (vin_v < VIN_LOW_FAULT_V) {
+        if (vin_low_since_ms == 0) vin_low_since_ms = millis();
+        vin_low_fault = ((millis() - vin_low_since_ms) >= 100UL);
+      } else {
+        vin_low_since_ms = 0;
+        vin_low_fault    = false;
+      }
       vin_high_fault = (vin_v > VIN_HIGH_FAULT_V);
     } else {
       // Feature disabled: suppress Vin over/under-voltage faults
-      vin_low_fault  = false;
-      vin_high_fault = false;
+      vin_low_fault    = false;
+      vin_high_fault   = false;
+      vin_low_since_ms = 0;
     }
 
     // Reset fault silence latch once all active faults have cleared
