@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.2.0_B70";
-const uint16_t INNOPILOT_BUILD_NUM = 70;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.2.0_B71";
+const uint16_t INNOPILOT_BUILD_NUM = 71;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -1998,12 +1998,13 @@ void loop() {
     // Main supply (Vin) voltage fault detection (feature-gated)
     if (feature_flags & FEATURE_BATTERY_VOLTAGE) {
       vin_v          = read_voltage_v();
-      // 100 ms debounce: a single ADC sample during motor inrush must not latch the fault.
-      // The voltage must stay below VIN_LOW_FAULT_V continuously for 100 ms before the
-      // fault is declared. It clears immediately when voltage recovers.
+      // 300 ms debounce: startup inrush sags the 12V bus for ~200 ms; the fault must
+      // not latch during normal motor engagement. Only a genuinely sustained undervoltage
+      // (battery going flat) holds below VIN_LOW_FAULT_V for the full 300 ms window.
+      // It clears immediately when voltage recovers.
       if (vin_v < VIN_LOW_FAULT_V) {
         if (vin_low_since_ms == 0) vin_low_since_ms = millis();
-        vin_low_fault = ((millis() - vin_low_since_ms) >= 100UL);
+        vin_low_fault = ((millis() - vin_low_since_ms) >= 300UL);
       } else {
         vin_low_since_ms = 0;
         vin_low_fault    = false;

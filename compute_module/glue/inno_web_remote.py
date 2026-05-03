@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B70"
+INNOPILOT_VERSION = "v1.2.0_B71"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -788,6 +788,7 @@ body{
 }
 .mode-radio.active .mrd-lbl{color:#111;font-weight:800}
 .mode-radio:hover .mrd-lbl{color:#444}
+.mode-radio.disabled{pointer-events:none;cursor:default;opacity:0.28}
 /* OFF mode: blank the OLED content area */
 .oled.blank-mode .oled-title,
 .oled.blank-mode .rdr-bar,
@@ -1167,7 +1168,7 @@ body{
       <div class="mode-radio" data-action="auto">
         <span class="mrd-dot"></span><span class="mrd-lbl">AUTO</span>
       </div>
-      <div class="mode-radio" data-action="remote">
+      <div class="mode-radio disabled" data-action="remote">
         <span class="mrd-dot"></span><span class="mrd-lbl">REMOTE</span>
       </div>
       <div class="mode-radio active" data-action="on">
