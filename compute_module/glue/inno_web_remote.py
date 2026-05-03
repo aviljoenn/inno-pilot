@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B68"
+INNOPILOT_VERSION = "v1.2.0_B70"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -1954,24 +1954,37 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
 }, {passive: false});
 
 // ── Nudge buttons — hold-to-run, active in AUTO mode only ──
-// TEST: hold-to-run behaviour. Revert with: git revert <nudge test commit>
-// Press sends NUDGE PORT/STBD once; release sends NUDGE STOP once.
-// Bridge runs motor until STOP arrives or 10 s safety timeout expires.
+// Press sends NUDGE PORT/STBD once; release sends NUDGE STOP after 100 ms debounce.
+// The debounce prevents a fast tap delivering START+STOP so close together that the
+// bridge processes them before the motor has engaged (causes the "hesitation" symptom).
+// gNudgeActive stays true until the deferred STOP is actually sent, so a second press
+// within the 100 ms window is correctly rejected rather than starting a second nudge.
 (function() {
-  var gNudgeActive = false;  // true while a nudge is in progress
+  var gNudgeActive   = false;  // true while a nudge is in progress (including stop debounce)
+  var gNudgeStopTimer = null;  // setTimeout handle for the deferred NUDGE STOP
 
   function startNudge(dir) {
     // Guard: reject if not in AUTO mode (belt-and-suspenders alongside disabled attr)
     if (gTogglePos !== 'auto') return;
     if (gNudgeActive) return;
+    // Cancel any pending stop from a previous release (should not happen given the
+    // gNudgeActive guard, but be safe)
+    if (gNudgeStopTimer) { clearTimeout(gNudgeStopTimer); gNudgeStopTimer = null; }
     gNudgeActive = true;
     sendCmd('NUDGE ' + dir);
   }
 
   function stopNudge() {
     if (!gNudgeActive) return;
-    gNudgeActive = false;
-    sendCmd('NUDGE STOP');
+    // 100 ms debounce: delay STOP so the bridge has time to engage the motor before
+    // the STOP arrives.  gNudgeActive stays true until the STOP is sent, blocking a
+    // second nudge start during this window.
+    if (gNudgeStopTimer) return;  // already waiting
+    gNudgeStopTimer = setTimeout(function() {
+      gNudgeStopTimer = null;
+      gNudgeActive = false;
+      sendCmd('NUDGE STOP');
+    }, 100);
   }
 
   var portBtn = document.getElementById('nudge-port');

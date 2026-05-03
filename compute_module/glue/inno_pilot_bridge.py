@@ -47,7 +47,7 @@ from pypilot.client import pypilotClient
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-5s %(message)s",
+    format="%(asctime)s.%(msecs)03d %(levelname)-5s %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("bridge")
@@ -87,8 +87,8 @@ OTA_SERVER_HOST = _local_ip()
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.2.0_B69"
-INNOPILOT_BUILD_NUM = 69  # increment with each push during development
+INNOPILOT_VERSION   = "v1.2.0_B70"
+INNOPILOT_BUILD_NUM = 70  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
