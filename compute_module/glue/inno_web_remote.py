@@ -150,6 +150,7 @@ _state: dict = {
     "ui_mode":      "on",     # web remote selector state: auto | remote | on | off
     "rudder_stall": False,    # True when motor commanded but rudder not moving
     "pypilot_ok":   True,     # False when pypilot process has lost its connection
+    "debug":        False,    # True when bridge is in DEBUG log level
 }
 _state_lock = threading.Lock()
 
@@ -983,21 +984,23 @@ body{
 .sftr-btn.sv {background:linear-gradient(180deg,#0d4020,#061808);color:#00cc50;border:1px solid #0a4020}
 .sftr-btn.cx {background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
 
-/* ── TEST button ────────────────────────────────────────────────���────── */
-.test-btn{
-  width:38px;height:38px;border-radius:50%;
+/* ── DEBUG toggle button (oval pill, replaces old circular Test button) ── */
+.dbg-btn{
+  height:38px;padding:0 14px;border-radius:19px;
   background:#111;border:1.5px solid #333;
-  color:#e8a020;font-size:1.0em;font-weight:700;line-height:1;
+  color:#e8a020;font-size:.72em;font-weight:700;line-height:1;
   cursor:pointer;display:flex;align-items:center;justify-content:center;
   box-shadow:0 3px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.07);
   transition:transform .1s,background .15s,border-color .15s;
-  touch-action:manipulation;letter-spacing:-.5px;
+  touch-action:manipulation;letter-spacing:.5px;white-space:nowrap;
 }
-.test-btn:active{transform:scale(.88)}
-.test-btn.test-open{
-  background:#1a1200;border-color:#e8a020;color:#f0c040;
+.dbg-btn:active{transform:scale(.88)}
+.dbg-btn.dbg-active{
+  background:#1a0a00;border-color:#e8a020;color:#f0c040;
   box-shadow:0 0 8px rgba(232,160,32,.45),0 3px 8px rgba(0,0,0,.4);
+  animation:dbg-flash 1s ease-in-out infinite;
 }
+@keyframes dbg-flash{0%,100%{opacity:1}50%{opacity:.35}}
 
 /* ── TEST overlay ────────────────────────────────────────────────────── */
 .tov{
@@ -1195,10 +1198,10 @@ body{
   </div>
 
   <!-- Settings gear button — only active while toggle is in OFF position -->
-  <!-- TEST button — opens hardware test catalogue -->
+  <!-- DEBUG toggle button -->
   <div class="settings-footer">
     <button class="gear-btn" id="gear-btn" title="Settings (OFF mode only)">&#9881;</button>
-    <button class="test-btn" id="test-btn" title="Hardware tests">Test</button>
+    <button class="dbg-btn" id="dbg-btn" title="Toggle bridge debug logging">Debug</button>
   </div>
 
 </div><!-- .remote -->
@@ -1370,6 +1373,12 @@ body{
         <input class="sf-inp" type="number" id="sf-comms_crit_threshold_pct" min="5" max="90" step="1">
       </div>
 
+      <div class="ss-title">TESTS</div>
+      <div class="sf-row">
+        <span class="sf-lbl">Hardware Tests</span>
+        <button class="sf-bb" id="settings-open-tests" style="padding:3px 14px">OPEN &#8250;</button>
+      </div>
+
     </div><!-- .sbody -->
     <div class="sftr">
       <button class="sftr-btn sv"  id="sov-save">SAVE</button>
@@ -1461,6 +1470,7 @@ var gJogTimer     = null;  // setInterval handle for hold-jog repeat
 var gHdgLastSeen  = Date.now();  // timestamp of last non-null HDG from bridge (grace period on load)
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
+var gDebugActive  = false; // true when bridge is in DEBUG log level
 var gSettingsOpen = false; // true while settings panel is visible
 var gTestOpen     = false; // true while test modal is visible
 var gSelectedTest = null;  // id of test currently shown in detail/results view
@@ -1559,11 +1569,26 @@ var TESTS = [
   }
 ];
 
+// ── Debug toggle ──────────────────────────────────────────────────────────
+
+function setDebugState(active) {
+  gDebugActive = !!active;
+  var btn = document.getElementById('dbg-btn');
+  btn.textContent = gDebugActive ? 'Debugging' : 'Debug';
+  btn.classList.toggle('dbg-active', gDebugActive);
+}
+
+function toggleDebug() {
+  fetch('/debug', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { if (d.debug !== undefined) setDebugState(d.debug); })
+    .catch(function() {});  // silently ignore network errors
+}
+
 // ── Test modal functions ──────────────────────────────────────────────────
 
 function openTestMenu() {
   gTestOpen = true;
-  document.getElementById('test-btn').classList.add('test-open');
   document.getElementById('tov').classList.remove('hidden');
   showTestCatalogue();
 }
@@ -1572,7 +1597,6 @@ function closeTestMenu() {
   gTestOpen     = false;
   gTestRunning  = false;
   gSelectedTest = null;
-  document.getElementById('test-btn').classList.remove('test-open');
   document.getElementById('tov').classList.add('hidden');
   document.getElementById('tram-view').classList.remove('active');
 }
@@ -1672,9 +1696,9 @@ function testDone() {
 }
 
 // Test button and modal event wiring
-document.getElementById('test-btn').addEventListener('click', openTestMenu);
-document.getElementById('test-btn').addEventListener('touchstart', function(e) {
-  e.preventDefault(); openTestMenu();
+document.getElementById('dbg-btn').addEventListener('click', toggleDebug);
+document.getElementById('dbg-btn').addEventListener('touchstart', function(e) {
+  e.preventDefault(); toggleDebug();
 }, {passive: false});
 document.getElementById('tov-close').addEventListener('click', closeTestMenu);
 document.getElementById('tov-back').addEventListener('click', function() {
@@ -1716,6 +1740,7 @@ function updateUI(d) {
   if (d.hdg != null) { gHdg = d.hdg; gHdgLastSeen = Date.now(); }
   if (d.cmd != null) gCmd = d.cmd;
   if (d.ui_mode) gTogglePos = d.ui_mode;
+  if (d.debug !== undefined) setDebugState(d.debug);
 
   // Suppress overlay when connected, or when disconnect is intentional (OFF).
   // This also handles occasional mode/ui-mode desync by treating the selector
@@ -2329,6 +2354,10 @@ document.getElementById('gear-btn').addEventListener('touchstart', function(e) {
 }, {passive:false});
 document.getElementById('sov-save').addEventListener('click',   function() { closeSettings(true); });
 document.getElementById('sov-cancel').addEventListener('click', function() { closeSettings(false); });
+document.getElementById('settings-open-tests').addEventListener('click', function() {
+  closeSettings(false);
+  openTestMenu();
+});
 
 // Bool buttons: direct click updates gSettings immediately
 document.querySelectorAll('.sf-bb').forEach(function(b) {
@@ -2408,6 +2437,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_command()
         elif self.path == "/settings":
             self._handle_settings_post()
+        elif self.path == "/debug":
+            self._handle_debug_toggle()
         else:
             self.send_error(404)
 
@@ -2677,6 +2708,36 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control",  "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    # ---- POST /debug ----
+
+    def _handle_debug_toggle(self) -> None:
+        """Send SIGUSR1 to the bridge process to toggle DEBUG/INFO log level.
+
+        Reads the bridge MainPID from systemd so we never have to hard-code it.
+        Updates _state["debug"] and logs a timestamped marker to the bridge
+        journal so the toggle is visible in the log stream.
+        """
+        import subprocess
+        import os
+        import signal as _signal
+        try:
+            pid_str = subprocess.check_output(
+                ["systemctl", "show", "inno-pilot-bridge",
+                 "--property=MainPID", "--value"],
+                text=True, timeout=3
+            ).strip()
+            pid = int(pid_str)
+            if pid <= 0:
+                self._send_json(500, {"ok": False, "error": "Bridge not running"})
+                return
+            os.kill(pid, _signal.SIGUSR1)
+            new_state = not _snap()["debug"]
+            _update(debug=new_state)
+            log.info("=== Debug mode %s via web remote ===", "ON" if new_state else "OFF")
+            self._send_json(200, {"ok": True, "debug": new_state})
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "error": str(exc)})
 
     # ---- POST /settings ----
 
