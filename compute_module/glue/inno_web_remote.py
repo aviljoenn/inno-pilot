@@ -47,7 +47,11 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B71"
+INNOPILOT_VERSION = "v1.2.0_B72"
+
+# Telegram notification config — JSON file with "token" and "chat_id" keys.
+# If the file does not exist or is invalid, notifications are silently skipped.
+TELEGRAM_CONF = "/home/innopilot/.pypilot/telegram.conf"
 
 # ---------------------------------------------------------------------------
 # Settings persistence — /var/lib/inno-pilot/settings.json
@@ -172,6 +176,38 @@ SETTINGS_TIMEOUT_S = 4.0
 # Set by default (ON is the startup mode); cleared only when the user selects OFF.
 _bridge_active = threading.Event()
 _bridge_active.set()
+
+
+def _send_telegram(text: str) -> None:
+    """Fire-and-forget Telegram message.  Reads token/chat_id from TELEGRAM_CONF.
+    Runs in a daemon thread so it never blocks the HTTP response path.
+    Silently does nothing if the config file is absent or malformed.
+    """
+    import urllib.request
+    import urllib.error
+
+    def _worker() -> None:
+        try:
+            with open(TELEGRAM_CONF, "r") as fh:
+                cfg = json.loads(fh.read())
+            token   = cfg["token"]
+            chat_id = str(cfg["chat_id"])
+        except Exception:
+            return  # config missing or invalid — skip silently
+        try:
+            payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=8)
+        except Exception as exc:
+            log.warning("Telegram notify failed: %s", exc)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
 
 
 def _snap() -> dict:
@@ -2735,6 +2771,7 @@ class _Handler(BaseHTTPRequestHandler):
             new_state = not _snap()["debug"]
             _update(debug=new_state)
             log.info("=== Debug mode %s via web remote ===", "ON" if new_state else "OFF")
+            _send_telegram(f"Inno-Pilot: Debug mode {'ON' if new_state else 'OFF'}")
             self._send_json(200, {"ok": True, "debug": new_state})
         except Exception as exc:
             self._send_json(500, {"ok": False, "error": str(exc)})
