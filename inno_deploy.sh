@@ -35,6 +35,9 @@ NANO_BUILD_FLAG="build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128"
 NANO_BOOT_WAIT_S=6    # seconds to wait for Nano to finish its setup() splash after flash
 BRIDGE_SETTLE_S=3     # seconds to let the bridge stabilise before starting pypilot
 TELEGRAM_CONF="/home/innopilot/.pypilot/telegram.conf"
+# Hash of last successfully flashed sketch — used to skip unchanged firmware.
+# Delete this file to force a reflash regardless of source state.
+NANO_HASH_FILE="/var/lib/inno-pilot/nano_sketch.sha256"
 # ----------------------------------------------------------
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -236,17 +239,46 @@ fi
 log "Deploy script is current — continuing."
 
 # ---------------------------------------------------------------------------
+# Nano firmware change detection
+# Hash all source files in the sketch directory. If the hash matches the last
+# successful flash, skip compile and flash entirely to save ~2 minutes of
+# downtime on glue-only deploys.  Delete NANO_HASH_FILE to force a reflash.
+# ---------------------------------------------------------------------------
+_nano_src_hash() {
+    # Sort paths so hash is order-independent; include the FQBN + build flag so
+    # a toolchain change can be forced by clearing the hash file manually.
+    (
+        echo "$NANO_FQBN $NANO_BUILD_FLAG"
+        find "$NANO_SKETCH_DIR" -maxdepth 1 \( -name "*.ino" -o -name "*.h" -o -name "*.cpp" \) \
+            | sort | xargs sha256sum
+    ) | sha256sum | awk '{print $1}'
+}
+
+NANO_CURRENT_HASH=$(_nano_src_hash)
+if [[ -f "$NANO_HASH_FILE" ]] && [[ "$(cat "$NANO_HASH_FILE")" == "$NANO_CURRENT_HASH" ]]; then
+    FLASH_NANO=false
+    log "Nano firmware unchanged — compile and flash will be skipped."
+else
+    FLASH_NANO=true
+    log "Nano firmware changed (or first run) — will compile and flash."
+fi
+
+# ---------------------------------------------------------------------------
 info "Step 2 — Pre-compile Nano firmware (services still running)"
 # ---------------------------------------------------------------------------
 # Compile does not touch /dev/ttyUSB0, so we can do this before stopping services
 # to minimise the downtime window.
-cd "$NANO_SKETCH_DIR"
-log "Compiling $NANO_SKETCH_DIR ..."
-"${ARDUINO[@]}" compile \
-    --fqbn "$NANO_FQBN" \
-    --build-property "$NANO_BUILD_FLAG" \
-    .
-log "Nano firmware compiled OK."
+if $FLASH_NANO; then
+    cd "$NANO_SKETCH_DIR"
+    log "Compiling $NANO_SKETCH_DIR ..."
+    "${ARDUINO[@]}" compile \
+        --fqbn "$NANO_FQBN" \
+        --build-property "$NANO_BUILD_FLAG" \
+        .
+    log "Nano firmware compiled OK."
+else
+    log "Skipping compile (firmware unchanged)."
+fi
 
 # ---------------------------------------------------------------------------
 info "Step 3 — Stop services (consumers first, providers last)"
@@ -292,54 +324,67 @@ log "pypilot package installed."
 # ---------------------------------------------------------------------------
 info "Step 5 — Flash Nano firmware"
 # ---------------------------------------------------------------------------
-# On ARMv6 (Pi Zero) arduino-cli bundles an armhf avrdude that crashes with
-# SIGILL. Replace it with a symlink to the system avrdude before upload.
-if [[ "$(uname -m)" == "armv6l" ]]; then
-    fix_avrdude_for_armv6
+if $FLASH_NANO; then
+    # On ARMv6 (Pi Zero) arduino-cli bundles an armhf avrdude that crashes with
+    # SIGILL. Replace it with a symlink to the system avrdude before upload.
+    if [[ "$(uname -m)" == "armv6l" ]]; then
+        fix_avrdude_for_armv6
+    fi
+
+    # NOTE: HUPCL is not relevant here because arduino-cli handles the reset pulse
+    # intentionally (needed for programming). After upload completes and arduino-cli
+    # closes the port, the Nano will reset once more — that is the boot we wait for
+    # in Step 6.
+    #
+    # Re-stop serial-port services before flashing. inno-pilot-bridge has a systemd
+    # Restart= policy and can auto-restart itself during the long Step 4b pypilot
+    # install, so it may be activating again by the time we reach Step 5. A bridge
+    # that holds or has recently held /dev/ttyUSB0 corrupts the avrdude bootloader
+    # dialogue, causing "programmer is out of sync".
+    log "Re-stopping bridge/socat to ensure serial port is free ..."
+    sudo systemctl stop inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
+    sleep 2
+
+    # Upload with one automatic retry — a transient sync error on the first
+    # attempt is rare but recoverable; a second failure is a real problem.
+    cd "$NANO_SKETCH_DIR"
+    log "Flashing Nano on $NANO_PORT ..."
+    upload_ok=false
+    for attempt in 1 2; do
+        if "${ARDUINO[@]}" upload \
+               -p "$NANO_PORT" \
+               --fqbn "$NANO_FQBN" \
+               .; then
+            upload_ok=true
+            break
+        fi
+        if [[ "$attempt" -eq 1 ]]; then
+            log "Upload attempt 1 failed — waiting 3s and retrying ..."
+            sleep 3
+        fi
+    done
+    $upload_ok || die "Nano upload failed after 2 attempts."
+    log "Flash complete."
+
+    # Record successful flash so future deploys can skip unchanged firmware.
+    echo "$NANO_CURRENT_HASH" > "$NANO_HASH_FILE"
+    log "Nano firmware hash saved."
+else
+    log "Skipping flash (firmware unchanged)."
 fi
 
-# NOTE: HUPCL is not relevant here because arduino-cli handles the reset pulse
-# intentionally (needed for programming). After upload completes and arduino-cli
-# closes the port, the Nano will reset once more — that is the boot we wait for
-# in Step 6.
-#
-# Re-stop serial-port services before flashing. inno-pilot-bridge has a systemd
-# Restart= policy and can auto-restart itself during the long Step 4b pypilot
-# install, so it may be activating again by the time we reach Step 5. A bridge
-# that holds or has recently held /dev/ttyUSB0 corrupts the avrdude bootloader
-# dialogue, causing "programmer is out of sync".
-log "Re-stopping bridge/socat to ensure serial port is free ..."
-sudo systemctl stop inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
-sleep 2
-
-# Upload with one automatic retry — a transient sync error on the first
-# attempt is rare but recoverable; a second failure is a real problem.
-cd "$NANO_SKETCH_DIR"
-log "Flashing Nano on $NANO_PORT ..."
-upload_ok=false
-for attempt in 1 2; do
-    if "${ARDUINO[@]}" upload \
-           -p "$NANO_PORT" \
-           --fqbn "$NANO_FQBN" \
-           .; then
-        upload_ok=true
-        break
-    fi
-    if [[ "$attempt" -eq 1 ]]; then
-        log "Upload attempt 1 failed — waiting 3s and retrying ..."
-        sleep 3
-    fi
-done
-$upload_ok || die "Nano upload failed after 2 attempts."
-log "Flash complete."
-
 # ---------------------------------------------------------------------------
-info "Step 6 — Waiting ${NANO_BOOT_WAIT_S}s for Nano to complete setup() after flash"
+info "Step 6 — Post-flash Nano boot wait"
 # ---------------------------------------------------------------------------
 # The Nano runs a ~3 s OLED splash in setup(). The bridge needs the Nano to be
 # ready before sending FEATURES_CODE and HELLO, so give it ample time here.
-sleep "$NANO_BOOT_WAIT_S"
-log "Nano should be ready."
+if $FLASH_NANO; then
+    log "Waiting ${NANO_BOOT_WAIT_S}s for Nano to complete setup() after flash ..."
+    sleep "$NANO_BOOT_WAIT_S"
+    log "Nano should be ready."
+else
+    log "Skipping boot wait (no flash performed)."
+fi
 
 # ---------------------------------------------------------------------------
 info "Step 7 — Start services (providers first, consumers last)"
