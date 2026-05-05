@@ -48,7 +48,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B80"
+INNOPILOT_VERSION = "v1.3.0_B81"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -2585,7 +2585,7 @@ function _updCheck() {
       } else if (d.up_to_date) {
         body.textContent = 'Already up to date.\\n\\nBranch : ' + d.branch + '\\nCommit : ' + d.sha;
       } else {
-        body.textContent = 'Updates available on branch \'' + d.branch + '\':\\n\\n'
+        body.textContent = 'Updates available on branch ' + d.branch + ':\\n\\n'
           + d.commits.join('\\n');
         inst.style.display = '';
       }
