@@ -167,6 +167,7 @@ stop_svc() {
 
 stop_svc pypilot_web
 stop_svc pypilot
+stop_svc inno-health-notify
 stop_svc inno-pilot-web-remote
 stop_svc inno-pilot-bridge
 stop_svc inno-pilot-fixlink
@@ -269,6 +270,9 @@ start_svc inno-pilot-bridge
 # web remote connects to the bridge's TCP server
 start_svc inno-pilot-web-remote
 
+# health notify runs independently — no ordering dependency on pypilot
+start_svc inno-health-notify
+
 # Let the bridge stabilise (FEATURES_CODE + HELLO exchange with Nano) before
 # pypilot tries to grab the PTY
 log "  Waiting ${BRIDGE_SETTLE_S}s for bridge to stabilise ..."
@@ -290,7 +294,7 @@ info "Step 8 — Service status summary"
 # TCP connection to the bridge and reach the "active" steady state.
 log "  Waiting 6s for services to reach steady state ..."
 sleep 6
-SVCS=(inno-pilot-socat inno-pilot-fixlink inno-pilot-bridge inno-pilot-web-remote pypilot pypilot_web)
+SVCS=(inno-pilot-socat inno-pilot-fixlink inno-pilot-bridge inno-pilot-web-remote inno-health-notify pypilot pypilot_web)
 all_ok=true
 for svc in "${SVCS[@]}"; do
     if ! systemctl list-unit-files "${svc}.service" &>/dev/null; then

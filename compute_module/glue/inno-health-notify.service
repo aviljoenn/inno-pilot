@@ -1,0 +1,17 @@
+[Unit]
+Description=Inno-Pilot health notifications via Telegram
+# Start after inno-pilot services are up; network-online is wanted but not
+# required — the script handles network unavailability gracefully.
+After=multi-user.target inno-pilot-bridge.service inno-pilot-web-remote.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=innopilot
+ExecStart=/usr/local/bin/inno_health_notify.py
+# Restart on unexpected exit (e.g. unhandled exception); not on clean SIGTERM.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

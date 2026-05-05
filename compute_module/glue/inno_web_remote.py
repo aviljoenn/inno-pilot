@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.2.0_B72"
+INNOPILOT_VERSION = "v1.3.0_B73"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -101,6 +101,11 @@ _DEFAULT_SETTINGS: dict = {
         "auto_disengage_on_fault":  True,
         "comms_warn_threshold_pct": 10,  # CRC error rate % for WARN
         "comms_crit_threshold_pct": 25,  # CRC error rate % for CRIT
+    },
+    "notifications": {
+        # 0 = send one health report at boot only.
+        # >0 = repeat every N minutes (stats accumulated over the period).
+        "health_interval_min": 0,
     },
 }
 
@@ -1409,6 +1414,12 @@ body{
         <input class="sf-inp" type="number" id="sf-comms_crit_threshold_pct" min="5" max="90" step="1">
       </div>
 
+      <div class="ss-title">NOTIFICATIONS</div>
+      <div class="sf-row" data-sfid="health_interval_min">
+        <span class="sf-lbl" title="0 = one health report at boot only. Set minutes for repeated reports with stats accumulated over the period.">Health Report (min) &#9432;</span>
+        <input class="sf-inp" type="number" id="sf-health_interval_min" min="0" max="1440" step="5">
+      </div>
+
       <div class="ss-title">TESTS</div>
       <div class="sf-row">
         <span class="sf-lbl">Hardware Tests</span>
@@ -2222,6 +2233,8 @@ var SF = [
   {id:'auto_disengage_on_fault',  sec:'safety', type:'bool'},
   {id:'comms_warn_threshold_pct', sec:'safety', type:'number'},
   {id:'comms_crit_threshold_pct', sec:'safety', type:'number'},
+  // Notifications
+  {id:'health_interval_min', sec:'notifications', type:'number'},
 ];
 
 function sfGet(f) { return (gSettings[f.sec] || {})[f.id]; }

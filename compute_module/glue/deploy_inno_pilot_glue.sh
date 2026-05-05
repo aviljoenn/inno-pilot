@@ -39,6 +39,11 @@ echo "Installing inno_web_remote.py -> /usr/local/bin/"
 sudo cp "$REPO_DIR/inno_web_remote.py" /usr/local/bin/inno_web_remote.py
 sudo chmod 755 /usr/local/bin/inno_web_remote.py
 
+# Copy health notify script
+echo "Installing inno_health_notify.py -> /usr/local/bin/"
+sudo cp "$REPO_DIR/inno_health_notify.py" /usr/local/bin/inno_health_notify.py
+sudo chmod 755 /usr/local/bin/inno_health_notify.py
+
 # Copy OTA firmware binary (if committed to repo)
 OTA_BIN="$REPO_ROOT/inno-remote/firmware/inno_remote/ota/inno_remote.bin"
 OTA_DEST_DIR="/var/lib/inno-pilot/ota"
@@ -62,6 +67,7 @@ sudo cp "$REPO_DIR/inno-pilot-socat.service"      /etc/systemd/system/inno-pilot
 sudo cp "$REPO_DIR/inno-pilot-fixlink.service"    /etc/systemd/system/inno-pilot-fixlink.service
 sudo cp "$REPO_DIR/inno-pilot-bridge.service"     /etc/systemd/system/inno-pilot-bridge.service
 sudo cp "$REPO_DIR/inno-pilot-web-remote.service" /etc/systemd/system/inno-pilot-web-remote.service
+sudo cp "$REPO_DIR/inno-health-notify.service"    /etc/systemd/system/inno-health-notify.service
 
 # Reload systemd
 echo "Reloading systemd daemon..."
@@ -73,6 +79,7 @@ sudo systemctl enable inno-pilot-socat.service
 sudo systemctl enable inno-pilot-fixlink.service
 sudo systemctl enable inno-pilot-bridge.service
 sudo systemctl enable inno-pilot-web-remote.service
+sudo systemctl enable inno-health-notify.service
 
 # Ensure pypilot uses by-id name
 SERVOFILE="$HOME/.pypilot/servodevice"
