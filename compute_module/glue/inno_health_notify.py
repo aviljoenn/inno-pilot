@@ -508,7 +508,7 @@ def build_period_report(
 
     # --- Build message ---
     lines = [
-        f"Inno-Pilot Health  —  {host}",
+        "Inno-Pilot Health",
         f"Period: last {interval_min} min",
         "─────────────────────────────",
     ]
