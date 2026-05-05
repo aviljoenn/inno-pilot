@@ -24,6 +24,7 @@ import math
 import os
 import queue
 import socket
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,7 +48,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B78"
+INNOPILOT_VERSION = "v1.3.0_B79"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -2977,7 +2978,6 @@ class _Handler(BaseHTTPRequestHandler):
         Updates _state["debug"] and logs a timestamped marker to the bridge
         journal so the toggle is visible in the log stream.
         """
-        import subprocess
         import os
         import signal as _signal
         try:
@@ -3010,7 +3010,6 @@ class _Handler(BaseHTTPRequestHandler):
           {"up_to_date": false, "branch": "...", "commits": ["hash msg", ...],
            "current_sha": "abcd123"}
         """
-        import subprocess
         try:
             branch = subprocess.check_output(
                 ["git", "-C", REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
@@ -3061,7 +3060,6 @@ class _Handler(BaseHTTPRequestHandler):
         cgroup and survives inno-pilot-web-remote being stopped mid-deploy.
         Sends a Telegram notification before handing off and returns immediately.
         """
-        import subprocess
         try:
             branch = subprocess.check_output(
                 ["git", "-C", REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
