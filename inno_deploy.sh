@@ -458,6 +458,29 @@ done
 echo
 if $all_ok; then
     log "=== Deployment complete — all services nominal ==="
+
+    # Telegram completion notification (best-effort — never blocks or fails deploy)
+    python3 - 2>/dev/null <<'PYEOF' || true
+import json, urllib.request
+TELEGRAM_CONF = "/home/innopilot/.pypilot/telegram.conf"
+SETTINGS_FILE = "/var/lib/inno-pilot/settings.json"
+try:
+    conf = json.load(open(TELEGRAM_CONF))
+    token, chat_id = conf["token"], str(conf["chat_id"])
+    try:
+        name = json.load(open(SETTINGS_FILE)).get("vessel", {}).get("name", "").strip()
+        prefix = f"[{name}] " if name else ""
+    except Exception:
+        prefix = ""
+    text = f"{prefix}Update complete — all services nominal"
+    data = json.dumps({"chat_id": chat_id, "text": text}).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=data, headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+PYEOF
 else
     log "=== Deployment finished — one or more services need attention (see above) ==="
     exit 1

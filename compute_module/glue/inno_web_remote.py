@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B77"
+INNOPILOT_VERSION = "v1.3.0_B78"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -57,6 +57,12 @@ TELEGRAM_CONF = "/home/innopilot/.pypilot/telegram.conf"
 # Settings persistence — /var/lib/inno-pilot/settings.json
 # ---------------------------------------------------------------------------
 SETTINGS_FILE = "/var/lib/inno-pilot/settings.json"
+
+# ---------------------------------------------------------------------------
+# OTA update paths
+# ---------------------------------------------------------------------------
+REPO_DIR      = "/home/innopilot/inno-pilot"
+DEPLOY_SCRIPT = "/home/innopilot/inno_deploy.sh"
 
 _DEFAULT_SETTINGS: dict = {
     "network": {
@@ -1186,6 +1192,21 @@ body{
 .bnm-btn{background:#0090d0;color:#fff;border:none;border-radius:5px;
   padding:9px 28px;font-size:0.95em;cursor:pointer;font-weight:bold}
 .bnm-btn:active{opacity:.75}
+/* ── Software update modal ──────────────────────────────────────────────── */
+.upd-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:none;
+  align-items:center;justify-content:center;z-index:2001}
+.upd-overlay.visible{display:flex}
+.upd-box{background:#1a1a2e;border:1px solid #0090d0;border-radius:10px;
+  padding:24px 22px;max-width:380px;width:92%;text-align:left}
+.upd-title{font-size:1.1em;font-weight:bold;color:#0090d0;margin-bottom:12px;text-align:center}
+.upd-body{font-size:0.80em;color:#ccc;margin-bottom:16px;line-height:1.5;
+  max-height:200px;overflow-y:auto;white-space:pre-wrap;font-family:monospace}
+.upd-actions{display:flex;gap:10px;justify-content:center}
+.upd-btn{border:none;border-radius:5px;padding:8px 22px;font-size:0.92em;
+  cursor:pointer;font-weight:bold}
+.upd-install{background:#0090d0;color:#fff}
+.upd-close{background:#444;color:#ccc}
+.upd-btn:active{opacity:.75}
 </style>
 </head>
 <body>
@@ -1463,6 +1484,12 @@ body{
       <div class="sf-row">
         <span class="sf-lbl">Hardware Tests</span>
         <button class="sf-bb" id="settings-open-tests" style="padding:3px 14px">OPEN &#8250;</button>
+      </div>
+
+      <div class="ss-title">SYSTEM</div>
+      <div class="sf-row">
+        <span class="sf-lbl" title="Check GitHub for new commits and optionally install.">Software Update &#9432;</span>
+        <button class="sf-bb" id="sf-check-update" style="padding:3px 14px">CHECK &#8250;</button>
       </div>
 
     </div><!-- .sbody -->
@@ -2538,6 +2565,62 @@ fetch('/settings')
     _bnmShow();
   });
 
+// ── Software update modal ─────────────────────────────────────────────────
+function _updShow() { document.getElementById('upd-overlay').classList.add('visible'); }
+function _updHide() { document.getElementById('upd-overlay').classList.remove('visible'); }
+
+function _updCheck() {
+  var body = document.getElementById('upd-body');
+  var inst = document.getElementById('upd-install');
+  body.textContent = 'Fetching from GitHub...';
+  inst.style.display = 'none';
+  document.getElementById('upd-close').textContent = 'CLOSE';
+  _updShow();
+  fetch('/update/check')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) {
+        body.textContent = 'Error: ' + d.error;
+      } else if (d.up_to_date) {
+        body.textContent = 'Already up to date.\n\nBranch : ' + d.branch + '\nCommit : ' + d.sha;
+      } else {
+        body.textContent = 'Updates available on branch \'' + d.branch + '\':\n\n'
+          + d.commits.join('\n');
+        inst.style.display = '';
+      }
+    })
+    .catch(function(e) { body.textContent = 'Check failed: ' + e; });
+}
+
+function _updInstall() {
+  var body = document.getElementById('upd-body');
+  var inst = document.getElementById('upd-install');
+  inst.style.display = 'none';
+  body.textContent = 'Starting update...';
+  fetch('/update/start', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) {
+        body.textContent = 'Failed to start update:\n' + d.error;
+      } else {
+        body.textContent = 'Update in progress.\n\n'
+          + 'All services are restarting — this page will be\n'
+          + 'unavailable for approximately 3 minutes.\n\n'
+          + 'A Telegram message will be sent when complete.\n'
+          + 'Reconnect to verify the new version.';
+        document.getElementById('upd-close').textContent = 'OK';
+      }
+    })
+    .catch(function(e) { body.textContent = 'Request failed: ' + e; });
+}
+
+document.getElementById('sf-check-update').addEventListener('click', function(e) {
+  e.stopPropagation();  // prevent sf-row click from focusing a non-existent input
+  _updCheck();
+});
+document.getElementById('upd-install').addEventListener('click', _updInstall);
+document.getElementById('upd-close').addEventListener('click', _updHide);
+
 // ── No-bridge overlay animation ───────────────────────────────────────────
 var dotN = 1;
 setInterval(function() {
@@ -2549,6 +2632,18 @@ setInterval(function() {
 
 <!-- Packet-loss warning banner: shown when net_warn is true in SSE state -->
 <div id="net-warn-banner">NETWORK: Packet loss elevated &mdash; check WiFi / router</div>
+
+<!-- Software update modal -->
+<div id="upd-overlay" class="upd-overlay">
+  <div class="upd-box">
+    <div class="upd-title">Software Update</div>
+    <div id="upd-body" class="upd-body">Checking...</div>
+    <div class="upd-actions">
+      <button class="upd-btn upd-install" id="upd-install">INSTALL</button>
+      <button class="upd-btn upd-close"   id="upd-close">CLOSE</button>
+    </div>
+  </div>
+</div>
 
 <!-- Boat-name setup modal: shown on load when vessel.name is not configured -->
 <div id="bnm-overlay" class="bnm-overlay">
@@ -2589,6 +2684,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_health()
         elif self.path == "/settings":
             self._serve_settings()
+        elif self.path == "/update/check":
+            self._handle_update_check()
         else:
             self.send_error(404)
 
@@ -2599,6 +2696,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_settings_post()
         elif self.path == "/debug":
             self._handle_debug_toggle()
+        elif self.path == "/update/start":
+            self._handle_update_start()
         else:
             self.send_error(404)
 
@@ -2899,6 +2998,103 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "debug": new_state})
         except Exception as exc:
             self._send_json(500, {"ok": False, "error": str(exc)})
+
+    # ---- GET /update/check ----
+
+    def _handle_update_check(self) -> None:
+        """Fetch from GitHub and report whether the local branch is behind.
+
+        Runs git fetch (blocking, ~2-5 s on a good connection) then compares
+        HEAD vs FETCH_HEAD.  Returns JSON:
+          {"up_to_date": true,  "branch": "...", "sha": "abcd123"}
+          {"up_to_date": false, "branch": "...", "commits": ["hash msg", ...],
+           "current_sha": "abcd123"}
+        """
+        import subprocess
+        try:
+            branch = subprocess.check_output(
+                ["git", "-C", REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            ).strip()
+            subprocess.check_output(
+                ["git", "-C", REPO_DIR, "fetch", "origin", branch],
+                text=True, timeout=30, stderr=subprocess.STDOUT,
+            )
+            local_sha = subprocess.check_output(
+                ["git", "-C", REPO_DIR, "rev-parse", "HEAD"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            ).strip()
+            remote_sha = subprocess.check_output(
+                ["git", "-C", REPO_DIR, "rev-parse", "FETCH_HEAD"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            ).strip()
+            if local_sha == remote_sha:
+                self._send_json(200, {
+                    "up_to_date": True, "branch": branch, "sha": local_sha[:7],
+                })
+                return
+            commits_out = subprocess.check_output(
+                ["git", "-C", REPO_DIR, "log",
+                 "HEAD..FETCH_HEAD", "--oneline", "--no-decorate"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            ).strip()
+            commits = [l for l in commits_out.splitlines() if l.strip()]
+            self._send_json(200, {
+                "up_to_date": False,
+                "branch": branch,
+                "commits": commits,
+                "current_sha": local_sha[:7],
+            })
+        except subprocess.TimeoutExpired:
+            self._send_json(504, {"error": "git fetch timed out — check network"})
+        except subprocess.CalledProcessError as exc:
+            self._send_json(500, {"error": f"git error: {(exc.output or '').strip()}"})
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    # ---- POST /update/start ----
+
+    def _handle_update_start(self) -> None:
+        """Launch inno_deploy.sh as a systemd transient service.
+
+        Uses systemd-run --no-block so the deploy process lives in its own
+        cgroup and survives inno-pilot-web-remote being stopped mid-deploy.
+        Sends a Telegram notification before handing off and returns immediately.
+        """
+        import subprocess
+        try:
+            branch = subprocess.check_output(
+                ["git", "-C", REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            branch = "master"
+
+        log.info("OTA update triggered via web remote — branch=%s version=%s",
+                 branch, INNOPILOT_VERSION)
+        _send_telegram(f"OTA update started — {INNOPILOT_VERSION}")
+
+        try:
+            # systemd-run creates a transient service in its own cgroup.
+            # The web-remote is stopped by the deploy script; this ensures
+            # the deploy process is not in the same cgroup and is not killed.
+            subprocess.Popen(
+                ["sudo", "systemd-run",
+                 "--no-block",
+                 "--unit=inno-deploy-ota",
+                 "--description=Inno-Pilot OTA update",
+                 "--setenv=HOME=/home/innopilot",
+                 "--setenv=USER=innopilot",
+                 "bash", DEPLOY_SCRIPT, branch],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            self._send_json(200, {"ok": True, "branch": branch})
+        except Exception as exc:
+            log.error("Failed to launch OTA deploy: %s", exc)
+            _send_telegram(f"OTA update FAILED to start: {exc}")
+            self._send_json(500, {"error": str(exc)})
 
     # ---- POST /settings ----
 
