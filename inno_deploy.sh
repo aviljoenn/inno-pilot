@@ -219,6 +219,9 @@ fi
 info "Step 1 — git pull (branch: $BRANCH)"
 # ---------------------------------------------------------------------------
 cd "$REPO_DIR"
+# When running as root (OTA path), git 2.35+ blocks access to repos owned by
+# another user unless the directory is explicitly marked safe.
+git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
 git pull origin "$BRANCH"
 log "Pull complete."
 

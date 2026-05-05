@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+
 inno_web_remote.py — Browser-based Inno-Remote UI (port 8888).
 
 Connects to inno-pilot-bridge on TCP port 8555 as a standard remote
@@ -48,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B82"
+INNOPILOT_VERSION = "v1.3.0_B83"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -3077,10 +3078,13 @@ class _Handler(BaseHTTPRequestHandler):
             # systemd-run creates a transient service in its own cgroup.
             # The web-remote is stopped by the deploy script; this ensures
             # the deploy process is not in the same cgroup and is not killed.
+            # Timestamp suffix avoids unit-name collision if a previous run
+            # failed and its transient unit is still loaded in a failed state.
+            unit_name = f"inno-deploy-ota-{int(time.time())}"
             subprocess.Popen(
                 ["sudo", "systemd-run",
                  "--no-block",
-                 "--unit=inno-deploy-ota",
+                 f"--unit={unit_name}",
                  "--description=Inno-Pilot OTA update",
                  "--setenv=HOME=/home/innopilot",
                  "--setenv=USER=innopilot",
