@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B73"
+INNOPILOT_VERSION = "v1.3.0_B75"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -106,6 +106,8 @@ _DEFAULT_SETTINGS: dict = {
         # 0 = send one health report at boot only.
         # >0 = repeat every N minutes (stats accumulated over the period).
         "health_interval_min": 0,
+        # Seconds between gateway pings (0.5 = 2/s, 5 = every 5 s, etc.)
+        "ping_interval_s": 0.5,
     },
 }
 
@@ -160,6 +162,7 @@ _state: dict = {
     "rudder_stall": False,    # True when motor commanded but rudder not moving
     "pypilot_ok":   True,     # False when pypilot process has lost its connection
     "debug":        False,    # True when bridge is in DEBUG log level
+    "net_warn":     False,    # True when inno-health-notify reports packet-loss WARN
 }
 _state_lock = threading.Lock()
 
@@ -187,9 +190,18 @@ def _send_telegram(text: str) -> None:
     """Fire-and-forget Telegram message.  Reads token/chat_id from TELEGRAM_CONF.
     Runs in a daemon thread so it never blocks the HTTP response path.
     Silently does nothing if the config file is absent or malformed.
+    Prepends vessel name from settings so messages are identifiable per boat.
     """
     import urllib.request
     import urllib.error
+
+    # Prepend boat name for multi-boat identification
+    try:
+        vessel_name = _load_settings().get("vessel", {}).get("name", "").strip()
+        if vessel_name:
+            text = f"[{vessel_name}] {text}"
+    except Exception:
+        pass
 
     def _worker() -> None:
         try:
@@ -1151,6 +1163,28 @@ body{
 }
 .tftr-btn.back{background:linear-gradient(180deg,#1a1000,#0d0800);color:#a07020;border:1px solid #2a1800}
 .tftr-btn.close{background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
+
+/* ── Packet-loss warning banner ─────────────────────────────────────────── */
+#net-warn-banner{display:none;position:fixed;top:0;left:0;right:0;z-index:1500;
+  background:#7a2000;color:#ffe0c0;font-size:0.82em;font-weight:bold;
+  text-align:center;padding:5px 8px;letter-spacing:0.03em}
+#net-warn-banner.visible{display:block}
+
+/* ── Boat-name setup modal ──────────────────────────────────────────────── */
+.bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:flex;
+  align-items:center;justify-content:center;z-index:2000}
+.bnm-box{background:#1a1a2e;border:1px solid #0090d0;border-radius:10px;
+  padding:28px 24px;max-width:320px;width:90%;text-align:center}
+.bnm-title{font-size:1.1em;font-weight:bold;color:#0090d0;margin-bottom:10px}
+.bnm-body{font-size:0.82em;color:#aaa;margin-bottom:18px;line-height:1.4}
+.bnm-inp{width:100%;box-sizing:border-box;padding:9px 10px;background:#0d1117;
+  border:1px solid #444;border-radius:5px;color:#e0e0e0;font-size:1em;
+  margin-bottom:8px;outline:none}
+.bnm-inp:focus{border-color:#0090d0}
+.bnm-err{color:#e05050;font-size:0.78em;min-height:1.1em;margin-bottom:10px}
+.bnm-btn{background:#0090d0;color:#fff;border:none;border-radius:5px;
+  padding:9px 28px;font-size:0.95em;cursor:pointer;font-weight:bold}
+.bnm-btn:active{opacity:.75}
 </style>
 </head>
 <body>
@@ -1418,6 +1452,10 @@ body{
       <div class="sf-row" data-sfid="health_interval_min">
         <span class="sf-lbl" title="0 = one health report at boot only. Set minutes for repeated reports with stats accumulated over the period.">Health Report (min) &#9432;</span>
         <input class="sf-inp" type="number" id="sf-health_interval_min" min="0" max="1440" step="5">
+      </div>
+      <div class="sf-row" data-sfid="ping_interval_s">
+        <span class="sf-lbl" title="Seconds between gateway pings. 0.5 = 2 per second. Increase if router rate-limits ICMP.">Ping Interval (s) &#9432;</span>
+        <input class="sf-inp" type="number" id="sf-ping_interval_s" min="0.5" max="30" step="0.5">
       </div>
 
       <div class="ss-title">TESTS</div>
@@ -1788,6 +1826,9 @@ function updateUI(d) {
   if (d.cmd != null) gCmd = d.cmd;
   if (d.ui_mode) gTogglePos = d.ui_mode;
   if (d.debug !== undefined) setDebugState(d.debug);
+  if (d.net_warn !== undefined) {
+    document.getElementById('net-warn-banner').classList.toggle('visible', !!d.net_warn);
+  }
 
   // Suppress overlay when connected, or when disconnect is intentional (OFF).
   // This also handles occasional mode/ui-mode desync by treating the selector
@@ -2235,6 +2276,7 @@ var SF = [
   {id:'comms_crit_threshold_pct', sec:'safety', type:'number'},
   // Notifications
   {id:'health_interval_min', sec:'notifications', type:'number'},
+  {id:'ping_interval_s',     sec:'notifications', type:'number'},
 ];
 
 function sfGet(f) { return (gSettings[f.sec] || {})[f.id]; }
@@ -2443,6 +2485,58 @@ document.querySelectorAll('.sf-eval').forEach(function(el) {
   });
 });
 
+// ── Boat-name modal ───────────────────────────────────────────────────────
+function _bnmShow() {
+  document.getElementById('bnm-overlay').classList.remove('hidden');
+  setTimeout(function() { document.getElementById('bnm-input').focus(); }, 80);
+}
+function _bnmHide() {
+  document.getElementById('bnm-overlay').classList.add('hidden');
+}
+function _bnmSave() {
+  var name = document.getElementById('bnm-input').value.trim();
+  var err  = document.getElementById('bnm-err');
+  if (!name) { err.textContent = 'Boat name is required.'; return; }
+  err.textContent = '';
+  if (!gSettings.vessel) gSettings.vessel = {};
+  gSettings.vessel.name = name;
+  fetch('/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(gSettings)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      _bnmHide();
+      // Reflect the saved name in the settings panel input if it is open
+      var el = document.getElementById('sf-name');
+      if (el) el.value = name;
+    } else {
+      err.textContent = 'Save failed — try again.';
+    }
+  })
+  .catch(function() { err.textContent = 'Save failed — try again.'; });
+}
+document.getElementById('bnm-save').addEventListener('click', _bnmSave);
+document.getElementById('bnm-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') _bnmSave();
+});
+
+// Fetch settings on page load to check vessel name; show modal if not set.
+fetch('/settings')
+  .then(function(r) { return r.json(); })
+  .then(function(s) {
+    delete s['_source'];
+    gSettings = s;
+    var name = (s.vessel && s.vessel.name) ? s.vessel.name.trim() : '';
+    if (!name) _bnmShow();
+  })
+  .catch(function() {
+    // If settings fetch fails at startup, still show the modal as a fallback.
+    _bnmShow();
+  });
+
 // ── No-bridge overlay animation ───────────────────────────────────────────
 var dotN = 1;
 setInterval(function() {
@@ -2451,6 +2545,22 @@ setInterval(function() {
   if (d) d.textContent = '\u25cf'.repeat(dotN);
 }, 550);
 </script>
+
+<!-- Packet-loss warning banner: shown when net_warn is true in SSE state -->
+<div id="net-warn-banner">NETWORK: Packet loss elevated &mdash; check WiFi / router</div>
+
+<!-- Boat-name setup modal: shown on load when vessel.name is not configured -->
+<div id="bnm-overlay" class="bnm-overlay hidden">
+  <div class="bnm-box">
+    <div class="bnm-title">Welcome to Inno-Pilot</div>
+    <div class="bnm-body">Enter your boat name to continue.<br>
+      This identifies your vessel in all notifications.</div>
+    <input class="bnm-inp" type="text" id="bnm-input"
+           placeholder="e.g. Windseeker" maxlength="32" autocomplete="off">
+    <div class="bnm-err" id="bnm-err"></div>
+    <button class="bnm-btn" id="bnm-save">SAVE</button>
+  </div>
+</div>
 </body>
 </html>""".replace("$$WHEEL_SVG$$", _WHEEL_SVG)
 
@@ -2864,6 +2974,40 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
+# Journal monitor — tracks inno-health-notify for packet-loss state changes
+# ---------------------------------------------------------------------------
+
+def _net_warn_monitor() -> None:
+    """Daemon thread: tails the inno-health-notify journal and updates net_warn.
+
+    Uses clean-slate semantics (no history replay) so web-remote restart always
+    starts from net_warn=False.  The health-notify service itself is the source
+    of truth; its state is logged and persists across web-remote restarts.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["journalctl", "-u", "inno-health-notify",
+             "--no-pager", "-o", "cat", "-n", "0", "-f"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        log.info("Net-warn monitor: tailing inno-health-notify journal")
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if "PACKET_LOSS_WARN" in line:
+                _update(net_warn=True)
+                log.warning("NET_WARN: Packet loss warning received from health monitor")
+            elif "PACKET_LOSS_CLEAR" in line:
+                _update(net_warn=False)
+                log.info("NET_WARN: Packet loss cleared — network OK")
+    except Exception as exc:
+        log.warning("Net-warn monitor thread error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2872,6 +3016,11 @@ def main() -> None:
     t = threading.Thread(target=bridge_client, daemon=True, name="bridge-client")
     t.start()
     log.info("Bridge client thread started (target: %s:%d)", BRIDGE_HOST, BRIDGE_PORT)
+
+    # Start journal monitor thread for packet-loss network warnings
+    m = threading.Thread(target=_net_warn_monitor, daemon=True, name="net-warn-monitor")
+    m.start()
+    log.info("Net-warn monitor thread started")
 
     # Start HTTP server
     server = ThreadingHTTPServer(("", WEB_PORT), _Handler)
