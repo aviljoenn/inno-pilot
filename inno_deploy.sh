@@ -10,7 +10,9 @@
 # If branch is omitted, the current branch of ~/inno-pilot is used.
 #
 # What this script does:
+#   0. First-run provisioning (Tailscale, Telegram config, /var/lib/inno-pilot)
 #   1. git pull the repo
+#      → if inno_deploy.sh changed in the pull, re-exec the new version and exit
 #   2. Pre-compile Nano firmware (while services are still up — no port needed)
 #   3. Stop all inno-pilot + pypilot services
 #   4. Deploy glue (bridge, web-remote, systemd units, OTA binary)
@@ -32,6 +34,7 @@ NANO_FQBN="arduino:avr:nano"
 NANO_BUILD_FLAG="build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128"
 NANO_BOOT_WAIT_S=6    # seconds to wait for Nano to finish its setup() splash after flash
 BRIDGE_SETTLE_S=3     # seconds to let the bridge stabilise before starting pypilot
+TELEGRAM_CONF="/home/innopilot/.pypilot/telegram.conf"
 # ----------------------------------------------------------
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -116,7 +119,7 @@ fix_avrdude_for_armv6() {
 # ------------------------------------------------------
 
 # Wrap all executable logic in main() so that bash reads the entire file into
-# memory before starting execution. This is necessary for the Step 9 self-update:
+# memory before starting execution. This is necessary for the self-update re-exec:
 # without the wrapper, bash reads the script in chunks from disk and if the file
 # is overwritten mid-execution it reads the new content at the wrong offset,
 # causing "syntax error near unexpected token" on whatever lands at that position.
@@ -132,11 +135,105 @@ esac
 BRANCH="${1:-$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)}"
 
 # ---------------------------------------------------------------------------
+info "Step 0 — First-run provisioning checks"
+# ---------------------------------------------------------------------------
+# All checks are idempotent: already-configured items are skipped silently.
+# Items that require a manual action pause and prompt the user before continuing.
+
+# ---- /var/lib/inno-pilot directory ----
+if [[ ! -d "/var/lib/inno-pilot" ]]; then
+    log "Creating /var/lib/inno-pilot ..."
+    sudo mkdir -p /var/lib/inno-pilot
+    sudo chown innopilot:innopilot /var/lib/inno-pilot
+    log "/var/lib/inno-pilot created."
+else
+    log "Data dir /var/lib/inno-pilot: exists — OK."
+fi
+
+# ---- Tailscale ----
+if ! command -v tailscale &>/dev/null; then
+    log "Tailscale not found — installing ..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+    log "Tailscale installed."
+fi
+
+# tailscale status exits non-zero and prints "Logged out" / error when not connected
+if tailscale status &>/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
+    ts_ip=$(tailscale ip -4 2>/dev/null || echo "n/a")
+    log "Tailscale: connected — IP $ts_ip — OK."
+else
+    log ""
+    log "======================================================"
+    log "  ACTION REQUIRED: Tailscale is not authenticated."
+    log "  Running 'sudo tailscale up' — open the URL it"
+    log "  prints in a browser on any device and log in."
+    log "======================================================"
+    log ""
+    # tailscale up prints the auth URL to stdout; run it and let the user see it
+    sudo tailscale up || true
+    log ""
+    read -rp "Press ENTER once you have completed Tailscale login ... "
+    if tailscale status &>/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
+        ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
+        log "Tailscale: authenticated — IP $ts_ip"
+    else
+        log "WARNING: Tailscale still does not appear connected — continuing anyway."
+        log "         Re-run this script after completing Tailscale auth to verify."
+    fi
+fi
+
+# ---- Telegram config ----
+if [[ -f "$TELEGRAM_CONF" ]]; then
+    log "Telegram: config exists at $TELEGRAM_CONF — OK."
+else
+    log ""
+    log "======================================================"
+    log "  ACTION REQUIRED: Telegram config not found."
+    log "  Enter your bot credentials to enable notifications."
+    log "  Leave blank to skip (you can create the file later)."
+    log "======================================================"
+    log ""
+    read -rp "  Bot token (press ENTER to skip): " tg_token
+    if [[ -n "$tg_token" ]]; then
+        read -rp "  Chat ID   : " tg_chat_id
+        if [[ -n "$tg_chat_id" ]]; then
+            mkdir -p "$(dirname "$TELEGRAM_CONF")"
+            printf '{"token": "%s", "chat_id": "%s"}\n' "$tg_token" "$tg_chat_id" \
+                > "$TELEGRAM_CONF"
+            chmod 600 "$TELEGRAM_CONF"
+            # Ensure the innopilot user owns the conf dir and file
+            sudo chown -R innopilot:innopilot "$(dirname "$TELEGRAM_CONF")" 2>/dev/null || true
+            log "Telegram config written to $TELEGRAM_CONF"
+        else
+            log "WARNING: No chat ID entered — Telegram config skipped."
+        fi
+    else
+        log "Telegram config skipped — create $TELEGRAM_CONF manually to enable notifications."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 info "Step 1 — git pull (branch: $BRANCH)"
 # ---------------------------------------------------------------------------
 cd "$REPO_DIR"
 git pull origin "$BRANCH"
 log "Pull complete."
+
+# ---------------------------------------------------------------------------
+# Self-update re-exec: if the pull brought a new version of this deploy script,
+# copy it over ~/inno_deploy.sh and re-exec so the rest of the deployment runs
+# under the new logic.  The new instance will find no diff on its own re-exec
+# check and proceed normally from Step 0 onwards.
+# ---------------------------------------------------------------------------
+REPO_DEPLOY="$REPO_DIR/inno_deploy.sh"
+SELF="$HOME/inno_deploy.sh"
+if [[ -f "$REPO_DEPLOY" ]] && ! diff -q "$REPO_DEPLOY" "$SELF" >/dev/null 2>&1; then
+    log "Deploy script updated in this pull — relaunching new version ..."
+    cp "$REPO_DEPLOY" "$SELF"
+    chmod 755 "$SELF"
+    exec bash "$SELF" "$@"
+fi
+log "Deploy script is current — continuing."
 
 # ---------------------------------------------------------------------------
 info "Step 2 — Pre-compile Nano firmware (services still running)"
@@ -270,15 +367,15 @@ start_svc inno-pilot-bridge
 # web remote connects to the bridge's TCP server
 start_svc inno-pilot-web-remote
 
-# health notify runs independently — no ordering dependency on pypilot
+# health notify runs independently — no ordering dependency on autopilot
 start_svc inno-health-notify
 
 # Let the bridge stabilise (FEATURES_CODE + HELLO exchange with Nano) before
-# pypilot tries to grab the PTY
+# autopilot tries to grab the PTY
 log "  Waiting ${BRIDGE_SETTLE_S}s for bridge to stabilise ..."
 sleep "$BRIDGE_SETTLE_S"
 
-# pypilot connects via the PTY symlink created by socat + fixlink
+# autopilot connects via the PTY symlink created by socat + fixlink
 start_svc pypilot
 
 # pypilot_web is optional (Pi5 second boat may have it; Pi Zero typically doesn't)
@@ -319,23 +416,6 @@ if $all_ok; then
 else
     log "=== Deployment finished — one or more services need attention (see above) ==="
     exit 1
-fi
-
-# ---------------------------------------------------------------------------
-info "Step 9 — Self-update ~/inno_deploy.sh from repo"
-# ---------------------------------------------------------------------------
-# Placed last so bash has already read the entire script before we overwrite it.
-SELF_IN_REPO="$REPO_DIR/inno_deploy.sh"
-if [[ -f "$SELF_IN_REPO" ]]; then
-    if ! diff -q "$SELF_IN_REPO" "$HOME/inno_deploy.sh" > /dev/null 2>&1; then
-        cp "$SELF_IN_REPO" "$HOME/inno_deploy.sh"
-        chmod 755 "$HOME/inno_deploy.sh"
-        log "~/inno_deploy.sh updated from repo."
-    else
-        log "~/inno_deploy.sh already up to date."
-    fi
-else
-    log "WARNING: $SELF_IN_REPO not found — skipping self-update."
 fi
 
 } # end main()

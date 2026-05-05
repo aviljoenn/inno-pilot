@@ -57,7 +57,7 @@ INNO_SERVICES = [
     ("bridge",     "inno-pilot-bridge"),
     ("web-remote", "inno-pilot-web-remote"),
     ("socat",      "inno-pilot-socat"),
-    ("pypilot",    "pypilot"),
+    ("autopilot",  "pypilot"),
     ("tailscale",  "tailscaled"),
     ("sshd",       "ssh"),
 ]
@@ -388,7 +388,7 @@ def _hostname() -> str:
     try:
         return socket.gethostname()
     except Exception:
-        return "pypilotpi"
+        return "innopilot"
 
 
 def _fmt_ping(p: dict) -> str:
