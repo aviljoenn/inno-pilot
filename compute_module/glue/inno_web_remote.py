@@ -47,7 +47,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B75"
+INNOPILOT_VERSION = "v1.3.0_B76"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -1171,8 +1171,9 @@ body{
 #net-warn-banner.visible{display:block}
 
 /* ── Boat-name setup modal ──────────────────────────────────────────────── */
-.bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:flex;
+.bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:none;
   align-items:center;justify-content:center;z-index:2000}
+.bnm-overlay.visible{display:flex}
 .bnm-box{background:#1a1a2e;border:1px solid #0090d0;border-radius:10px;
   padding:28px 24px;max-width:320px;width:90%;text-align:center}
 .bnm-title{font-size:1.1em;font-weight:bold;color:#0090d0;margin-bottom:10px}
@@ -2487,11 +2488,11 @@ document.querySelectorAll('.sf-eval').forEach(function(el) {
 
 // ── Boat-name modal ───────────────────────────────────────────────────────
 function _bnmShow() {
-  document.getElementById('bnm-overlay').classList.remove('hidden');
+  document.getElementById('bnm-overlay').classList.add('visible');
   setTimeout(function() { document.getElementById('bnm-input').focus(); }, 80);
 }
 function _bnmHide() {
-  document.getElementById('bnm-overlay').classList.add('hidden');
+  document.getElementById('bnm-overlay').classList.remove('visible');
 }
 function _bnmSave() {
   var name = document.getElementById('bnm-input').value.trim();
@@ -2550,7 +2551,7 @@ setInterval(function() {
 <div id="net-warn-banner">NETWORK: Packet loss elevated &mdash; check WiFi / router</div>
 
 <!-- Boat-name setup modal: shown on load when vessel.name is not configured -->
-<div id="bnm-overlay" class="bnm-overlay hidden">
+<div id="bnm-overlay" class="bnm-overlay">
   <div class="bnm-box">
     <div class="bnm-title">Welcome to Inno-Pilot</div>
     <div class="bnm-body">Enter your boat name to continue.<br>
@@ -2960,9 +2961,9 @@ class _Handler(BaseHTTPRequestHandler):
             if not was_active:
                 _bridge_active.clear()
 
-        if not saved_via_bridge:
-            # Bridge unavailable — write local file so settings survive reconnect
-            _persist_settings(settings)
+        # Always write local file — keeps it in sync with bridge-saved state so
+        # the page-load settings fetch returns a current copy before reconnect.
+        _persist_settings(settings)
 
         via = "bridge" if saved_via_bridge else "local"
         body = json.dumps({"ok": True, "via": via}).encode()
