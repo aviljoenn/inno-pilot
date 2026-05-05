@@ -49,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.1_B83"
+INNOPILOT_VERSION = "v1.3.1_B84"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -65,6 +65,7 @@ SETTINGS_FILE = "/var/lib/inno-pilot/settings.json"
 # ---------------------------------------------------------------------------
 REPO_DIR      = "/home/innopilot/inno-pilot"
 DEPLOY_SCRIPT = "/home/innopilot/inno_deploy.sh"
+OTA_LOG_FILE  = "/var/lib/inno-pilot/ota_log.txt"
 
 _DEFAULT_SETTINGS: dict = {
     "network": {
@@ -1209,6 +1210,11 @@ body{
 .upd-install{background:#0090d0;color:#fff}
 .upd-close{background:#444;color:#ccc}
 .upd-btn:active{opacity:.75}
+/* Terminal log pane inside the update modal */
+.upd-box.terminal{max-width:540px}
+#upd-log{display:none;background:#0a0a0a;color:#00e000;font-family:'Courier New',monospace;
+  font-size:0.70em;padding:10px;border-radius:5px;max-height:320px;overflow-y:auto;
+  white-space:pre-wrap;word-break:break-all;margin-bottom:12px;min-height:80px}
 </style>
 </head>
 <body>
@@ -1569,9 +1575,10 @@ body{
 
 <!-- Software update modal -->
 <div id="upd-overlay" class="upd-overlay">
-  <div class="upd-box">
+  <div class="upd-box" id="upd-box">
     <div class="upd-title">Software Update</div>
     <div id="upd-body" class="upd-body">Checking...</div>
+    <pre id="upd-log"></pre>
     <div class="upd-actions">
       <button class="upd-btn upd-install" id="upd-install">INSTALL</button>
       <button class="upd-btn upd-close"   id="upd-close">CLOSE</button>
@@ -1614,6 +1621,7 @@ var gHdgLastSeen  = Date.now();  // timestamp of last non-null HDG from bridge (
 var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
 var gSettings     = {};    // settings loaded from /settings endpoint
 var gDebugActive  = false; // true when bridge is in DEBUG log level
+var gProgressES   = null;  // EventSource for /update/progress SSE stream
 var gSettingsOpen = false; // true while settings panel is visible
 var gTestOpen     = false; // true while test modal is visible
 var gSelectedTest = null;  // id of test currently shown in detail/results view
@@ -2632,16 +2640,77 @@ function _updInstall() {
     .then(function(d) {
       if (d.error) {
         body.textContent = 'Failed to start update:\\n' + d.error;
+        inst.style.display = '';
       } else {
-        body.textContent = 'Update in progress.\\n\\n'
-          + 'All services are restarting — this page will be\\n'
-          + 'unavailable for approximately 3 minutes.\\n\\n'
-          + 'A Telegram message will be sent when complete.\\n'
-          + 'Reconnect to verify the new version.';
-        document.getElementById('upd-close').textContent = 'OK';
+        _startProgressStream();
       }
     })
     .catch(function(e) { body.textContent = 'Request failed: ' + e; });
+}
+
+// Switch the update modal to terminal view and stream deploy output via SSE.
+// The EventSource sends Last-Event-ID on reconnect so the server resumes from
+// the correct line even after inno-pilot-web-remote is restarted mid-deploy.
+function _startProgressStream() {
+  var logEl   = document.getElementById('upd-log');
+  var body    = document.getElementById('upd-body');
+  var actions = document.querySelector('#upd-overlay .upd-actions');
+  var box     = document.getElementById('upd-box');
+
+  body.style.display    = 'none';
+  actions.style.display = 'none';
+  box.classList.add('terminal');
+  logEl.textContent  = '';
+  logEl.style.display = 'block';
+
+  if (gProgressES) { gProgressES.close(); gProgressES = null; }
+
+  gProgressES = new EventSource('/update/progress');
+
+  gProgressES.onmessage = function(e) {
+    var d;
+    try { d = JSON.parse(e.data); } catch(ex) { return; }
+    if (d.line !== undefined) {
+      logEl.textContent += d.line + '\\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    if (d.done) {
+      gProgressES.close();
+      gProgressES = null;
+      if (d.ok) {
+        logEl.textContent += '\\n>>> Deployment complete.  Waiting for service to restart...\\n';
+      } else {
+        logEl.textContent += '\\n>>> DEPLOYMENT FAILED — check log above.\\n';
+        var closeBtn = document.getElementById('upd-close');
+        closeBtn.textContent = 'CLOSE';
+        actions.style.display = '';
+      }
+      logEl.scrollTop = logEl.scrollHeight;
+      _waitForReconnect();
+    }
+  };
+
+  // onerror fires when the connection drops (service restarting).
+  // The SSE spec auto-retries with Last-Event-ID, so lines resume once
+  // the new service instance is up — no manual reconnect needed.
+  gProgressES.onerror = function() {
+    if (gProgressES && gProgressES.readyState === EventSource.CONNECTING) {
+      logEl.textContent += '[service restarting — reconnecting...]\\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  };
+}
+
+// Poll GET / every 3 s until the restarted web-remote answers, then reload.
+function _waitForReconnect() {
+  setTimeout(function _poll() {
+    fetch('/', {cache: 'no-store'})
+      .then(function(r) {
+        if (r.ok) { window.location.reload(); }
+        else { setTimeout(_poll, 3000); }
+      })
+      .catch(function() { setTimeout(_poll, 3000); });
+  }, 3000);
 }
 
 document.getElementById('sf-check-update').addEventListener('click', function(e) {
@@ -2689,6 +2758,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_settings()
         elif self.path == "/update/check":
             self._handle_update_check()
+        elif self.path == "/update/progress":
+            self._handle_update_progress()
         else:
             self.send_error(404)
 
@@ -3074,6 +3145,14 @@ class _Handler(BaseHTTPRequestHandler):
                  branch, INNOPILOT_VERSION)
         _send_telegram(f"OTA update started — {INNOPILOT_VERSION}")
 
+        # Truncate the log so /update/progress streams a fresh run each time.
+        try:
+            os.makedirs(os.path.dirname(OTA_LOG_FILE), exist_ok=True)
+            with open(OTA_LOG_FILE, "w"):
+                pass
+        except OSError:
+            pass
+
         try:
             # systemd-run creates a transient service in its own cgroup.
             # The web-remote is stopped by the deploy script; this ensures
@@ -3098,6 +3177,73 @@ class _Handler(BaseHTTPRequestHandler):
             log.error("Failed to launch OTA deploy: %s", exc)
             _send_telegram(f"OTA update FAILED to start: {exc}")
             self._send_json(500, {"error": str(exc)})
+
+    # ---- GET /update/progress (SSE) ----
+
+    def _handle_update_progress(self) -> None:
+        """Stream OTA deploy output line-by-line as Server-Sent Events.
+
+        Reads OTA_LOG_FILE and emits each line as a JSON SSE event.  The event
+        ID is the zero-based line number so browsers can resume mid-stream on
+        reconnect (e.g. after the web-remote itself is restarted by the deploy
+        script) by sending Last-Event-ID in the reconnect request.
+
+        Emits a terminal {"done": true, "ok": bool} event when the deploy
+        script writes its exit marker and then closes the connection.
+        """
+        try:
+            last_id = int(self.headers.get("Last-Event-Id", "-1") or "-1")
+            start_line = max(0, last_id + 1)
+        except (ValueError, TypeError):
+            start_line = 0
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        # Send a fast retry so the browser reconnects quickly after a restart.
+        try:
+            self._sse_chunk(b"retry: 2000\n\n")
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
+        sent_up_to = start_line - 1
+        while True:
+            try:
+                with open(OTA_LOG_FILE, "r", errors="replace") as f:
+                    lines = f.read().splitlines()
+            except (FileNotFoundError, OSError):
+                lines = []
+
+            for i in range(max(0, sent_up_to + 1), len(lines)):
+                line = lines[i]
+                payload = json.dumps({"line": line})
+                chunk = f"id: {i}\ndata: {payload}\n\n".encode("utf-8")
+                try:
+                    self._sse_chunk(chunk)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+                sent_up_to = i
+
+                done_marker: Optional[bool] = None
+                if "=== COMPLETE ===" in line:
+                    done_marker = True
+                elif "=== FAILED" in line:
+                    done_marker = False
+
+                if done_marker is not None:
+                    done_payload = json.dumps({"done": True, "ok": done_marker})
+                    done_chunk = f"data: {done_payload}\n\n".encode("utf-8")
+                    try:
+                        self._sse_chunk(done_chunk)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
+                    return
+
+            time.sleep(0.4)
 
     # ---- POST /settings ----
 

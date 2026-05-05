@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.0_B83";
-const uint16_t INNOPILOT_BUILD_NUM = 83;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.0_B84";
+const uint16_t INNOPILOT_BUILD_NUM = 84;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)

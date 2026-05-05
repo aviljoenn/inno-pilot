@@ -38,6 +38,8 @@ TELEGRAM_CONF="/home/innopilot/.pypilot/telegram.conf"
 # Hash of last successfully flashed sketch — used to skip unchanged firmware.
 # Delete this file to force a reflash regardless of source state.
 NANO_HASH_FILE="/var/lib/inno-pilot/nano_sketch.sha256"
+# All deploy output is tee'd here so the web-remote can stream it live to the browser.
+OTA_LOG_FILE="/var/lib/inno-pilot/ota_log.txt"
 # ----------------------------------------------------------
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -136,6 +138,20 @@ esac
 
 # Determine branch
 BRANCH="${1:-$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)}"
+
+# ---------------------------------------------------------------------------
+# OTA log file — pipe all output into OTA_LOG_FILE so the web-remote can
+# stream progress live.  Truncate on a fresh run; skip on self-update re-exec
+# so the re-exec'd instance inherits the already-open tee fd without creating
+# a second tee process or clobbering the log mid-stream.
+# ---------------------------------------------------------------------------
+if [ "${_OTA_REEXEC:-0}" != "1" ]; then
+    mkdir -p "$(dirname "$OTA_LOG_FILE")"
+    > "$OTA_LOG_FILE"
+    exec > >(tee -a "$OTA_LOG_FILE") 2>&1
+fi
+_ota_exit_marker() { [ "$1" -eq 0 ] && echo "=== COMPLETE ===" || echo "=== FAILED (exit $1) ==="; }
+trap '_ota_exit_marker $?' EXIT
 
 # ---------------------------------------------------------------------------
 info "Step 0 — First-run provisioning checks"
@@ -237,6 +253,11 @@ if [[ -f "$REPO_DEPLOY" ]] && ! diff -q "$REPO_DEPLOY" "$SELF" >/dev/null 2>&1; 
     log "Deploy script updated in this pull — relaunching new version ..."
     cp "$REPO_DEPLOY" "$SELF"
     chmod 755 "$SELF"
+    # Disable EXIT trap so this (parent) instance does not write the completion
+    # marker — the re-exec'd instance will write it after its own EXIT.
+    # Export _OTA_REEXEC so the child skips re-truncating and re-opening the log.
+    trap - EXIT
+    export _OTA_REEXEC=1
     exec bash "$SELF" "$@"
 fi
 log "Deploy script is current — continuing."
