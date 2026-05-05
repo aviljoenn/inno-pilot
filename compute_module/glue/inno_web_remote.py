@@ -48,7 +48,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.0_B81"
+INNOPILOT_VERSION = "v1.3.0_B82"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -1563,6 +1563,34 @@ body{
   </div><!-- .tpanel -->
 </div><!-- .tov -->
 
+<!-- Packet-loss warning banner: shown when net_warn is true in SSE state -->
+<div id="net-warn-banner">NETWORK: Packet loss elevated &mdash; check WiFi / router</div>
+
+<!-- Software update modal -->
+<div id="upd-overlay" class="upd-overlay">
+  <div class="upd-box">
+    <div class="upd-title">Software Update</div>
+    <div id="upd-body" class="upd-body">Checking...</div>
+    <div class="upd-actions">
+      <button class="upd-btn upd-install" id="upd-install">INSTALL</button>
+      <button class="upd-btn upd-close"   id="upd-close">CLOSE</button>
+    </div>
+  </div>
+</div>
+
+<!-- Boat-name setup modal: shown on load when vessel.name is not configured -->
+<div id="bnm-overlay" class="bnm-overlay">
+  <div class="bnm-box">
+    <div class="bnm-title">Welcome to Inno-Pilot</div>
+    <div class="bnm-body">Enter your boat name to continue.<br>
+      This identifies your vessel in all notifications.</div>
+    <input class="bnm-inp" type="text" id="bnm-input"
+           placeholder="e.g. Windseeker" maxlength="32" autocomplete="off">
+    <div class="bnm-err" id="bnm-err"></div>
+    <button class="bnm-btn" id="bnm-save">SAVE</button>
+  </div>
+</div>
+
 <script>
 'use strict';
 
@@ -2631,33 +2659,6 @@ setInterval(function() {
 }, 550);
 </script>
 
-<!-- Packet-loss warning banner: shown when net_warn is true in SSE state -->
-<div id="net-warn-banner">NETWORK: Packet loss elevated &mdash; check WiFi / router</div>
-
-<!-- Software update modal -->
-<div id="upd-overlay" class="upd-overlay">
-  <div class="upd-box">
-    <div class="upd-title">Software Update</div>
-    <div id="upd-body" class="upd-body">Checking...</div>
-    <div class="upd-actions">
-      <button class="upd-btn upd-install" id="upd-install">INSTALL</button>
-      <button class="upd-btn upd-close"   id="upd-close">CLOSE</button>
-    </div>
-  </div>
-</div>
-
-<!-- Boat-name setup modal: shown on load when vessel.name is not configured -->
-<div id="bnm-overlay" class="bnm-overlay">
-  <div class="bnm-box">
-    <div class="bnm-title">Welcome to Inno-Pilot</div>
-    <div class="bnm-body">Enter your boat name to continue.<br>
-      This identifies your vessel in all notifications.</div>
-    <input class="bnm-inp" type="text" id="bnm-input"
-           placeholder="e.g. Windseeker" maxlength="32" autocomplete="off">
-    <div class="bnm-err" id="bnm-err"></div>
-    <button class="bnm-btn" id="bnm-save">SAVE</button>
-  </div>
-</div>
 </body>
 </html>""".replace("$$WHEEL_SVG$$", _WHEEL_SVG)
 
