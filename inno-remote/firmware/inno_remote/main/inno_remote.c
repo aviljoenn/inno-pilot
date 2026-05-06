@@ -16,9 +16,36 @@
 #include "u8g2_esp32_hal.h"
 
 #include "wifi_status.h"
+#include "tcp_client.h"
+#include "ota_update.h"
 #include <stdarg.h>
+#include "esp_task_wdt.h"
 
 static const char *TAG = "INNO_REMOTE";
+
+// ---- Bridge telemetry (written from TCP rx callback, read in main loop) ----
+static volatile bool     g_bridge_ap          = false;
+static volatile int      g_bridge_hdg         = 0;     // degrees 0-359
+static volatile int      g_bridge_cmd         = 0;     // degrees 0-359
+static volatile float    g_bridge_rdr         = 0.0f;  // signed degrees
+static volatile int      g_bridge_rdr_pct     = 50;    // 0-100 (50 = centre)
+static volatile uint32_t g_bridge_flags       = 0;
+static volatile bool     g_warn_ap_pressed    = false;
+static volatile uint32_t g_warn_ap_pressed_ms = 0;
+static char              g_bridge_mode[16]    = "IDLE";
+static volatile int      g_bridge_hz          = 0;     // ratify loop Hz from Nano (0 = not in ratify)
+static portMUX_TYPE      g_bridge_mux         = portMUX_INITIALIZER_UNLOCKED;
+
+// Nano comms fault state forwarded by bridge (written from TCP rx callback, read in main loop)
+typedef enum { BRIDGE_COMMS_OK = 0, BRIDGE_COMMS_WARN = 1, BRIDGE_COMMS_CRIT = 2 } bridge_comms_t;
+static volatile bridge_comms_t g_bridge_comms = BRIDGE_COMMS_OK;
+
+// OTA update state (written from TCP rx callback, consumed by main loop)
+static volatile bool g_version_mismatch = false;  // set by HELLO handler
+static char          g_ota_url[72]      = "";      // set by OTA handler; empty = no update pending
+
+// ---- Inno-Pilot version (must match bridge + Nano firmware) ----
+#define INNOPILOT_VERSION "v1.2.0_B26"
 
 // ========================
 // OLED PINS (as built)
@@ -37,6 +64,7 @@ static const char *TAG = "INNO_REMOTE";
 #define PIN_ESTOP          3    // active-low STOP
 #define PIN_ADC_LADDER     0    // ADC ladder sense
 #define PIN_ADC_POT        1    // ADC pot wiper
+#define PIN_BUZZER         8    // Buzzer / NPN transistor drive (active-high)
 
 // ADC channels for ESP32-C3 (GPIO0=CH0, GPIO1=CH1)
 #define ADC_UNIT_USED      ADC_UNIT_1
@@ -49,6 +77,10 @@ static const char *TAG = "INNO_REMOTE";
 // Button responsiveness
 #define LOOP_MS             20
 #define BUTTON_DEBOUNCE_MS  15
+
+// Pot FIFO moving-average depth.  8 slots × 20 ms loop = 160 ms window,
+// ~40 ms group delay — smooth yet responsive for manual rudder control.
+#define POT_FIFO_SIZE       8
 
 // Rudder limits (demo)
 #define MAX_RUDDER_DEG      40.0f
@@ -100,11 +132,51 @@ static void init_adc(void)
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CH_POT, &chan_cfg));
 }
 
+static void init_buzzer(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << PIN_BUZZER),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+    gpio_set_level(PIN_BUZZER, 0);  // off on startup
+}
+
 static int adc_read_raw(adc_channel_t ch)
 {
     int raw = 0;
     if (adc_oneshot_read(adc_handle, ch, &raw) != ESP_OK) return -1;
     return raw;
+}
+
+// Trimmed-mean read: two dummy reads to settle the SAR input after any channel
+// switch, then n_samples real reads.  Drops the single highest and lowest
+// values, returns the integer mean of the remaining (n_samples - 2) readings.
+// Returns -1 if there are not enough valid samples.
+// n_samples must be >= 3.
+static int adc_read_trimmed(adc_channel_t ch, int n_samples)
+{
+    // Settle ADC input after any preceding channel read.
+    int dummy;
+    adc_oneshot_read(adc_handle, ch, &dummy);
+    adc_oneshot_read(adc_handle, ch, &dummy);
+
+    int min_val = 5000, max_val = -1;
+    int32_t sum = 0;
+    int good    = 0;
+    for (int i = 0; i < n_samples; i++) {
+        int raw = 0;
+        if (adc_oneshot_read(adc_handle, ch, &raw) != ESP_OK) continue;
+        if (raw < min_val) min_val = raw;
+        if (raw > max_val) max_val = raw;
+        sum += raw;
+        good++;
+    }
+    if (good < 3) return -1;
+    return (int)((sum - min_val - max_val) / (good - 2));
 }
 
 static void init_oled_u8g2(void)
@@ -551,6 +623,70 @@ static int log_max_len(void)
     return maxlen;
 }
 
+// ------------------------------ Bridge RX callback -------------------------
+
+static void on_bridge_rx(const char *line)
+{
+    if      (strncmp(line, "AP ", 3) == 0) {
+        g_bridge_ap = (line[3] == '1');
+    } else if (strncmp(line, "HDG ", 4) == 0) {
+        g_bridge_hdg = (int)strtol(line + 4, NULL, 10);
+    } else if (strncmp(line, "CMD ", 4) == 0) {
+        g_bridge_cmd = (int)strtol(line + 4, NULL, 10);
+    } else if (strncmp(line, "RDR_PCT ", 8) == 0) {
+        g_bridge_rdr_pct = (int)strtol(line + 8, NULL, 10);
+    } else if (strncmp(line, "RDR ", 4) == 0) {
+        g_bridge_rdr = strtof(line + 4, NULL);
+    } else if (strncmp(line, "FLAGS ", 6) == 0) {
+        g_bridge_flags = (uint32_t)strtoul(line + 6, NULL, 10);
+    } else if (strncmp(line, "HZ ", 3) == 0) {
+        g_bridge_hz = (int)strtol(line + 3, NULL, 10);
+    } else if (strncmp(line, "MODE ", 5) == 0) {
+        portENTER_CRITICAL(&g_bridge_mux);
+        strncpy(g_bridge_mode, line + 5, sizeof(g_bridge_mode) - 1);
+        g_bridge_mode[sizeof(g_bridge_mode) - 1] = '\0';
+        portEXIT_CRITICAL(&g_bridge_mux);
+        // Clear Hz when leaving MANUAL — Nano stops sending HZ frames in other modes
+        if (strcmp(line + 5, "MANUAL") != 0) g_bridge_hz = 0;
+    } else if (strcmp(line, "WARN AP_PRESSED") == 0) {
+        g_warn_ap_pressed    = true;
+        g_warn_ap_pressed_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    } else if (strncmp(line, "COMMS ", 6) == 0) {
+        bridge_comms_t cs = BRIDGE_COMMS_OK;
+        if      (strncmp(line + 6, "WARN", 4) == 0) cs = BRIDGE_COMMS_WARN;
+        else if (strcmp (line + 6, "CRIT")    == 0) cs = BRIDGE_COMMS_CRIT;
+        portENTER_CRITICAL(&g_bridge_mux);
+        g_bridge_comms = cs;
+        portEXIT_CRITICAL(&g_bridge_mux);
+    } else if (strncmp(line, "HELLO ", 6) == 0) {
+        bool mismatch = (strcmp(line + 6, INNOPILOT_VERSION) != 0);
+        if (mismatch) {
+            ESP_LOGW(TAG, "Version mismatch: remote=%s bridge=%s",
+                     INNOPILOT_VERSION, line + 6);
+        }
+        g_version_mismatch = mismatch;
+    } else if (strncmp(line, "OTA ", 4) == 0) {
+        // Only accept OTA offer when a version mismatch has been confirmed by HELLO
+        if (g_version_mismatch) {
+            strlcpy(g_ota_url, line + 4, sizeof(g_ota_url));
+            ESP_LOGI(TAG, "OTA update pending: %s", g_ota_url);
+        }
+    }
+    // PONG is silently accepted (keepalive ack)
+}
+
+// ------------------------------ TCP connect callback -----------------------
+
+// Called from tcp_client_task immediately after each new connection is established.
+// Sends our version string so the bridge can detect firmware mismatches early.
+static void on_tcp_connect(void)
+{
+    char hello[40];
+    snprintf(hello, sizeof(hello), "HELLO %s", INNOPILOT_VERSION);
+    tcp_client_send(hello);
+    ESP_LOGI(TAG, "TCP connected: sent %s", hello);
+}
+
 // ------------------------------ Main ---------------------------------------
 
 void app_main(void)
@@ -560,9 +696,40 @@ void app_main(void)
     bool demo_mode = demo_mode_boot_check();
     ESP_LOGI(TAG, "Boot mode: %s", demo_mode ? "DEMO" : "NORMAL");
     init_adc();
+    init_buzzer();
     init_oled_u8g2();
 
     wifi_sta_start();
+
+    // Start TCP client (connects to bridge when Wi-Fi is up)
+    if (!demo_mode) {
+        tcp_client_set_rx_callback(on_bridge_rx);
+        tcp_client_set_connect_callback(on_tcp_connect);
+        tcp_client_start();
+    }
+
+    // Enable task watchdog — 10 s timeout, fed every 20 ms main loop iteration.
+    // Guards against I2C/SPI lockup or unexpected main-loop hang.
+    // Fully self-contained: initialises the TWDT from code if sdkconfig hasn't
+    // already done so, so no manual idf.py menuconfig / fullclean step is needed.
+    {
+        const esp_task_wdt_config_t twdt_cfg = {
+            .timeout_ms     = 10000,  // 10 s
+            .idle_core_mask = 0,      // do not watch idle tasks
+            .trigger_panic  = true,   // reboot on timeout
+        };
+        // Reconfigure if already initialised from sdkconfig; otherwise init fresh.
+        esp_err_t wdt_err = esp_task_wdt_reconfigure(&twdt_cfg);
+        if (wdt_err == ESP_ERR_INVALID_STATE) {
+            wdt_err = esp_task_wdt_init(&twdt_cfg);
+        }
+        if (wdt_err == ESP_OK) {
+            wdt_err = esp_task_wdt_add(NULL);
+        }
+        if (wdt_err != ESP_OK) {
+            ESP_LOGW(TAG, "Task WDT setup failed (0x%x) — watchdog disabled", wdt_err);
+        }
+    }
 
     // ===== Log View state =====
     bool log_view = false;
@@ -606,9 +773,13 @@ void app_main(void)
     float ladder_idle = 0.0f;
     bool  ladder_idle_init = false;
 
-    float pot_filt = 0.0f;
-    bool  pot_init = false;
-    float pot_last = 0.0f;
+    // Pot FIFO state (Stage 1: adc_read_trimmed, Stage 2: sliding window MA)
+    int  pot_fifo[POT_FIFO_SIZE];
+    int  pot_fifo_sum   = 0;
+    int  pot_fifo_idx   = 0;
+    bool pot_fifo_ready = false;
+    int  pot_smooth     = 0;   // current FIFO average (replaces pot_filt)
+    int  pot_last       = 0;   // previous FIFO average (for change detection)
 
     // Debounce
     btn_t candidate_btn = BTN_NONE;
@@ -621,12 +792,40 @@ void app_main(void)
 
     // Mode transition tracking
     bool prev_manual = false;
+    bool prev_auto   = false;
 
+    // Rudder TCP send throttle (MANUAL mode only)
+    float    last_rud_pct_sent = 50.0f;
+    uint32_t last_rud_send_ms  = 0;
+
+    ESP_LOGI(TAG, "Inno-Pilot Remote %s", INNOPILOT_VERSION);
     ESP_LOGI(TAG, "UI start (debounce=%dms, loop=%dms)", BUTTON_DEBOUNCE_MS, LOOP_MS);
 
     const float dt = (float)LOOP_MS / 1000.0f;
 
+    // TCP connection state tracking (detects mid-session disconnects)
+    bool prev_tcp_connected = false;
+
+    // Buzzer state machine.
+    // Priority: BUZZ_ESTOP (3) > BUZZ_BRIDGE_LOST (2) > BUZZ_COMMS_CRIT (1) > BUZZ_NONE (0)
+    // Higher-priority patterns only start if nothing of equal or higher priority is running.
+    typedef enum {
+        BUZZ_NONE        = 0,  // silent
+        BUZZ_COMMS_CRIT  = 1,  // continuous 500ms on/off while COMMS CRIT active
+        BUZZ_BRIDGE_LOST = 2,  // one-shot triple-pulse on TCP mid-session loss
+        BUZZ_ESTOP       = 3,  // one-shot double-beep on ESTOP press
+    } buzz_pat_t;
+    buzz_pat_t buzz_pat  = BUZZ_NONE;
+    int        buzz_tick = 0;
+
     while (1) {
+        esp_task_wdt_reset();
+
+        // Track TCP connection state for this iteration
+        bool tcp_connected = (!demo_mode && tcp_client_is_connected());
+        bool tcp_just_lost  = (prev_tcp_connected && !tcp_connected);
+        prev_tcp_connected  = tcp_connected;
+
         bool auto_low   = (gpio_get_level(PIN_MODE_AUTO) == 0);
         bool manual_low = (gpio_get_level(PIN_MODE_MANUAL) == 0);
         bool in_auto    = mode_is_auto(auto_low, manual_low);
@@ -635,19 +834,40 @@ void app_main(void)
         stop_on = (gpio_get_level(PIN_ESTOP) == 0);
 
         int raw_ladder = adc_read_raw(ADC_CH_LADDER);
-        int raw_pot    = adc_read_raw(ADC_CH_POT);
 
+        // Stage 1: 2 dummy + 6 real reads, trim min/max, average 4 → one clean value.
+        // Stage 2: 8-slot FIFO moving average (O(1) running sum).
+        // Combined: σ / (√4 × √8) = σ / 5.7.  ~40 ms group delay at 20 ms loop.
+        int raw_pot = adc_read_trimmed(ADC_CH_POT, 6);
         if (raw_pot >= 0) {
-            if (!pot_init) { pot_filt = (float)raw_pot; pot_last = pot_filt; pot_init = true; }
-            pot_filt = pot_filt + 0.35f * ((float)raw_pot - pot_filt);
+            if (!pot_fifo_ready) {
+                // Pre-fill for instant valid output on first read.
+                for (int i = 0; i < POT_FIFO_SIZE; i++) pot_fifo[i] = raw_pot;
+                pot_fifo_sum   = raw_pot * POT_FIFO_SIZE;
+                pot_fifo_idx   = 0;
+                pot_fifo_ready = true;
+            } else {
+                pot_fifo_sum           -= pot_fifo[pot_fifo_idx];
+                pot_fifo[pot_fifo_idx]  = raw_pot;
+                pot_fifo_sum           += raw_pot;
+                pot_fifo_idx = (pot_fifo_idx + 1) % POT_FIFO_SIZE;
+            }
+            pot_smooth = pot_fifo_sum / POT_FIFO_SIZE;
         }
 
-        // Mode transition into manual: seed jog from current rudder
+        // Mode transition into manual: seed jog from current rudder; notify bridge
         if (in_manual && !prev_manual) {
             manual_rudder_deg = rudder_deg;
             manual_using_jog = false;
+            last_rud_send_ms  = 0;  // force immediate rudder send on entry
+            if (!demo_mode) tcp_client_send("MODE MANUAL");
+        }
+        // Mode transition out of manual (back to auto or neither): notify bridge
+        if (!in_manual && prev_manual) {
+            if (!demo_mode) tcp_client_send("MODE AUTO");
         }
         prev_manual = in_manual;
+        prev_auto   = in_auto;
 
         // Safety/state rules
         if (in_manual || (!in_auto && !in_manual) || stop_on) {
@@ -691,6 +911,22 @@ void app_main(void)
         prev_stop_on = stop_on;
         if (log_ignore_stop_until_release && stop_edge_release) {
             log_ignore_stop_until_release = false;
+        }
+
+        // ESTOP: send to bridge on every STOP press (safety — always, even for log view entry)
+        if (stop_edge_press && !demo_mode) {
+            tcp_client_send("ESTOP");
+        }
+
+        // Buzzer: one-shot double-beep on every ESTOP press (highest priority)
+        if (stop_edge_press && buzz_pat < BUZZ_ESTOP) {
+            buzz_pat  = BUZZ_ESTOP;
+            buzz_tick = 0;
+        }
+        // Buzzer: one-shot alarm when TCP drops after having been connected
+        if (tcp_just_lost && buzz_pat < BUZZ_BRIDGE_LOST) {
+            buzz_pat  = BUZZ_BRIDGE_LOST;
+            buzz_tick = 0;
         }
 
         // ===== Enter Log View: STOP tapped 5x within 4s window =====
@@ -853,12 +1089,13 @@ void app_main(void)
                 if (in_auto) {
                     if (stable_btn == BTN_3) {
                         ap_on = !ap_on;
+                        if (!demo_mode) tcp_client_send("BTN TOGGLE");
                     } else {
                         switch (stable_btn) {
-                            case BTN_1: command_deg = wrap360(command_deg - 10); break;
-                            case BTN_2: command_deg = wrap360(command_deg - 1);  break;
-                            case BTN_4: command_deg = wrap360(command_deg + 1);  break;
-                            case BTN_5: command_deg = wrap360(command_deg + 10); break;
+                            case BTN_1: command_deg = wrap360(command_deg - 10); if (!demo_mode) tcp_client_send("BTN -10"); break;
+                            case BTN_2: command_deg = wrap360(command_deg - 1);  if (!demo_mode) tcp_client_send("BTN -1");  break;
+                            case BTN_4: command_deg = wrap360(command_deg + 1);  if (!demo_mode) tcp_client_send("BTN +1");  break;
+                            case BTN_5: command_deg = wrap360(command_deg + 10); if (!demo_mode) tcp_client_send("BTN +10"); break;
                             default: break;
                         }
                     }
@@ -898,13 +1135,13 @@ void app_main(void)
                     rudder_target_deg = 0.0f;
                 }
             } else if (in_manual) {
-                if (pot_init) {
-                    float pot_deg = ((pot_filt / 4095.0f) * 2.0f - 1.0f) * MAX_RUDDER_DEG;
+                if (pot_fifo_ready) {
+                    float pot_deg = ((pot_smooth / 4095.0f) * 2.0f - 1.0f) * MAX_RUDDER_DEG;
 
-                    if (fabsf(pot_filt - pot_last) > 35.0f) {
+                    if (abs(pot_smooth - pot_last) > 35) {
                         manual_using_jog = false;
                     }
-                    pot_last = pot_filt;
+                    pot_last = pot_smooth;
 
                     if (!manual_using_jog) {
                         manual_rudder_deg = pot_deg;
@@ -915,6 +1152,24 @@ void app_main(void)
                 if (manual_rudder_deg < -MAX_RUDDER_DEG) manual_rudder_deg = -MAX_RUDDER_DEG;
 
                 rudder_target_deg = manual_rudder_deg;
+
+                // Send rudder target to bridge (throttled: change > 1% or every 200ms)
+                if (!demo_mode && pot_fifo_ready) {
+                    float rud_pct = (pot_smooth / 4095.0f) * 100.0f;
+                    if (rud_pct < 0.0f) rud_pct = 0.0f;
+                    if (rud_pct > 100.0f) rud_pct = 100.0f;
+
+                    float rud_change = fabsf(rud_pct - last_rud_pct_sent);
+                    bool time_ok = (now_ms - last_rud_send_ms) >= 200 || last_rud_send_ms == 0;
+
+                    if (rud_change >= 1.0f || time_ok) {
+                        char rud_line[24];
+                        snprintf(rud_line, sizeof(rud_line), "RUD %.1f", (double)rud_pct);
+                        tcp_client_send(rud_line);
+                        last_rud_pct_sent = rud_pct;
+                        last_rud_send_ms  = now_ms;
+                    }
+                }
             } else {
                 rudder_target_deg = 0.0f;
             }
@@ -942,6 +1197,119 @@ void app_main(void)
             }
         }
 
+        // When connected to bridge, override local sim values with real telemetry
+        if (tcp_connected) {
+            head_deg    = wrap360f((float)g_bridge_hdg);
+            command_deg = wrap360(g_bridge_cmd);
+            ap_on       = g_bridge_ap;
+            rudder_deg  = g_bridge_rdr;
+        }
+
+        // Buzzer: continuous slow beep while COMMS CRIT (lowest priority — only start if idle)
+        {
+            bridge_comms_t comms_now = g_bridge_comms;
+            if (comms_now == BRIDGE_COMMS_CRIT) {
+                if (buzz_pat == BUZZ_NONE) {
+                    buzz_pat  = BUZZ_COMMS_CRIT;
+                    buzz_tick = 0;
+                }
+            } else if (buzz_pat == BUZZ_COMMS_CRIT) {
+                // Comms recovered — stop the continuous alarm
+                buzz_pat  = BUZZ_NONE;
+                buzz_tick = 0;
+            }
+        }
+
+        // Expire AP_PRESSED warning after 5s
+        {
+            uint32_t now_warn = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            if (g_warn_ap_pressed && (now_warn - g_warn_ap_pressed_ms) >= 5000) {
+                g_warn_ap_pressed = false;
+            }
+        }
+
+        // ---- Buzzer output (executes every loop iteration, before UI) ----
+        {
+            bool buz = false;
+            switch (buzz_pat) {
+            case BUZZ_ESTOP:
+                // Double-beep: 100 ms on | 60 ms off | 100 ms on | done
+                if      (buzz_tick < 5)  buz = true;   // 0-4   (100 ms on)
+                else if (buzz_tick < 8)  buz = false;  // 5-7   ( 60 ms off)
+                else if (buzz_tick < 13) buz = true;   // 8-12  (100 ms on)
+                else { buzz_pat = BUZZ_NONE; buzz_tick = 0; }
+                buzz_tick++;
+                break;
+            case BUZZ_BRIDGE_LOST:
+                // Triple short pulse: [80 ms on | 60 ms off] × 3, then done
+                { int p = buzz_tick % 7; buz = (p < 4); }
+                if (buzz_tick >= 21) { buzz_pat = BUZZ_NONE; buzz_tick = 0; }
+                buzz_tick++;
+                break;
+            case BUZZ_COMMS_CRIT:
+                // Slow beep: 500 ms on / 500 ms off  (25 ticks each @ 20 ms/tick)
+                buz = ((buzz_tick % 50) < 25);
+                if (++buzz_tick >= 50000) buzz_tick = 0;   // prevent tick overflow
+                break;
+            case BUZZ_NONE:
+            default:
+                buz = false;
+                break;
+            }
+            gpio_set_level(PIN_BUZZER, buz ? 1 : 0);
+        }
+
+        // ---- Connecting screen (normal mode only, bridge not yet reachable) ----
+        // Never display simulated values — the instrument display is only shown
+        // when live bridge telemetry is available (or in explicit demo mode).
+        if (!demo_mode && !tcp_connected) {
+            u8g2_ClearBuffer(&u8g2);
+            draw_title_centered("Inno-Remote", 9);
+            draw_centered_line_6x10("NO BRIDGE", 30);
+            draw_centered_line_6x10("Connecting...", 42);
+            draw_stop_snug(54, stop_on);
+            u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+            u8g2_DrawStr(&u8g2, 0, 64, INNOPILOT_VERSION);
+            draw_wifi_icon_top_right();
+            u8g2_SendBuffer(&u8g2);
+            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            continue;
+        }
+
+        // ---- OTA update (triggered by bridge HELLO mismatch + OTA URL) ----
+        // g_ota_url is written from the TCP rx callback; consume and act here so
+        // we can drive the OLED and safely unregister from the task watchdog.
+        if (g_ota_url[0] != '\0') {
+            char url_copy[72];
+            strlcpy(url_copy, g_ota_url, sizeof(url_copy));
+            g_ota_url[0] = '\0';  // consume so we don't loop on failure
+
+            u8g2_ClearBuffer(&u8g2);
+            draw_title_centered("Inno-Remote", 9);
+            draw_centered_line_6x10("OTA UPDATE", 28);
+            draw_centered_line_6x10("Updating...", 40);
+            u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+            u8g2_DrawStr(&u8g2, 0, 64, INNOPILOT_VERSION);
+            u8g2_SendBuffer(&u8g2);
+
+            // OTA download can take several seconds — unregister from watchdog
+            // so the 10 s timeout does not fire during the transfer.
+            esp_task_wdt_delete(NULL);
+
+            esp_err_t ota_err = ota_update_from_url(url_copy);
+            // Only reached on failure (success reboots inside ota_update_from_url)
+            ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ota_err));
+
+            esp_task_wdt_add(NULL);  // re-register for normal operation
+            u8g2_ClearBuffer(&u8g2);
+            draw_title_centered("Inno-Remote", 9);
+            draw_centered_line_6x10("OTA FAILED", 28);
+            draw_centered_line_6x10("Check bridge", 40);
+            u8g2_SendBuffer(&u8g2);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            continue;
+        }
+
         // ---------------- UI DRAW (line order fixed) ----------------
         const int Y_TITLE_BASE = 9;
 
@@ -959,16 +1327,33 @@ void app_main(void)
         u8g2_ClearBuffer(&u8g2);
 
         // Line 1
-        draw_title_centered(demo_mode ? "DEMO-Mode" : "Inno-Remote", Y_TITLE_BASE);
+        {
+            draw_title_centered(demo_mode ? "DEMO" : "Inno-Remote", Y_TITLE_BASE);
+        }
 
         // Line 2 (rudder graph)
         float rudder_norm_ui = rudder_deg / MAX_RUDDER_DEG;
         draw_rudder_bar(0, Y_BAR_TOP, SCREEN_W, H_BAR, rudder_norm_ui);
 
-        // Line 3 (MODE centered)
-        char mode_line[24];
-        snprintf(mode_line, sizeof(mode_line), "MODE: %s", mode_str(auto_low, manual_low));
-        draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        // Line 3 (MODE centered; warn/fault overlays in priority order)
+        // Priority: AP_PRESSED > COMMS_CRIT > COMMS_WARN (appended) > normal
+        char mode_line[32];
+        bridge_comms_t comms_disp = g_bridge_comms;
+        if (g_warn_ap_pressed) {
+            draw_centered_line_6x10("?AP Rejected?", Y_MODE_BASE);
+        } else if (comms_disp == BRIDGE_COMMS_CRIT) {
+            draw_centered_line_6x10("!COMMS FAULT!", Y_MODE_BASE);
+        } else if (comms_disp == BRIDGE_COMMS_WARN) {
+            snprintf(mode_line, sizeof(mode_line), "MODE: %s [W]", mode_str(auto_low, manual_low));
+            draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        } else if (in_manual && g_bridge_hz > 0) {
+            snprintf(mode_line, sizeof(mode_line), "MODE: %s %dHz",
+                     mode_str(auto_low, manual_low), g_bridge_hz);
+            draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        } else {
+            snprintf(mode_line, sizeof(mode_line), "MODE: %s", mode_str(auto_low, manual_low));
+            draw_centered_line_6x10(mode_line, Y_MODE_BASE);
+        }
 
         // Line 4 (Head/Cmnd or Head/POT)
         int head_disp = wrap360((int)lroundf(head_deg));
@@ -1019,6 +1404,10 @@ void app_main(void)
 
         // Line 6 (STOP snug)
         draw_stop_snug(Y_STOP_TOP, stop_on);
+
+        // Version label bottom-left
+        u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+        u8g2_DrawStr(&u8g2, 0, 64, INNOPILOT_VERSION);
 
         draw_wifi_icon_top_right();
         u8g2_SendBuffer(&u8g2);

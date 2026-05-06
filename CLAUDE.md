@@ -12,7 +12,7 @@ Audience: Claude Code (and other AI coding agents) working in this repository.
 ### Comments
 - **Do NOT remove existing Python comments** unless they are wrong or dangerously misleading.
 - If a comment must change: prefer **fixing** it (or expanding it) rather than deleting it.
-- Adding comments to improve human readability is welcome. Keep them practical.
+- Adding comments to improve human readability is mandatory. Keep them practical.
 
 ### Python
 - Prefer **clear, explicit code** over cleverness.
@@ -27,7 +27,9 @@ Audience: Claude Code (and other AI coding agents) working in this repository.
 - If touching IO pins, power, ADC scaling, or interrupts: **explain assumptions** in the PR.
 
 ### Testing of code
-- Testing for code is considered done if the code compiles without errors.
+- Code must be compiled, started and executed at the least.
+- Attempt must be made to automatically simulate user inputs where possible.
+- If automatically simulating user inputs is not possible, the user must be guided and prompted on what to do to complete testing.
 
 ---
 
@@ -44,6 +46,7 @@ A PR is "done" when it includes:
 - A clear summary + rationale
 - Tests/build steps run (or why not)
 - Any new/changed docs needed (README/docs)
+- Release notes updated
 
 ---
 
@@ -80,9 +83,15 @@ Before adding new tooling, check what the repo already uses:
 
 **Rule:** If you can't build firmware due to missing toolchain/board config, state that clearly in the PR and keep changes conservative.
 
-> **Pi Zero (192.168.6.13):** `arduino-cli` (v1.4.0) is installed at `/usr/local/bin/arduino-cli`
+> **Facts about the Inno-Pilot Raspberry Pi** 
+> Every Inno-Pilot constructed may use different hardware types, E.g. Pi5, Pi Zero, Arduino nano, Pi Pico etc.
+> Every Inno-Pilot constructed may be on different IP subnets with different IP addresses
+> `arduino-cli` is installed at `/usr/local/bin/arduino-cli`
 > with the `arduino:avr` core. The Nano is on `/dev/ttyUSB0`.
-> Flash command: `arduino-cli compile --fqbn arduino:avr:nano . && arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
+> Compile: `arduino-cli compile --fqbn arduino:avr:nano --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .`
+> Upload:  `arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
+> The `SERIAL_RX_BUFFER_SIZE=128` flag is **required** — the default 64-byte buffer overflows
+> during bridge telemetry bursts while the OLED I2C draw blocks `loop()`.
 > Stop `inno-pilot-bridge`, `inno-pilot-socat`, `pypilot` services before flashing; restart after.
 
 ---
@@ -94,6 +103,7 @@ When asked to implement something:
 3) Update docs/comments where it prevents future mistakes.
 4) Run the best available checks/tests.
 5) Open PR with a high-signal description.
+6) Check all components of inno-remote that might be versioned, like the nano sketch, the bridge, updated OTA binary that also lands at /var/lib/inno-pilot/ota/ on the Pi, inno-remote and inno-web-remote. Keep the version numbers of all those components in sync and push/flash the same version number to all components.
 
 ---
 
@@ -106,10 +116,6 @@ When asked to implement something:
 
 **How**
 - Key implementation notes (include hardware assumptions if any)
-
-**Verification**
-- Commands run + results
-- If not run: explain why + risk
 
 **Notes / Follow-ups**
 - Any TODOs, edge cases, or recommended next steps
@@ -124,6 +130,95 @@ If changes touch any of the following, add a dedicated "Hardware impact" section
 - Power control, relays, motors, H-bridges
 - Interrupts, watchdogs, real-time loops
 - Serial/I2C/SPI protocol timing
+
+---
+
+## Known hardware gotcha: Nano reset via HUPCL
+
+**The Arduino Nano resets whenever `/dev/ttyUSB0` is closed by any process.**
+
+The Nano's RESET pin is wired to DTR through a 100 nF RC differentiator (standard
+Arduino Uno/Nano design). Linux serial ports have the HUPCL flag set by default,
+which drops DTR whenever the file descriptor is closed — even if `dtr=False` was
+set while the port was open.
+
+**Symptoms:** Nano shows high CRC error counts, bridge receives zero bytes from Nano
+after any process closes the port (including a previous bridge instance, a flash
+tool, or `stty`). The Nano is stuck in its `setup()` splash delay (~3 s) and can't
+communicate.
+
+**Fix already in place:** `open_serial_no_reset()` in `inno_pilot_bridge.py` clears
+HUPCL via `termios.tcsetattr` immediately after opening the port.
+
+**If you ever add a new tool that opens `/dev/ttyUSB0`** (diagnostic scripts,
+sniffers, etc.), either:
+1. Run `stty -F /dev/ttyUSB0 -hupcl` before closing, **or**
+2. Open with `pyserial` and apply the same `termios` fix, **or**
+3. Accept that the Nano will reset and allow ≥ 5 s before expecting frames.
+
+---
+
+---
+
+## Known install issue: pypilot_client.conf stale IP after fresh install
+
+After installing pypilot on a Pi that was previously connected to another pypilot
+instance (or moved to a different network), `~/.pypilot/pypilot_client.conf` may
+contain a stale IP address.  pypilot will then try to connect to the wrong host
+instead of its own local instance.
+
+**Symptom:** pypilot log shows connection attempts to an IP that is not this Pi.
+OTA server unreachable because the bridge also picked up the wrong host from a
+similar config.
+
+**Fix:**
+```bash
+echo '{"host":"127.0.0.1","port":23322}' > ~/.pypilot/pypilot_client.conf
+sudo systemctl restart pypilot
+```
+
+This file is auto-generated by pypilot's zeroconf discovery and will be overwritten
+again if zeroconf finds a remote pypilot.  After a fresh install, always check and
+reset it before the first reboot.
+
+The OTA server host in the bridge was separately fixed (auto-detected via
+`_local_ip()`) and no longer depends on this file.
+
+---
+
+## Known outstanding issue: pypilot EBUSY on /dev/ttyINNOPILOT (PTY)
+
+pypilot's servo subprocess cannot open `/dev/ttyINNOPILOT` (errno 16, EBUSY) after
+the bridge or pypilot restarts.
+
+**Root cause (diagnosed, not yet fixed):** socat holds the master side of the PTY
+pair open continuously.  When any process sets `TIOCEXCL` (exclusive mode) on the
+slave PTY and then closes it, the exclusive flag persists on the device as long as
+socat holds the master open.  pypilot's servo subprocess retries the open in a loop
+and never succeeds until the service is restarted.
+
+**Impact:** The autopilot servo is not connected to pypilot's control loop after a
+bridge restart without a full service restart.
+
+**Workaround:** `sudo systemctl restart pypilot inno-pilot-bridge inno-pilot-socat`
+followed by ~5 s wait.  A full system reboot also clears the condition.
+
+**Status:** Unresolved.  The fix likely requires either (a) not setting TIOCEXCL on
+the slave PTY, or (b) having socat recreate the PTY pair on restart.
+
+---
+
+## Known issue: pypilot_web Flask 2.3+ incompatibility (fixed in source)
+
+`flask.Markup` was removed in Flask 2.3 and moved to `markupsafe`.  On Raspberry Pi
+OS Bookworm (Flask 3.x), the original `web/web.py` crashes with:
+```
+ImportError: cannot import name 'Markup' from 'flask'
+```
+**Fix is in the source** (`compute_module/pypilot/web/web.py`) with a try/except
+import guard.  When deploying to a new Pi, run `setup.py install` from the repo so
+the fixed file is used.  If you install pypilot from upstream (not the inno-pilot
+fork), you will need to patch `web/web.py` manually.
 
 ---
 

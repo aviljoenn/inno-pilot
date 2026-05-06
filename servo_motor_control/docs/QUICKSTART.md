@@ -116,7 +116,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=aviljoen
+User=innopilot
 ExecStart=/usr/bin/python3 /usr/local/bin/pypilot
 Restart=always
 RestartSec=2
@@ -135,7 +135,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=aviljoen
+User=innopilot
 ExecStart=/usr/bin/python3 /usr/local/bin/pypilot_web
 Restart=always
 RestartSec=2

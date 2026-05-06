@@ -30,6 +30,7 @@ Role:
 - interfaces to IMU (LSM9DS1 over I2C)
 - interfaces to the servo controller (Arduino Nano over USB serial)
 - hosts “glue” processes (bridge + PTY plumbing)
+- hosts TCP server (port 8555) for wireless remote connection
 
 Operating requirements:
 - can run **offline** (no Wi-Fi) and still steer in compass mode
@@ -44,7 +45,17 @@ Role:
 - handles **local buttons**, OLED, and buzzer
 - implements basic hard-stop safety at pot extremes (last-ditch protection)
 
-### 3) Central navigation computer (optional)
+### 3) Wireless remote (ESP32-C3)
+Role:
+- handheld cockpit control via Wi-Fi TCP (port 8555)
+- AP engage/disengage and heading ±1°/±10° buttons
+- physical 3-position mode switch (AP / OFF / MANUAL)
+- manual rudder potentiometer (drives motor directly in MANUAL mode)
+- emergency STOP button
+- OLED display with heading, rudder bar, mode, and warning overlays
+- receives bridge telemetry at ~1Hz (heading, rudder, AP state, faults, warnings)
+
+### 4) Central navigation computer (optional)
 Example in this build:
 - `lysmarine` box hosts **SignalK + OpenCPN**
 - autopilot subscribes to GPS/routes/wind/etc when enabled
@@ -71,11 +82,16 @@ We want:
 - **pypilot <-> Nano protocol** to stay unchanged (for compatibility and stability)
 - **Nano buttons** to control pypilot’s **API** (ap.enabled, heading changes, etc.)
 - **pypilot telemetry** (heading, command, rudder, limits) to appear on the Nano OLED
+- **Wireless remote** to control and monitor the system via TCP
 
 So the bridge:
 - forwards frames **both directions** (transparent)
 - listens for custom Nano button frames (0xE0) and converts them into pypilot API `set(...)`
 - injects “state frames” into Nano (0xE1..0xE6) so OLED shows pypilot truth
+- accepts TCP connections from the ESP32-C3 remote on port 8555
+- translates remote commands (BTN, ESTOP, MODE, RUD) into Nano frames and pypilot API calls
+- sends telemetry (AP, HDG, CMD, RDR, FLAGS, MODE, WARN) to the remote at ~1Hz
+- manages a mode state machine (IDLE / AP / MANUAL) with safety handling on disconnect
 
 ---
 
@@ -98,6 +114,15 @@ Secondary safety (Nano): absolute “never exceed” protection:
 - if rudder pot approaches raw ADC extremes (near 0 or 1023), stop motor/clutch and raise fault
 - if pypilot-reported rudder angle exceeds pypilot-reported limits beyond tolerance, stop and fault
 - faults produce audible alarm + OLED message; PTM can silence/stop
+
+Remote safety:
+- **Steer loss**: if TCP drops while in MANUAL mode, bridge sends `WARN_STEER_LOSS` to Nano —
+  continuous rapid 100ms buzzer + flashing `!STEER LOSS` on OLED. Requires physical STOP press to silence.
+- **Two-press STOP**: first press silences active alarm (AP stays engaged); second press is full emergency stop
+  (disengage AP, exit MANUAL, stop motor)
+- **AP-rejected warning**: if remote presses AP toggle while bridge is in MANUAL, Nano gets
+  `WARN_AP_PRESSED` — single 200ms beep + 5s OLED flash `?AP Pressed?`
+- **Buzzer priority**: steer-loss (continuous) > hardware faults > AP warning (single beep)
 
 ---
 

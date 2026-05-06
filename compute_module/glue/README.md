@@ -1,9 +1,9 @@
-# Inno-Pilot Glue – Pi Zero ↔ Nano ↔ pypilot
+# Inno-Pilot Bridge – Pi Zero ↔ Nano ↔ pypilot
 
-This directory contains the **Inno-Pilot-Glue**: everything that connects the
-Inno-Pilot servo controller (Nano) to pypilot on the compute module (Pi Zero).
+This directory contains the **Inno-Pilot-Bridge**: everything that connects the
+Inno-Pilot servo controller (Nano) to any other logic instance connected to or running on the compute module (Raspberry Pi) where examples include, but are not limited to: Pypilot, inno-web-remote, inno-remote
 
-## What this glue does
+## What this bridge does
 
 - Keeps pypilot talking to the same **USB by-id** name it expects:
   `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`
@@ -22,9 +22,19 @@ Inno-Pilot servo controller (Nano) to pypilot on the compute module (Pi Zero).
     them into pypilot API calls:
     - `ap.enabled` toggle
     - `ap.heading_command` ±1/±10 degrees
+  - Runs a TCP server on port **8555** for the ESP32-C3 wireless remote or the inno-web-remote web service listening on port **8888**:
+    - Receives: `BTN TOGGLE/±1/±10`, `ESTOP`, `MODE MANUAL/AUTO`, `RUD 0-100%`
+    - Sends: `AP`, `HDG`, `CMD`, `RDR`, `RDR_PCT`, `FLAGS`, `MODE`, `WARN` at ~1Hz
+  - Manages a mode state machine (`IDLE / AP / MANUAL`):
+    - In MANUAL mode, translates pot-based RUD commands to Nano motor frames
+    - On TCP disconnect in MANUAL: triggers steer-loss warning on Nano (life-safety)
+  - Parses `FLAGS_CODE` and `BUZZER_STATE_CODE` from Nano for remote relay
+  - Validates CRC on all Nano→bridge frames; corrupt frames are dropped (never forwarded to pypilot)
+  - Monitors Nano-reported comms error rate via `COMMS_DIAG_CODE` (0xEC) telemetry; auto-disengages
+    AP if error rate exceeds safety threshold; sends `COMMS WARN`/`COMMS CRIT` to TCP remote
 
 In short: pypilot still sees its normal servo device, but we have inserted a
-transparent bridge in the middle that adds Inno-Pilot control head features.
+transparent bridge in the middle that adds Inno-Pilot control head + wireless remote features.
 
 ## Files
 
@@ -44,15 +54,15 @@ transparent bridge in the middle that adds Inno-Pilot control head features.
   systemd oneshot to run `inno_pilot_fix_symlink.sh` after socat starts.
 
 - `inno-pilot-bridge.service`  
-  systemd unit to run `inno_pilot_bridge.py` as user `aviljoen` (group `dialout`).
+  systemd unit to run `inno_pilot_bridge.py` as user `innopilot` (group `dialout`).
 
-- `deploy_inno_pilot_glue.sh`  
+- `deploy_inno_pilot_bridge.sh`  
   Deployment helper that copies scripts into `/usr/local/bin` and
   `/usr/local/sbin`, installs/updates the systemd units, and ensures
-  `pypilot.service` starts after the glue.
+  `pypilot.service` starts after the bridge.
 
 - `CLAUDE.md`
-  Guidance for Claude Code (and future humans) on how to maintain this glue layer.
+  Guidance for Claude Code (and future humans) on how to maintain this bridge layer.
 
 ## Deployment (on the Pi Zero)
 
@@ -65,7 +75,7 @@ sudo systemctl stop inno-pilot-bridge inno-pilot-fixlink inno-pilot-socat || tru
 cd ~/inno-pilot
 git pull origin master
 
-./compute_module/glue/deploy_inno_pilot_glue.sh
+./compute_module/bridge/deploy_inno_pilot_bridge.sh
 
 sudo reboot
 ```
@@ -76,3 +86,15 @@ After reboot:
 - inno-pilot-fixlink adjusts the by-id symlink
 - inno-pilot-bridge connects Nano ↔ PTY
 - pypilot starts and uses the PTY via the by-id name
+
+
+## Multi-remote behavior
+
+The bridge and web remote now run in full shared-control mode:
+
+- The bridge accepts multiple simultaneous TCP remotes on port `8555`.
+- All connected remotes receive the same telemetry stream (`AP`, `MODE`, `HDG`, `CMD`, `RDR`, `RDR_PCT`, `COMMS`, etc.).
+- Commands from any connected remote are accepted and forwarded (`BTN`, `RUD`, `MODE`, `ESTOP`, `SETTINGS`).
+- The web remote no longer enforces controller/observer ownership or master/read-only instance roles.
+
+This keeps all remotes in sync and ensures any active remote input is honored.

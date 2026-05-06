@@ -1,0 +1,329 @@
+<!DOCTYPE html><html><body><script>
+
+'use strict';
+
+// ── Shared state ──────────────────────────────────────────────────────────
+var gMode      = 'IDLE';
+var gConnected = false;
+var gApOn      = false;      // true when AP is actually engaged (d.ap === 1)
+var gTogglePos = 'on';       // mode radio position: 'auto' | 'remote' | 'on' | 'off'
+var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DEG
+var isDragging = false;
+var prevPtrAngle = null;
+var lastRudSend  = 0;
+var MAX_DEG = 150;       // ±150° maps 0..100% rudder
+var gManualRudPct = 50.0;  // commanded rudder % in MANUAL mode (0–100%)
+var gRdrPct       = null;  // latest rdr_pct from bridge telemetry
+var gJogTimer     = null;  // setInterval handle for hold-jog repeat
+var gJogHoldTimer = null;  // setTimeout handle for jog hold-delay
+var gSettings     = {};    // settings loaded from /settings endpoint
+var gSettingsOpen = false; // true while settings panel is visible
+var gTestOpen     = false; // true while test modal is visible
+var gSelectedTest = null;  // id of test currently shown in detail/results view
+var gTestRunning  = false; // true while a test is streaming results
+
+// ── Command sender ────────────────────────────────────────────────────────
+function sendCmd(cmd) {
+  return fetch('/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cmd: cmd})
+  }).then(function(resp) {
+    return resp.json().catch(function() { return {}; }).then(function(body) {
+      return {ok: resp.ok, status: resp.status, body: body};
+    });
+  }).catch(function() {
+    return {ok: false, status: 0, body: {}};
+  });
+}
+
+
+// ── Hardware test catalogue ───────────────────────────────────────────────
+var TESTS = [
+  { id: 1,
+    name: 'Binary Search — Min Starting PWM',
+    desc: 'Bisects the PWM range (0–255) in both STBD and PORT directions to find the lowest duty cycle that actually moves the rudder from standstill.',
+    purpose: 'Establish the motor deadband floor. Below this PWM the hydraulic valve does not crack open. Required before any closed-loop control tuning.',
+    output: 'MIN_STBD and MIN_PORT PWM thresholds with motor current at each threshold. Example: MIN_STBD=118  MIN_PORT=122  CURRENT=0.8A',
+    fw: 'pwm_test.ino  (default compile — no extra #define)',
+    trigger: 'Automatic on power-up'
+  },
+  { id: 2,
+    name: 'Speed Sweep',
+    desc: 'Drives the rudder at fixed PWM steps (100 → 255, ∼15 per step) for 600 ms each. Records counts/second and motor current at each step.',
+    purpose: 'Map motor speed as a function of PWM. Used to build the braking-time lookup table and characterise the full actuator range.',
+    output: 'Table with ∼10 rows: PWM | cps (counts/s) | amps.',
+    fw: 'pwm_test.ino  (default compile — no extra #define)',
+    trigger: 'Automatic'
+  },
+  { id: 3,
+    name: 'Coast / Ramp-Down Test',
+    desc: 'For PWM 150, 190, and 255: (A) hard-cuts the motor at a trigger point and measures overshoot; (B) applies a proportional ramp-down and measures the improvement side-by-side.',
+    purpose: 'Quantify overshoot from hard-cut versus speed-proportional ramp braking. Determines whether ramp braking is worth implementing for this vessel.',
+    output: '3 rows: PWM | coast_counts | hard_error | ramp_error. Side-by-side comparison for each speed.',
+    fw: 'pwm_test.ino  (default compile — no extra #define)',
+    trigger: 'Automatic'
+  },
+  { id: 4,
+    name: 'Comprehensive Characterisation Table',
+    desc: 'For each of 15 PWM levels (120 → 255): measures coast count on hard-cut, minimum pulse width (binary search), speed (cps), and reverse-brake ms needed for dead-stop.',
+    purpose: 'Produce the master reference table. This is the single most important calibration run — its output feeds all control algorithm parameters.',
+    output: '15-row table: PWM | coast_ms | min_pulse_ms | cps | brake_ms. Full hydraulic characterisation for this vessel.',
+    fw: 'pwm_test.ino  (default compile — no extra #define)',
+    trigger: 'Automatic'
+  },
+  { id: 5,
+    name: 'Interactive Target Test',
+    desc: 'Drives 450-count runs alternating STBD/PORT (6 total). B3 triggers each run. Two algorithms: ALG 0 = hard-cut baseline; ALG 1 = speed-aware braking (replica of motor_simple B5). Reports overshoot, drive time, speed at brake trigger, brake ms used.',
+    purpose: 'Validate the closed-loop stopping algorithm against a fixed target under realistic conditions. Directly measures real-world overshoot.',
+    output: '6 rows: dir | target | actual | overshoot | drive_ms | brake_ms | speed@trigger.',
+    fw: 'pwm_test.ino  #define RUN_INTERACTIVE_TEST',
+    trigger: 'B3 button to start each run'
+  },
+  { id: 6,
+    name: 'Burst Sweep Test',
+    desc: '24 burst durations (10–600 ms) × 2 directions = 48 fully automatic runs after one B3 press. PWM=255, hard-cut. Records ADC start/final and net counts per burst.',
+    purpose: 'Map the hydraulic cracking threshold — below what pulse duration does the rudder not move? Reveals burst duration vs. displacement relationship.',
+    output: '48 rows: dir | duration_ms | start_adc | final_adc | net_counts. Identifies minimum effective pulse width.',
+    fw: 'pwm_test.ino  #define RUN_BURST_SWEEP_TEST',
+    trigger: 'B3 once to start — then fully automatic'
+  },
+  { id: 7,
+    name: 'Fine Burst Test',
+    desc: 'Steps 15–25 ms in 1 ms increments, 10 reps per step, both directions. PWM=255, hard-cut. Characterises fine-pulse resolution at the low end of burst duration.',
+    purpose: 'Find the minimum repeatable pulse that moves the rudder by at least 1 ADC count. Critical for precision micro-corrections in closed-loop control.',
+    output: '220 rows (10 reps × 11 steps × 2 dirs): dir | duration_ms | counts_moved. Statistical view of fine-pulse repeatability.',
+    fw: 'pwm_test.ino  #define RUN_FINE_BURST_TEST',
+    trigger: 'B3 once to start — then fully automatic'
+  },
+  { id: 8,
+    name: 'Remote Control Test (RCT)',
+    desc: 'Bridge-integrated positioning trial with 3 sub-modes: ADJUST (B2/B4 scroll settings, B1/B5 change value, B3 save); TEST (bridge sends TGT <pct>, Nano chases target using 7 RCT settings); RATIFY (real-time remote steering). Settings persist to EEPROM.',
+    purpose: 'End-to-end validation of the full closed-loop positioning system from web remote through bridge to Nano, including EEPROM-persisted tuning parameters.',
+    output: 'Real-time telemetry: TGT | RDR_PCT | overshoot | PWM. EEPROM parameter dump on ADJUST save. B3 cycles: ADJUST → TEST → RATIFY.',
+    fw: 'pwm_test.ino  #define RUN_REMOTE_CONTROL_TEST  (bridge-integrated — full TCP protocol)',
+    trigger: 'B3 cycles modes; B1/B2/B4/B5 adjust parameters'
+  }
+];
+
+// ── Test modal functions ──────────────────────────────────────────────────
+
+function openTestMenu() {
+  gTestOpen = true;
+  document.getElementById('test-btn').classList.add('test-open');
+  document.getElementById('tov').classList.remove('hidden');
+  showTestCatalogue();
+}
+
+function closeTestMenu() {
+  gTestOpen     = false;
+  gTestRunning  = false;
+  gSelectedTest = null;
+  document.getElementById('test-btn').classList.remove('test-open');
+  document.getElementById('tov').classList.add('hidden');
+}
+
+function showTestCatalogue() {
+  document.getElementById('tov-title').textContent = '⚗ HARDWARE TESTS';
+  document.getElementById('tov-hint').textContent  = 'Select a test to view description';
+  // Populate catalogue list on first call (idempotent)
+  var catView = document.getElementById('tcat-view');
+  catView.innerHTML = '';
+  TESTS.forEach(function(t) {
+    var item = document.createElement('div');
+    item.className = 'tcat-item';
+    item.innerHTML =
+      '<span class="tcat-num">' + t.id + '</span>' +
+      '<span class="tcat-name">' + t.name + '</span>' +
+      '<span class="tcat-arrow">›</span>';
+    item.addEventListener('click', function() { selectTest(t.id); });
+    item.addEventListener('touchstart', function(e) {
+      e.preventDefault(); selectTest(t.id);
+    }, {passive: false});
+    catView.appendChild(item);
+  });
+  catView.classList.remove('hidden');
+  document.getElementById('tdet-view').classList.remove('active');
+  document.getElementById('tres-view').classList.remove('active');
+  document.getElementById('tov-back').style.display = 'none';
+}
+
+function selectTest(id) {
+  var t = TESTS.find(function(x) { return x.id === id; });
+  if (!t) return;
+  gSelectedTest = id;
+  document.getElementById('tdet-name').textContent    = t.id + '.  ' + t.name;
+  document.getElementById('tdet-desc').textContent    = t.desc;
+  document.getElementById('tdet-purpose').textContent = t.purpose;
+  document.getElementById('tdet-output').textContent  = t.output;
+  document.getElementById('tdet-fw').textContent      = t.fw;
+  document.getElementById('tov-title').textContent    = 'TEST ' + t.id;
+  document.getElementById('tov-hint').textContent     = 'Trigger: ' + t.trigger;
+  document.getElementById('tcat-view').classList.add('hidden');
+  document.getElementById('tdet-view').classList.add('active');
+  document.getElementById('tres-view').classList.remove('active');
+  document.getElementById('tov-back').style.display = '';
+}
+
+function runTest(id) {
+  var t = TESTS.find(function(x) { return x.id === id; });
+  if (!t) return;
+  gTestRunning = true;
+  document.getElementById('tres-name').textContent   = t.id + '.  ' + t.name;
+  document.getElementById('tres-log').textContent    = '';
+  document.getElementById('tres-status').textContent = 'Sending TEST ' + id + ' to Nano…';
+  // Show B3 button for tests that require it
+  var needsB3 = (id >= 5);
+  document.getElementById('tres-b3').classList.toggle('visible', needsB3);
+  document.getElementById('tdet-view').classList.remove('active');
+  document.getElementById('tres-view').classList.add('active');
+  document.getElementById('tov-back').style.display = 'none';
+  // Forward TEST command through bridge to Nano
+  sendCmd('TEST ' + id);
+}
+
+function appendTestLine(line) {
+  if (!gTestOpen) return;
+  var log = document.getElementById('tres-log');
+  if (!log) return;
+  log.textContent += line + '
+';
+  log.scrollTop = log.scrollHeight;
+  document.getElementById('tres-status').textContent = 'RUNNING…';
+}
+
+function testDone() {
+  gTestRunning = false;
+  var status = document.getElementById('tres-status');
+  if (status) status.textContent = 'TEST COMPLETE';
+  document.getElementById('tres-b3').classList.remove('visible');
+  document.getElementById('tov-back').style.display = '';
+}
+
+// Test button and modal event wiring
+document.getElementById('test-btn').addEventListener('click', openTestMenu);
+document.getElementById('test-btn').addEventListener('touchstart', function(e) {
+  e.preventDefault(); openTestMenu();
+}, {passive: false});
+document.getElementById('tov-close').addEventListener('click', closeTestMenu);
+document.getElementById('tov-back').addEventListener('click', function() {
+  // Back always returns to catalogue (from detail or results)
+  showTestCatalogue();
+});
+document.getElementById('tdet-yes').addEventListener('click', function() {
+  if (gSelectedTest) runTest(gSelectedTest);
+});
+document.getElementById('tdet-no').addEventListener('click', showTestCatalogue);
+document.getElementById('tres-b3').addEventListener('click', function() {
+  // Send B3 (BTN TOGGLE) — trigger for tests 5, 6, 7
+  sendCmd('BTN TOGGLE');
+});
+
+// ── SSE subscription ──────────────────────────────────────────────────────
+var es = new EventSource('/events');
+es.onmessage = function(e) { updateUI(JSON.parse(e.data)); };
+es.onerror   = function()  { setConnected(false); };
+
+// ── UI updater ────────────────────────────────────────────────────────────
+function updateUI(d) {
+  gConnected = !!d.connected;
+  gMode      = d.mode || 'IDLE';
+  gApOn      = !!d.ap;
+  gRdrPct    = d.rdr_pct != null ? d.rdr_pct : null;
+  if (d.ui_mode) gTogglePos = d.ui_mode;
+
+  // Suppress overlay when connected, or when disconnect is intentional (OFF).
+  // This also handles occasional mode/ui-mode desync by treating the selector
+  // position as authoritative for intentional offline state.
+  setConnected(gConnected || gMode === 'OFF' || gTogglePos === 'off');
+
+  // OLED mode line — AUTO: show AP ON/OFF with oversized "AP"; other modes: plain label
+  var modeRow = document.getElementById('oled-mode-row');
+  if (gMode === 'AP' && gApOn) {
+    modeRow.innerHTML = 'MODE: <span class="ap-label">AP</span> ON';
+  } else {
+    modeRow.innerHTML = 'MODE: <b id="o-mode">' + (gMode || 'IDLE') + '</b>';
+  }
+
+  // Heading / RDR / CMD — always displayed
+  document.getElementById('o-hdg').textContent =
+    d.hdg != null ? d.hdg.toFixed(1) : '---';
+  document.getElementById('o-rdr').textContent =
+    d.rdr_pct != null ? d.rdr_pct.toFixed(1) : '---';
+  document.getElementById('o-cmd').textContent =
+    d.cmd != null ? d.cmd.toFixed(1) : '---';
+
+  // Rudder position bar (uses rdr_pct; falls back to 50% centre)
+  var pct = d.rdr_pct != null ? Math.max(0, Math.min(100, d.rdr_pct)) : 50;
+  document.getElementById('rdr-marker').style.left = pct + '%';
+
+  // Version + comms status
+  document.getElementById('o-ver').textContent = d.bridge_ver || d.version || '---';
+  var connEl = document.getElementById('o-conn');
+  if (d.connected) {
+    var comms = (d.comms || 'OK').toUpperCase();
+    if (comms === 'CRIT') {
+      connEl.textContent = 'COMMS CRIT';
+      connEl.className = 'crit';
+    } else if (comms === 'WARN') {
+      connEl.textContent = 'COMMS WARN';
+      connEl.className = 'warn';
+    } else {
+      connEl.textContent = 'CONNECTED';
+      connEl.className = 'ok';
+    }
+  } else if (gMode === 'OFF') {
+    connEl.textContent = 'OFFLINE';
+    connEl.className = 'warn';   // amber — intentional, not a fault
+  } else {
+    connEl.textContent = 'NO BRIDGE';
+    connEl.className = 'crit';
+  }
+
+  // Mode radio selector — driven by physical position, not bridge mode
+  setToggle(gTogglePos);
+  // Blank the OLED content panel when in OFF mode
+  document.querySelector('.oled').classList.toggle('blank-mode', gTogglePos === 'off');
+
+  // Wheel active state + position sync
+  var ww = document.getElementById('wheel-wrap');
+  if (gMode === 'MANUAL') {
+    ww.classList.add('active');
+    // In MANUAL: keep wheel at drag position, don't override with telemetry
+  } else {
+    ww.classList.remove('active');
+    // Sync wheel visual to actual rudder position
+    if (d.rdr_pct != null) {
+      wheelAngle = (d.rdr_pct - 50) / 50 * MAX_DEG;
+      document.getElementById('wheel-svg').style.transform =
+        'rotate(' + wheelAngle + 'deg)';
+    }
+    document.getElementById('wheel-pct').textContent =
+      d.rdr_pct != null ? d.rdr_pct.toFixed(0) : '--';
+  }
+
+  // Test result streaming — bridge relays TEST_LINE / TEST_DONE from Nano
+  if (d._test_line) appendTestLine(d._test_line);
+  if (d._test_done) testDone();
+}
+
+function setConnected(ok) {
+  document.getElementById('overlay').classList.toggle('hidden', ok);
+}
+
+function setToggle(m) {
+  // Sync animated radio button active state
+  document.querySelectorAll('.mode-radio').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.action === m);
+  });
+
+  // Physical button labels — shown in AUTO and REMOTE modes only
+  var btns = [
+    document.querySelector('.hw-btn.b1'),
+    document.querySelector('.hw-btn.b2'),
+    document.querySelector('.hw-btn.b3'),
+    document.querySelector('.hw-btn.b4'),
+    document.querySelector('.hw-btn.b5'),
+  ];
+  if (m === 'auto') {
+</script></body></html>
