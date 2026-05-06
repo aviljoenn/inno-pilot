@@ -62,11 +62,11 @@ and source tree plus all inno-pilot additions. A separate pypilot clone is not n
 ```bash
 cd ~
 git clone https://github.com/aviljoenn/inno-pilot.git inno-pilot
-cd inno-pilot
+cd inno-pilot/compute_module/pypilot
 sudo python3 setup.py install
 ```
 
-`setup.py` at the repo root installs pypilot and all its dependencies.
+`setup.py` lives at `compute_module/pypilot/` and installs pypilot and all its dependencies.
 `compute_module/` contains all inno-pilot-specific additions on top.
 
 ---
@@ -335,7 +335,7 @@ modules (`linebuffer`, `arduino_servo`, `ugfx`) must be placed by the old-style
 installer to the correct locations.  Use:
 
 ```bash
-cd ~/inno-pilot
+cd ~/inno-pilot/compute_module/pypilot
 sudo python3 setup.py install
 ```
 
