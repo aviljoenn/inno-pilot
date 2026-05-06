@@ -5,62 +5,79 @@
 # This Program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation; either
-# version 3 of the License, or (at your option) any later version.  
+# version 3 of the License, or (at your option) any later version.
 
 
-# This script checks for dependencies of pypilot, and installs the informing user
+# This script checks for dependencies of pypilot, and installs them.
+# Hardened for Bookworm / Python 3.12+ (PEP 668 externally-managed-environment).
 
 import os, sys
 
 success = True
+
+# Detect PEP 668 "externally managed" environment (Bookworm / Python 3.12+).
+# When true we must pass --break-system-packages to pip as a last resort.
+def _pip_extra_flags():
+    marker = os.path.join(sys.prefix, 'lib',
+                          'python%d.%d' % sys.version_info[:2],
+                          'EXTERNALLY-MANAGED')
+    if os.path.exists(marker):
+        return '--break-system-packages'
+    return ''
 
 class dep(object):
     def __init__(self, name):
         self.name = name
 
 class py_dep(dep):
-    def __init__(self, name, pip_only=False):
-        self.pip_only = pip_only
+    def __init__(self, name):
         super(py_dep, self).__init__(name)
 
     def test(self):
-        remap = {'pil': 'PIL',
-                 'gevent-websocket': 'geventwebsocket',
-                 'flask-socketio': 'flask_socketio',
-                 'flask-babel': 'flask_babel',
-                 'python-socketio': 'socketio',
-                 'opengl': 'OpenGL'}
+        # Maps logical dependency names to actual importable module names.
+        import_remap = {'pil': 'PIL',
+                        'gevent-websocket': 'geventwebsocket',
+                        'flask-socketio': 'flask_socketio',
+                        'flask-babel': 'flask_babel',
+                        'python-socketio': 'socketio',
+                        'opengl': 'OpenGL',
+                        'importlib_metadata': 'importlib.metadata'}
 
-        name = remap[self.name] if self.name in remap else self.name
+        name = import_remap.get(self.name, self.name)
         try:
             __import__(name)
-        except Exception as e:
-            print('failed to import', self.name, ' ')
+        except Exception:
+            print('failed to import', self.name)
             return False
         return True
 
     def install(self):
-        # first try via apt (faster and resumable)
-        apt_name = 'python3-' + self.name
+        # Maps logical names to correct apt package names where they differ
+        # from the default python3-{name} pattern.
+        apt_remap = {'pil':              'python3-pil',
+                     'gevent-websocket': 'python3-gevent',
+                     'flask-socketio':   'python3-flask-socketio',
+                     'python-socketio':  'python3-socketio',
+                     'opengl':           'python3-opengl',
+                     'importlib_metadata': 'python3-importlib-metadata',
+                     'websocket':        'python3-websocket'}
 
-        if self.pip_only: # force pip install
-            os.system('sudo apt remove ' + apt_name)
-            ret = True
-        else:
-            ret = os.system('sudo apt install -y ' + apt_name)
+        # pip package names that differ from the logical name
+        pip_remap = {'pil':           'pillow',
+                     'flask-socketio': 'flask-socketio',
+                     'python-socketio': 'python-socketio'}
+
+        apt_name = apt_remap.get(self.name, 'python3-' + self.name)
+        ret = os.system('sudo apt install -y ' + apt_name)
 
         if ret:
-            print('failed to install via apt, trying with pip', self.name)
-            if self.name == 'pil':
-                name = 'pillow'
-            elif self.name == 'flask-socketio':
-                name = 'flask-socketio==5'
-            else:
-                name = self.name
-            ret = os.system('sudo python3 -m pip install ' + name)
+            pip_name = pip_remap.get(self.name, self.name)
+            extra = _pip_extra_flags()
+            print('failed to install via apt, trying with pip', pip_name)
+            ret = os.system('sudo python3 -m pip install %s %s' % (extra, pip_name))
 
             if ret:
-                print('failed to install dependency', name)
+                print('failed to install dependency', pip_name)
                 return False
         return True
 
@@ -119,16 +136,23 @@ class RTIMULIB2_dep(dep):
     def test(self, check=False):
         try:
             import RTIMU
-        except Exception as e:
+        except Exception:
             print('failed to import', self.name)
             return False
 
-        from importlib_metadata import version
-        v = version('RTIMULib').split('.')
-        n = (int(v[0])*1000 + int(v[1]))*1000 + int(v[2])
-        if n < 8001000:
-            print('RTIMULib version out of date')
-            return False
+        # Use stdlib importlib.metadata (Python 3.8+) with fallback to pip package.
+        try:
+            from importlib.metadata import version as _ver
+        except ImportError:
+            from importlib_metadata import version as _ver
+        try:
+            v = _ver('RTIMULib').split('.')
+            n = (int(v[0])*1000 + int(v[1]))*1000 + int(v[2])
+            if n < 8001000:
+                print('RTIMULib version out of date')
+                return False
+        except Exception:
+            pass  # version check non-fatal if metadata unavailable
 
         return True
 
@@ -182,9 +206,6 @@ def ss(*cargs):
 # autopilot dependencies (required): RTIMULIB2 python3-serial libpython3-dev python3-numpy python3-scipy swig
 #                        (recommended): python3-ujson python3-pyudev python3-zeroconf
 
-ss('dependencies', 'dependency script dependencies',
-   [py_dep('importlib_metadata')])
-
 ss('autopilot', 'core autopilot or imu-only mode',
    [RTIMULIB2_dep(), py_dep('serial'), py_dep('numpy'), py_dep('scipy'), sys_dep('libpython3-dev'), sys_dep('swig')])
 
@@ -202,7 +223,7 @@ ss('hat', 'SPI lcd keypad, and remote control interface',
 
 # web dependencies: python3-flask python3-gevent-websocket
 ss('web', 'web browser control',
-   [py_dep('flask'), py_dep('gevent-websocket'), py_dep('python-socketio'), py_dep('flask-socketio', pip_only = True), py_dep('flask-babel')])
+   [py_dep('flask'), py_dep('gevent-websocket'), py_dep('python-socketio'), py_dep('flask-socketio'), py_dep('flask-babel')])
 
 # client dependencies (viewers control applications): python3-wxgtk4.0
 # optional: python3-opengl python3-pyglet pywavefront

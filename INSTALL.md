@@ -322,7 +322,7 @@ sudo apt-get install -y \
   python3-serial python3-smbus i2c-tools socat \
   libgles2-mesa-dev libgles2 libgbm-dev \
   python3-flask python3-flask-socketio \
-  python3-importlib-metadata
+  python3-importlib-metadata python3-setuptools
 ```
 
 Note: `pigpio` is not available by default on Bookworm arm64 — omit it unless you
