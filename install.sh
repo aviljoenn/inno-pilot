@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+# Prevent apt from opening interactive pagers (apt-listchanges, debconf, etc.)
+export DEBIAN_FRONTEND=noninteractive
+
 REPO_URL="https://github.com/aviljoenn/inno-pilot.git"
 REPO_DIR="$HOME/inno-pilot"
 LOG="$HOME/inno-pilot-install.log"
@@ -106,10 +109,13 @@ if command -v arduino-cli >/dev/null 2>&1; then
     info "arduino-cli already installed: $(arduino-cli version)"
 else
     # BINDIR controls where the arduino-cli installer places the binary.
-    # Without it the installer uses CWD/bin, which varies depending on where
-    # setup.py left us. Force it to a known temp location then move it.
+    # env-var prefix on a piped command (VAR=x cmd | sh) only applies to the
+    # left side of the pipe (curl), NOT to the right side (sh).  Download the
+    # installer to a file first so we can pass BINDIR to sh directly.
     ARDUINO_TMP="$(mktemp -d)"
-    BINDIR="$ARDUINO_TMP" curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+        -o "$ARDUINO_TMP/arduino-cli-install.sh"
+    BINDIR="$ARDUINO_TMP" sh "$ARDUINO_TMP/arduino-cli-install.sh"
     sudo mv "$ARDUINO_TMP/arduino-cli" /usr/local/bin/arduino-cli
     rm -rf "$ARDUINO_TMP"
     arduino-cli core update-index
