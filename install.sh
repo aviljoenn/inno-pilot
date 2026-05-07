@@ -44,6 +44,7 @@ info "Python   : $PYTHON_VER"
 step "Phase 1: installing base packages"
 
 sudo apt-get update -y
+sudo apt-get upgrade -y
 
 # Packages common to all Pi OS versions
 COMMON_PKGS=(
