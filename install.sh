@@ -106,13 +106,56 @@ sudo python3 setup.py install
 # pyproject.toml into this directory.  On setuptools 78 (Trixie / Python 3.13) that
 # pyproject.toml is treated as authoritative and overrides setup(packages=…), causing
 # build_py to skip the pypilot Python source entirely — only the C extensions land in
-# dist-packages.  Detect the condition, remove the interfering file, and re-run so the
-# Python modules are properly installed.  The second pass is fast because the C objects
-# are already compiled in build/.
+# dist-packages.
+#
+# Naive remediation (rm pyproject.toml + re-run) loses the race: setup.py re-imports
+# dependencies, which re-runs install_data.sh, which re-creates pyproject.toml BEFORE
+# setup() is called.  The data idempotency check `os.path.exists('ui/compass.png')` no
+# longer matches upstream pypilot_data's current layout (compass.png moved into a
+# pypilot_data/ subdir), so install_data.sh runs unconditionally on every pass.
+#
+# Workaround: tell setup.py to skip `import dependencies` entirely by creating a stub
+# `deps` file (the same marker dependencies.py writes on full success).  The first pass
+# above has already fetched RTIMULib2 and pypilot_data, so the second pass only needs
+# to install the pypilot Python modules and entry-point scripts.
 if ! python3 -c "import pypilot.autopilot" 2>/dev/null; then
-    info "pypilot Python modules missing (pyproject.toml interference) — re-running install"
+    info "pypilot Python modules missing — bypassing dependencies.py and retrying"
     rm -f pyproject.toml
+    touch deps
     sudo python3 setup.py install
+    rm -f deps
+fi
+
+# Hard verification — fail the install loudly here rather than letting Phase 6 crash
+# on a partial pypilot.  /usr/local/bin/pypilot is the entry-point script systemd
+# launches; if it's missing the autopilot will never start.
+python3 -c "import pypilot.autopilot" \
+    || die "pypilot Python package failed to install — autopilot would not start"
+[ -x /usr/local/bin/pypilot ] \
+    || die "pypilot entry-point script /usr/local/bin/pypilot was not created"
+
+# Upstream pypilot ships pypilot.service in scripts/debian/etc/systemd/system/
+# but its README expects the integrator to `sudo cp -r etc /` manually.  Our
+# install.sh has to do that step explicitly, otherwise systemctl reports
+# "Unit pypilot.service could not be found" after install and the autopilot
+# never starts on boot.
+#
+# We only install pypilot.service itself (the autopilot core).  pypilot_web,
+# pypilot_hat, and pypilot_boatimu are not used by Inno-Pilot and would only
+# add maintenance burden if installed.
+#
+# The shipped unit hard-codes User=pi, which doesn't exist on Inno-Pilot Pis
+# (we use innopilot).  Patch the User line in place during install.
+PYPILOT_UNIT_SRC="$REPO_DIR/compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot.service"
+PYPILOT_UNIT_DST="/etc/systemd/system/pypilot.service"
+if [ -f "$PYPILOT_UNIT_SRC" ]; then
+    info "Installing pypilot.service unit (with User=innopilot)"
+    sudo install -m 644 "$PYPILOT_UNIT_SRC" "$PYPILOT_UNIT_DST"
+    sudo sed -i 's/^User=pi$/User=innopilot/' "$PYPILOT_UNIT_DST"
+    sudo systemctl daemon-reload
+    sudo systemctl enable pypilot.service
+else
+    info "WARNING: pypilot.service template not found at $PYPILOT_UNIT_SRC — autopilot will not auto-start"
 fi
 
 # ── Phase 4 — arduino-cli ────────────────────────────────────────────────────
