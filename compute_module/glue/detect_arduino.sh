@@ -76,8 +76,10 @@ for arg in "$@"; do
     esac
 done
 
-log()  { echo "[detect] $*"; }
-vlog() { $VERBOSE && echo "[detect] $*" || true; }
+# All status output goes to stderr so command-substitution callers
+# (e.g. probe_avrdude) can use stdout exclusively for return values.
+log()  { echo "[detect] $*" >&2; }
+vlog() { $VERBOSE && echo "[detect] $*" >&2 || true; }
 die()  { echo "[detect] ERROR: $*" >&2; exit "${2:-3}"; }
 
 # ─── short-circuit if cached and valid ────────────────────────────────────────
@@ -126,7 +128,25 @@ for sym in /dev/serial/by-id/usb-Arduino*-if00* \
            /dev/serial/by-id/usb-1a86_USB_Serial-if00* \
            /dev/serial/by-id/usb-FTDI_*-if00* \
            /dev/serial/by-id/usb-Silicon_Labs_*-if00*; do
-    CANDIDATES+=("$sym")
+    # Skip the *.real fixlink alternates: when fixlink has run, the original
+    # by-id symlink points at a PTY and the actual USB device is at <byid>.real.
+    # Probe BYID.real directly, never the now-redirected BYID itself.
+    case "$sym" in
+        *.real) ;;  # accept .real entries
+        *)
+            # If a .real sibling exists, fixlink has already redirected this
+            # by-id; the bare name now points at /dev/pts/* and is not the
+            # Arduino.  Skip it — its .real sibling will be picked up below.
+            [[ -e "${sym}.real" ]] && continue
+            ;;
+    esac
+    # Final guard: only accept candidates whose resolved target is a real
+    # tty (USB or ACM), never a pty.
+    target="$(readlink -f "$sym")"
+    case "$target" in
+        /dev/ttyUSB*|/dev/ttyACM*) CANDIDATES+=("$sym") ;;
+        *) vlog "skipping $sym -> $target (not a USB/ACM tty)" ;;
+    esac
 done
 shopt -u nullglob
 
