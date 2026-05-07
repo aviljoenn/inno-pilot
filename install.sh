@@ -57,6 +57,7 @@ COMMON_PKGS=(
     i2c-tools socat
     libgles2-mesa-dev libgles2 libgbm-dev
     python3-setuptools
+    avrdude
 )
 
 # Bookworm / Trixie (Debian 12/13) ship Flask 3.x via apt and block pip (PEP 668).
