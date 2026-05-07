@@ -248,12 +248,108 @@ and Furuno NAVpilot-300. Prioritised by sailing value and implementation feasibi
 
 ## Getting started
 
+### Installing on a new Raspberry Pi
+
+#### Step 1 — Flash the SD card
+
+Use **Raspberry Pi Imager** to flash a fresh SD card:
+
+1. Choose **Raspberry Pi OS Lite** (no desktop needed).  
+   Any recent OS version works: Bullseye, Bookworm, or Trixie.  
+   32-bit is fine for Pi Zero 2W; 64-bit is fine for Pi 3B / 4 / 5.
+2. Click the **gear icon (Advanced Options)** before writing and set:
+   - Hostname (e.g. `inno-pilot`)
+   - Username: `innopilot`  Password: `innopilot123` (or your own)
+   - Enable SSH (password auth)
+   - Wi-Fi SSID and password for your boat network
+3. Write to SD card, insert into Pi, power on.
+
+Wait ~60 seconds for first boot to complete, then find the Pi's IP address on your
+router's DHCP list and SSH in:
+
+```bash
+ssh innopilot@<pi-ip>
+```
+
+#### Step 2 — Run the one-command installer
+
+Once SSH'd in, paste this single command and press Enter:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aviljoenn/inno-pilot/master/install.sh | bash
+```
+
+The installer will:
+
+1. Detect your Pi model and OS version automatically
+2. Install all required system packages via `apt`
+3. Clone this repository to `~/inno-pilot`
+4. Build and install pypilot (compiles C extensions — takes 5–15 min on slower Pi hardware)
+5. Install `arduino-cli` with the AVR core
+6. Deploy the inno-pilot glue layer and systemd services
+7. Initialise pypilot's config directory
+8. Reset `pypilot_client.conf` to localhost (prevents stale-IP issues on modern OS)
+9. Reboot automatically after a 10-second countdown (Ctrl-C to cancel)
+
+All output is logged to `~/inno-pilot-install.log` for troubleshooting.
+
+#### Step 3 — Verify services after reboot
+
+After the Pi reboots (~60 s), SSH back in and check:
+
+```bash
+sudo systemctl status inno-pilot-socat inno-pilot-bridge inno-pilot-web-remote pypilot
+journalctl -u inno-pilot-bridge -n 50 --no-pager
+```
+
+All four services should show `active (running)`. The bridge log should show Nano
+communication or a waiting message if no Nano is connected yet.
+
+Open the web remote in any browser on the boat LAN:
+
+```
+http://<pi-ip>:8888/
+```
+
+#### Step 4 — Flash the Arduino Nano (if connected)
+
+If your Arduino Nano is plugged in via USB, flash the servo controller firmware:
+
+```bash
+sudo systemctl stop pypilot inno-pilot-bridge inno-pilot-socat
+cd ~/inno-pilot/servo_motor_control/arduino/motor_simple
+arduino-cli compile --fqbn arduino:avr:nano \
+  --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .
+arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .
+sudo systemctl start inno-pilot-socat inno-pilot-bridge pypilot
+```
+
+Allow ~5 seconds for the Nano to finish its boot sequence before expecting
+normal communication frames.
+
+#### Step 5 — Flash the ESP32 wireless remote (optional)
+
+> The ESP32 firmware has the Pi IP address **hardcoded**.  
+> Before flashing for a new installation, update the target IP in the firmware
+> source, rebuild, and flash from the dev workstation.
+
+See `inno-remote/README.md` for full build and flash instructions.
+
+---
+
+For the full detailed install guide including troubleshooting, appendices for
+specific Pi models, and the ongoing update workflow, see **[INSTALL.md](INSTALL.md)**.
+
+---
+
+### Working on the codebase
+
 If you want to:
 
 - **Build the hardware:**
   Look under `servo_motor_control/docs/` for modules, wiring and BOM information.
 - **Work on the servo motor controller:**
   Start in `servo_motor_control/arduino/`.
-- **Work on the compute module (Pi Zero) side:**
+- **Work on the compute module side:**
   - `compute_module/pypilot/` – pypilot core and its original README
   - `compute_module/glue/` – bridge, systemd units, deploy script, docs
