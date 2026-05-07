@@ -186,6 +186,13 @@ step "Phase 5: deploying inno-pilot glue layer"
 cd "$REPO_DIR"
 bash compute_module/glue/deploy_inno_pilot_glue.sh
 
+# Place inno_deploy.sh outside the repo so future `git pull` cannot modify it
+# mid-execution (the script self-updates by copying the repo version over this
+# one and re-execing — see comments at the top of inno_deploy.sh).  Without
+# this step a fresh install has no working OTA / manual-deploy path.
+install -m 755 "$REPO_DIR/inno_deploy.sh" "$HOME/inno_deploy.sh"
+info "inno_deploy.sh placed at $HOME/inno_deploy.sh"
+
 # ── Phase 6 — initialise pypilot config directory ────────────────────────────
 
 step "Phase 6: initialising pypilot config"
