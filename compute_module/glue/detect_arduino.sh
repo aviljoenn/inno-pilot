@@ -237,6 +237,14 @@ for byid in "${CANDIDATES[@]}"; do
     hint="$(classify_byid "$byid")"
     log "probing $byid (-> $port_real, hint=$hint)"
 
+    # Normalise to the canonical (non-.real) by-id name.  The renderer derives
+    # BYID_REAL by appending .real, so storing the canonical form keeps the two
+    # fields consistent regardless of whether fixlink has run yet.
+    case "$byid" in
+        *.real) byid_canonical="${byid%.real}" ;;
+        *)      byid_canonical="$byid" ;;
+    esac
+
     # Step 1: arduino-cli direct identification
     fqbn_cli="$(probe_arduino_cli "$port_real" || true)"
     if [[ -n "$fqbn_cli" ]]; then
@@ -246,7 +254,7 @@ for byid in "${CANDIDATES[@]}"; do
             *nano*) variant="nano-new"    ;;
             *)      variant="unknown"     ;;
         esac
-        RESPONDERS+=("$byid")
+        RESPONDERS+=("$byid_canonical")
         RESPONDER_PORTS+=("$port_real")
         RESPONDER_FQBNS+=("$fqbn_cli")
         RESPONDER_VARIANTS+=("$variant")
@@ -278,7 +286,7 @@ for byid in "${CANDIDATES[@]}"; do
     esac
 
     log "  detected variant=$variant FQBN=$fqbn (baud=$detected_baud)"
-    RESPONDERS+=("$byid")
+    RESPONDERS+=("$byid_canonical")
     RESPONDER_PORTS+=("$port_real")
     RESPONDER_FQBNS+=("$fqbn")
     RESPONDER_VARIANTS+=("$variant")
