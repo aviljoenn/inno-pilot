@@ -212,6 +212,76 @@ else
     info "before the first inno_deploy.sh run."
 fi
 
+# ── Phase 4c — compile + flash Nano firmware ─────────────────────────────────
+
+step "Phase 4c: compiling and flashing Nano firmware"
+
+# Skips gracefully if Phase 4b didn't produce a board.conf (no Arduino plugged
+# in).  Inno-pilot services have not been started yet at this point, so
+# /dev/ttyUSB0 is free and we don't need a stop/start dance.
+if [ ! -f /var/lib/inno-pilot/board.conf ]; then
+    info "WARNING: no /var/lib/inno-pilot/board.conf — skipping Nano flash."
+    info "After plugging in the Nano, run: sudo /usr/local/sbin/detect_arduino.sh && bash ~/inno_deploy.sh"
+else
+    # shellcheck disable=SC1091
+    source /var/lib/inno-pilot/board.conf
+    NANO_SKETCH_DIR="$REPO_DIR/servo_motor_control/arduino/motor_simple"
+
+    # arduino:avr core may be under root (~/.arduino15 absent for innopilot)
+    # or innopilot's home, depending on how Phase 4 ran.  Detect by file system.
+    if [ -d "$HOME/.arduino15/packages/arduino/hardware/avr" ]; then
+        ARDUINO_CMD=(arduino-cli)
+        ARDUINO15_ROOT="$HOME/.arduino15"
+        info "Using user arduino:avr core ($ARDUINO15_ROOT)"
+    else
+        ARDUINO_CMD=(sudo arduino-cli)
+        ARDUINO15_ROOT="/root/.arduino15"
+        info "Using root arduino:avr core ($ARDUINO15_ROOT)"
+    fi
+
+    # ARMv6 avrdude compat fix: arduino-cli ships an armhf avrdude that SIGILLs
+    # on Pi Zero / Pi 1.  Symlink the bundled binary + config to the system
+    # avrdude (installed via apt in Phase 1) so upload works.
+    if [ "$(uname -m)" = "armv6l" ]; then
+        info "ARMv6 detected — applying avrdude compatibility fix"
+        BUNDLED_AVRDUDE="$(sudo find "$ARDUINO15_ROOT/packages/arduino/tools/avrdude" \
+                          -name avrdude \( -type f -o -type l \) 2>/dev/null | head -1)"
+        SYS_AVRDUDE="$(command -v avrdude || true)"
+        if [ -n "$BUNDLED_AVRDUDE" ] && [ -n "$SYS_AVRDUDE" ] && [ ! -L "$BUNDLED_AVRDUDE" ]; then
+            BUNDLED_CONF="$(dirname "$(dirname "$BUNDLED_AVRDUDE")")/etc/avrdude.conf"
+            sudo ln -sf "$SYS_AVRDUDE" "$BUNDLED_AVRDUDE"
+            [ -f /etc/avrdude.conf ] && sudo ln -sf /etc/avrdude.conf "$BUNDLED_CONF"
+            info "Symlinked bundled avrdude -> $SYS_AVRDUDE"
+        fi
+    fi
+
+    info "Compiling $NANO_SKETCH_DIR (FQBN=$INNO_BOARD_FQBN)"
+    cd "$NANO_SKETCH_DIR"
+    "${ARDUINO_CMD[@]}" compile \
+        --fqbn "$INNO_BOARD_FQBN" \
+        --build-property "$INNO_BOARD_BUILD_FLAGS" \
+        .
+    info "Compile OK; uploading to $INNO_BOARD_PORT"
+    "${ARDUINO_CMD[@]}" upload \
+        -p "$INNO_BOARD_PORT" \
+        --fqbn "$INNO_BOARD_FQBN" \
+        .
+    info "Nano flashed successfully"
+
+    # Record sketch hash so inno_deploy.sh's hash-skip logic doesn't reflash
+    # unnecessarily on the next deploy run.  Algorithm matches _nano_src_hash()
+    # in inno_deploy.sh.
+    NANO_HASH=$(
+        ( echo "$INNO_BOARD_FQBN $INNO_BOARD_BUILD_FLAGS"
+          find "$NANO_SKETCH_DIR" -maxdepth 1 \( -name "*.ino" -o -name "*.h" -o -name "*.cpp" \) \
+              | sort | xargs sha256sum
+        ) | sha256sum | awk '{print $1}'
+    )
+    sudo mkdir -p /var/lib/inno-pilot
+    echo "$NANO_HASH" | sudo tee /var/lib/inno-pilot/nano_sketch.sha256 >/dev/null
+    info "Sketch hash recorded — inno_deploy.sh will skip reflash on unchanged sketch"
+fi
+
 # ── Phase 5 — deploy glue layer ───────────────────────────────────────────────
 
 step "Phase 5: deploying inno-pilot glue layer"
