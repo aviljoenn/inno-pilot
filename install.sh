@@ -192,6 +192,14 @@ else
     arduino-cli core install arduino:avr
 fi
 
+# Arduino libraries required by motor_simple.ino.  Install (or update) every
+# time so a re-run of install.sh repairs a partial library set.  arduino-cli
+# stores these under ~/Arduino/libraries for the running user (innopilot);
+# Phase 4c also runs as innopilot, so the paths line up.
+step "Phase 4: installing Arduino libraries (SSD1306Ascii, OneWire, DallasTemperature)"
+arduino-cli lib update-index
+arduino-cli lib install "SSD1306Ascii" "OneWire" "DallasTemperature"
+
 # ── Phase 4b — auto-detect connected Arduino ──────────────────────────────────
 
 step "Phase 4b: detecting connected Arduino (writes /var/lib/inno-pilot/board.conf)"
