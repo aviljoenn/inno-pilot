@@ -46,8 +46,15 @@ info "Python   : $PYTHON_VER"
 
 step "Phase 1: installing base packages"
 
-sudo apt-get update -y
-sudo apt-get upgrade -y
+# On a freshly-flashed Raspberry Pi OS SD card, unattended-upgrades typically
+# runs on first boot and holds the dpkg lock for several minutes.  Tell apt to
+# wait (up to 10 minutes) for the lock to release rather than fail immediately
+# with "Could not get lock /var/lib/dpkg/lock-frontend".  Applies to every
+# apt-get call in this Phase via the -o DPkg::Lock::Timeout option.
+APT_OPTS=(-o DPkg::Lock::Timeout=600)
+
+sudo apt-get "${APT_OPTS[@]}" update -y
+sudo apt-get "${APT_OPTS[@]}" upgrade -y
 
 # Packages common to all Pi OS versions
 COMMON_PKGS=(
@@ -77,7 +84,7 @@ case "$OS_CODENAME" in
 esac
 
 # shellcheck disable=SC2086
-sudo apt-get install -y "${COMMON_PKGS[@]}" "${EXTRA_PKGS[@]}"
+sudo apt-get "${APT_OPTS[@]}" install -y "${COMMON_PKGS[@]}" "${EXTRA_PKGS[@]}"
 
 step "Phase 1: enabling I2C"
 sudo raspi-config nonint do_i2c 0
