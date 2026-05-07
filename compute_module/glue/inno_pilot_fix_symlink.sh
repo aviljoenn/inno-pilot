@@ -1,7 +1,17 @@
 #!/bin/bash
 set -e
 
+# Resolve the Arduino's stable by-id path from /var/lib/inno-pilot/board.conf,
+# falling back to the historical CH340 Nano path if the file is missing (older
+# installs that pre-date detect_arduino.sh).
 BYID="/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+if [ -f /usr/local/sbin/board_conf.sh ] && [ -f /var/lib/inno-pilot/board.conf ]; then
+    # shellcheck disable=SC1091
+    source /usr/local/sbin/board_conf.sh
+    if load_board_conf 2>/dev/null; then
+        BYID="$INNO_BOARD_BYID"
+    fi
+fi
 REAL="${BYID}.real"
 PTY="/dev/ttyINNOPILOT"
 

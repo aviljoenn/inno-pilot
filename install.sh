@@ -185,6 +185,26 @@ else
     arduino-cli core install arduino:avr
 fi
 
+# ── Phase 4b — auto-detect connected Arduino ──────────────────────────────────
+
+step "Phase 4b: detecting connected Arduino (writes /var/lib/inno-pilot/board.conf)"
+
+# Run detect_arduino.sh from the repo so the consumer scripts deployed in
+# Phase 5 can source board.conf.  Probe is non-destructive (avrdude -n no-write
+# bootloader handshake).  Requires avrdude (Phase 1) and arduino-cli (Phase 4)
+# already installed.  Tolerates "no Arduino plugged in yet" by continuing —
+# detect_arduino.sh exit 1 is recoverable (operator can plug in the Nano and
+# re-run inno_deploy.sh, which handles missing board.conf gracefully).
+sudo mkdir -p /var/lib/inno-pilot
+sudo chown innopilot:innopilot /var/lib/inno-pilot 2>/dev/null || true
+if sudo bash "$REPO_DIR/compute_module/glue/detect_arduino.sh" --verbose; then
+    info "Arduino detected — board.conf written"
+else
+    info "WARNING: Arduino detection failed (exit $?). Plug in the Nano and run:"
+    info "    sudo /usr/local/sbin/detect_arduino.sh --verbose"
+    info "before the first inno_deploy.sh run."
+fi
+
 # ── Phase 5 — deploy glue layer ───────────────────────────────────────────────
 
 step "Phase 5: deploying inno-pilot glue layer"
@@ -214,12 +234,10 @@ else
     info "~/.pypilot already exists, skipping init run"
 fi
 
-# Ensure servodevice points to the stable by-id path.
-# mkdir -p guards against pypilot failing to start above (e.g. import error on first run).
+# Ensure ~/.pypilot exists (guards against pypilot failing to start above).
+# servodevice itself is written by deploy_inno_pilot_glue.sh which sources
+# board.conf — keeping a single writer prevents the two from drifting apart.
 mkdir -p "$HOME/.pypilot"
-SERVOFILE="$HOME/.pypilot/servodevice"
-echo '["/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0",38400]' > "$SERVOFILE"
-info "servodevice set to USB by-id path"
 
 # ── Phase 7 — fix stale pypilot_client.conf ──────────────────────────────────
 
@@ -239,12 +257,15 @@ echo "============================================================"
 echo " Inno-Pilot installation complete!"
 echo " Log saved to: $LOG"
 echo
-echo " Next step (if Arduino Nano is connected):"
-echo "   sudo systemctl stop pypilot inno-pilot-bridge inno-pilot-socat"
-echo "   cd $REPO_DIR/servo_motor_control/arduino/motor_simple"
-echo '   arduino-cli compile --fqbn arduino:avr:nano \'
-echo '     --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .'
-echo "   arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano ."
+echo " Detected Arduino:"
+if [ -f /var/lib/inno-pilot/board.conf ]; then
+    grep -E '^INNO_BOARD_(VARIANT|FQBN|PORT)=' /var/lib/inno-pilot/board.conf | sed 's/^/   /'
+else
+    echo "   (no board.conf — plug in the Nano and run sudo /usr/local/sbin/detect_arduino.sh)"
+fi
+echo
+echo " Flash the Nano with the matching FQBN via:"
+echo "   bash ~/inno_deploy.sh"
 echo
 echo " Rebooting in 10 seconds — Ctrl-C to cancel."
 echo "============================================================"

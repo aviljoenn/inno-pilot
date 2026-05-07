@@ -93,7 +93,21 @@ INNOPILOT_BUILD_NUM = 1  # increment with each push during development
 # ---------------------------------------------------------------------------
 # Serial devices
 # ---------------------------------------------------------------------------
+# NANO_PORT is the post-fixlink path that resolves to the actual USB device.
+# Default value preserves the historical CH340 Nano path; if board_conf.py is
+# importable (installed alongside this script in /usr/local/bin), use the
+# detected value from /var/lib/inno-pilot/board.conf so the bridge follows
+# whatever Arduino variant detect_arduino.sh identified.
 NANO_PORT  = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0.real"
+try:
+    import board_conf as _board_conf
+    _bc = _board_conf.load()
+    NANO_PORT = _bc["INNO_BOARD_BYID_REAL"]
+except Exception as _exc:
+    # board_conf.py missing, or board.conf not yet generated — keep the default.
+    # Log on first import so the operator notices when running on transitional
+    # installs that pre-date detect_arduino.sh.
+    print(f"[bridge] board_conf not available ({_exc}); using default NANO_PORT")
 PILOT_PORT = "/dev/ttyINNOPILOT_BRIDGE"
 BAUD       = 38400
 

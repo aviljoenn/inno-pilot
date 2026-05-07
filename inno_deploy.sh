@@ -29,9 +29,21 @@ REPO_DIR="$HOME/inno-pilot"
 GLUE_DEPLOY="$REPO_DIR/compute_module/glue/deploy_inno_pilot_glue.sh"
 NANO_SKETCH_DIR="$REPO_DIR/servo_motor_control/arduino/motor_simple"
 ARDUINO_CLI="/usr/local/bin/arduino-cli"
+# Defaults — overridden by /var/lib/inno-pilot/board.conf if present.  The
+# defaults match the historical Inno-Pilot Nano (CH340 USB-serial) so existing
+# .12 / .13 fleet keeps working until detect_arduino.sh has been run on them.
 NANO_PORT="/dev/ttyUSB0"
 NANO_FQBN="arduino:avr:nano"
 NANO_BUILD_FLAG="build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128"
+if [ -f /usr/local/sbin/board_conf.sh ] && [ -f /var/lib/inno-pilot/board.conf ]; then
+    # shellcheck disable=SC1091
+    source /usr/local/sbin/board_conf.sh
+    if load_board_conf 2>/dev/null; then
+        NANO_PORT="$INNO_BOARD_PORT"
+        NANO_FQBN="$INNO_BOARD_FQBN"
+        NANO_BUILD_FLAG="$INNO_BOARD_BUILD_FLAGS"
+    fi
+fi
 NANO_BOOT_WAIT_S=6    # seconds to wait for Nano to finish its setup() splash after flash
 BRIDGE_SETTLE_S=3     # seconds to let the bridge stabilise before starting pypilot
 TELEGRAM_CONF="/home/innopilot/.pypilot/telegram.conf"

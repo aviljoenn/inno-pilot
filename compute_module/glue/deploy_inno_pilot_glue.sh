@@ -61,6 +61,21 @@ echo "Installing inno_pilot_fix_symlink.sh -> /usr/local/sbin/"
 sudo cp "$REPO_DIR/inno_pilot_fix_symlink.sh" /usr/local/sbin/inno_pilot_fix_symlink.sh
 sudo chmod 755 /usr/local/sbin/inno_pilot_fix_symlink.sh
 
+# Copy board-config loader (bash) and the Arduino auto-detect probe.
+# Installed to /usr/local/sbin so they're in root's PATH and reachable by
+# fixlink + inno_deploy.sh + future automation.
+echo "Installing board_conf.sh + detect_arduino.sh -> /usr/local/sbin/"
+sudo cp "$REPO_DIR/board_conf.sh"        /usr/local/sbin/board_conf.sh
+sudo cp "$REPO_DIR/detect_arduino.sh"    /usr/local/sbin/detect_arduino.sh
+sudo chmod 755 /usr/local/sbin/board_conf.sh /usr/local/sbin/detect_arduino.sh
+
+# Copy board-config Python loader next to the bridge so `import board_conf`
+# resolves via Python's automatic insertion of the script's parent directory
+# into sys.path (no PYTHONPATH or site-packages plumbing required).
+echo "Installing board_conf.py -> /usr/local/bin/"
+sudo cp "$REPO_DIR/board_conf.py" /usr/local/bin/board_conf.py
+sudo chmod 644 /usr/local/bin/board_conf.py
+
 # Copy systemd units
 echo "Installing systemd units -> /etc/systemd/system/"
 sudo cp "$REPO_DIR/inno-pilot-socat.service"      /etc/systemd/system/inno-pilot-socat.service
@@ -81,12 +96,23 @@ sudo systemctl enable inno-pilot-bridge.service
 sudo systemctl enable inno-pilot-web-remote.service
 sudo systemctl enable inno-health-notify.service
 
-# Ensure pypilot uses by-id name
+# Ensure pypilot uses by-id name.  Source board.conf so the path matches the
+# detected Arduino — falls back to the historical CH340 Nano path if the file
+# is missing (existing .12/.13 fleet during transitional rollout).
 SERVOFILE="$HOME/.pypilot/servodevice"
-if [ -f "$SERVOFILE" ]; then
-  echo "Ensuring servodevice uses by-id path..."
-  echo '["/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0",38400]' > "$SERVOFILE"
+mkdir -p "$(dirname "$SERVOFILE")"
+SERVO_BYID="/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+SERVO_BAUD="38400"
+if [ -f /var/lib/inno-pilot/board.conf ]; then
+  # shellcheck disable=SC1091
+  source /var/lib/inno-pilot/board.conf
+  SERVO_BYID="${INNO_BOARD_BYID:-$SERVO_BYID}"
+  SERVO_BAUD="${INNO_BOARD_BAUD:-$SERVO_BAUD}"
+  echo "Writing servodevice from board.conf: $SERVO_BYID @ $SERVO_BAUD"
+else
+  echo "board.conf not present yet — writing servodevice with default CH340 path"
 fi
+echo "[\"$SERVO_BYID\",$SERVO_BAUD]" > "$SERVOFILE"
 
 # Make pypilot start after our services via drop-in override
 echo "Configuring pypilot to start after Inno-Pilot services..."
