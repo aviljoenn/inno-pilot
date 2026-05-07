@@ -129,7 +129,13 @@ fi
 # Hard verification — fail the install loudly here rather than letting Phase 6 crash
 # on a partial pypilot.  /usr/local/bin/pypilot is the entry-point script systemd
 # launches; if it's missing the autopilot will never start.
-python3 -c "import pypilot.autopilot" \
+#
+# The check must run with cwd outside the source tree.  Python prepends '' (cwd)
+# to sys.path when running with -c, and the source tree contains pypilot/__init__.py
+# but no compiled _linebuffer.so — so importing from source dir would falsely fail
+# with "cannot import name '_linebuffer'".  At runtime systemd starts /usr/local/bin/pypilot
+# with cwd=/, which resolves correctly via dist-packages.
+( cd / && python3 -c "import pypilot.autopilot" ) \
     || die "pypilot Python package failed to install — autopilot would not start"
 [ -x /usr/local/bin/pypilot ] \
     || die "pypilot entry-point script /usr/local/bin/pypilot was not created"
