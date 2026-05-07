@@ -34,7 +34,7 @@ if [ -f /proc/device-tree/model ]; then
 fi
 info "Pi model : $PI_MODEL"
 
-OS_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}")"
+OS_CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}" | tr '[:upper:]' '[:lower:]')"
 PYTHON_VER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 info "OS       : $OS_CODENAME"
 info "Python   : $PYTHON_VER"
@@ -55,17 +55,21 @@ COMMON_PKGS=(
     python3-setuptools
 )
 
-# Bookworm ships Flask 3.x via apt and blocks pip (PEP 668) —
-# install web-stack packages via apt up front so dependencies.py never needs pip.
-if [ "$OS_CODENAME" = "bookworm" ]; then
-    EXTRA_PKGS=(
-        python3-flask python3-flask-socketio python3-socketio
-        python3-importlib-metadata
-    )
-else
-    # Bullseye: pigpio available; flask-socketio comes from pip via dependencies.py
-    EXTRA_PKGS=(pigpio python3-flask)
-fi
+# Bookworm / Trixie (Debian 12/13) ship Flask 3.x via apt and block pip (PEP 668).
+# Install web-stack packages via apt up front so dependencies.py never needs pip.
+# Bullseye (Debian 11) still uses the old pip-based path.
+case "$OS_CODENAME" in
+    bookworm|trixie)
+        EXTRA_PKGS=(
+            python3-flask python3-flask-socketio python3-socketio
+            python3-importlib-metadata
+        )
+        ;;
+    *)
+        # Bullseye or unknown: pigpio available; flask-socketio via pip in dependencies.py
+        EXTRA_PKGS=(pigpio python3-flask)
+        ;;
+esac
 
 # shellcheck disable=SC2086
 sudo apt-get install -y "${COMMON_PKGS[@]}" "${EXTRA_PKGS[@]}"
@@ -100,8 +104,13 @@ step "Phase 4: installing arduino-cli"
 if command -v arduino-cli >/dev/null 2>&1; then
     info "arduino-cli already installed: $(arduino-cli version)"
 else
-    curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-    sudo mv "$HOME/bin/arduino-cli" /usr/local/bin/arduino-cli
+    # BINDIR controls where the arduino-cli installer places the binary.
+    # Without it the installer uses CWD/bin, which varies depending on where
+    # setup.py left us. Force it to a known temp location then move it.
+    ARDUINO_TMP="$(mktemp -d)"
+    BINDIR="$ARDUINO_TMP" curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+    sudo mv "$ARDUINO_TMP/arduino-cli" /usr/local/bin/arduino-cli
+    rm -rf "$ARDUINO_TMP"
     arduino-cli core update-index
     arduino-cli core install arduino:avr
 fi
