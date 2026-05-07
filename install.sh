@@ -101,6 +101,19 @@ step "Phase 3: installing pypilot (this takes several minutes on slow Pi hardwar
 cd "$REPO_DIR/compute_module/pypilot"
 sudo python3 setup.py install
 
+# dependencies.py (run inside setup.py above) installs pypilot_data, which copies a
+# pyproject.toml into this directory.  On setuptools 78 (Trixie / Python 3.13) that
+# pyproject.toml is treated as authoritative and overrides setup(packages=…), causing
+# build_py to skip the pypilot Python source entirely — only the C extensions land in
+# dist-packages.  Detect the condition, remove the interfering file, and re-run so the
+# Python modules are properly installed.  The second pass is fast because the C objects
+# are already compiled in build/.
+if ! python3 -c "import pypilot.autopilot" 2>/dev/null; then
+    info "pypilot Python modules missing (pyproject.toml interference) — re-running install"
+    rm -f pyproject.toml
+    sudo python3 setup.py install
+fi
+
 # ── Phase 4 — arduino-cli ────────────────────────────────────────────────────
 
 step "Phase 4: installing arduino-cli"
@@ -144,19 +157,23 @@ else
     info "~/.pypilot already exists, skipping init run"
 fi
 
-# Ensure servodevice points to the stable by-id path
+# Ensure servodevice points to the stable by-id path.
+# mkdir -p guards against pypilot failing to start above (e.g. import error on first run).
+mkdir -p "$HOME/.pypilot"
 SERVOFILE="$HOME/.pypilot/servodevice"
 echo '["/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0",38400]' > "$SERVOFILE"
 info "servodevice set to USB by-id path"
 
-# ── Phase 7 — Bookworm: fix stale pypilot_client.conf ────────────────────────
+# ── Phase 7 — fix stale pypilot_client.conf ──────────────────────────────────
 
-if [ "$OS_CODENAME" = "bookworm" ]; then
-    step "Phase 7: resetting pypilot_client.conf to localhost (Bookworm)"
-    mkdir -p "$HOME/.pypilot"
-    echo '{"host":"127.0.0.1","port":23322}' > "$HOME/.pypilot/pypilot_client.conf"
-    info "pypilot_client.conf set to 127.0.0.1"
-fi
+case "$OS_CODENAME" in
+    bookworm|trixie)
+        step "Phase 7: resetting pypilot_client.conf to localhost ($OS_CODENAME)"
+        mkdir -p "$HOME/.pypilot"
+        echo '{"host":"127.0.0.1","port":23322}' > "$HOME/.pypilot/pypilot_client.conf"
+        info "pypilot_client.conf set to 127.0.0.1"
+        ;;
+esac
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
