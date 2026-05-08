@@ -69,26 +69,57 @@ def _toggle_log_level(signum, frame):       # noqa: ARG001
 if hasattr(signal, "SIGUSR1"):
     signal.signal(signal.SIGUSR1, _toggle_log_level)
 
-def _local_ip() -> str:
-    """Return the Pi's LAN IP by probing the routing table (no data sent)."""
+def _local_ip() -> str | None:
+    """Return the Pi's LAN IP by probing the routing table (no data sent).
+
+    Returns None if the kernel has no usable route yet (e.g. wlan0 not
+    associated, default route not installed). Callers should retry/cache
+    via ota_host() rather than calling this directly.
+    """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
+    if not ip or ip.startswith("127."):
+        return None
+    return ip
 
-# OTA server host: auto-detected at startup so this code works on any Pi
-# regardless of its fixed IP address.
-OTA_SERVER_HOST = _local_ip()
+
+# OTA server host is computed lazily on first use (see ota_host() below).
+# Computing at import-time races with NetworkManager-wait-online during boot —
+# the bridge service starts ~80 s before network-online.target on a Pi Zero
+# Wi-Fi setup, so the route to 8.8.8.8 is not yet available, _local_ip()
+# raises ENETUNREACH, and the OTA URL ends up advertised as 127.0.0.1
+# (unreachable from the ESP32 remote).
+_ota_host_cache: str | None = None
+
+
+def ota_host() -> str:
+    """Return the LAN IP to advertise in OTA URLs to the remote.
+
+    Cached once a non-loopback IP is found. Falls back to '127.0.0.1' only
+    while the network is still unreachable — subsequent calls will retry,
+    so the next remote HELLO will get a corrected URL.
+    """
+    global _ota_host_cache
+    if _ota_host_cache:
+        return _ota_host_cache
+    ip = _local_ip()
+    if ip:
+        _ota_host_cache = ip
+        return ip
+    return "127.0.0.1"
 
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.3.3_B1"
-INNOPILOT_BUILD_NUM = 1  # increment with each push during development
+INNOPILOT_VERSION   = "v1.3.3_B2"
+INNOPILOT_BUILD_NUM = 2  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -1050,7 +1081,12 @@ def process_remote_line(
         remote_send(remote_sock, f"DB {db_pct:.1f}")
         # Offer OTA if remote is behind and firmware binary is available
         if remote_ver != INNOPILOT_VERSION and os.path.isfile(OTA_FIRMWARE_PATH):
-            ota_url = f"http://{OTA_SERVER_HOST}:{OTA_HTTP_PORT}/{OTA_FIRMWARE_FILE}"
+            # Resolve LAN IP at offer time (not import time) — bridge may have
+            # started before the default route was installed.
+            ota_url = f"http://{ota_host()}:{OTA_HTTP_PORT}/{OTA_FIRMWARE_FILE}"
+            if ota_host().startswith("127."):
+                log.warning("OTA host still unresolved (network not ready) — "
+                            "remote will not be able to fetch %s", ota_url)
             remote_send(remote_sock, f"OTA {ota_url}")
             log.info("OTA offered to remote at %s", ota_url)
 

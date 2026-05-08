@@ -6,6 +6,26 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.3.3_B2] — 2026-05-08 — Fix: OTA URL `127.0.0.1` due to bridge/network startup race
+
+### Fixed
+- **Bridge** (`inno_pilot_bridge.py`): `_local_ip()` was called at module
+  import time and its result frozen in `OTA_SERVER_HOST`. On a Pi Zero on
+  Wi-Fi the bridge service starts ~80 s before `network-online.target`, so
+  the UDP probe to `8.8.8.8` raised `ENETUNREACH`, the except branch fell
+  back to `127.0.0.1`, and the bridge advertised an unreachable OTA URL
+  (`http://127.0.0.1:8556/inno_remote.bin`) to every remote that connected
+  with a version mismatch — even after the network came up.
+  - Replaced with a lazy `ota_host()` helper that resolves the LAN IP at
+    OTA-offer time and caches the first non-loopback result. `_local_ip()`
+    now returns `None` (instead of `127.0.0.1`) when no route is available
+    so the cache is not poisoned.
+  - If the network is still unreachable when an OTA is offered, the bridge
+    logs a WARNING and re-tries on the next remote HELLO.
+
+### Changed
+- **All** (Bridge, Web, Nano, Remote): version bump v1.3.3_B1 → v1.3.3_B2.
+
 ## [v1.2.0_B36] — 2026-04-14 — OLED SH1106 toggle + EEPROM settings storage
 
 ### Added
