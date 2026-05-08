@@ -42,6 +42,107 @@ PYTHON_VER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 info "OS       : $OS_CODENAME"
 info "Python   : $PYTHON_VER"
 
+# ── Phase 0 — interactive setup (all manual prompts up front) ────────────────
+#
+# Goal: every prompt the operator must respond to happens in this phase, so
+# from Phase 1 onwards the install runs unattended.  Three pieces:
+#   0a  passwordless sudo for innopilot (one password prompt, then never again)
+#   0b  Tailscale binary install + auth URL + ENTER acknowledgement
+#   0c  Telegram bot token / chat ID (optional, ENTER to skip)
+#
+# When run in a non-interactive context (no /dev/tty — e.g. plink -batch
+# automation), the interactive prompts are skipped and Tailscale auth +
+# Telegram conf can be completed manually after the install reboots.
+
+step "Phase 0: interactive setup (sudo NOPASSWD, Tailscale, Telegram)"
+
+if ( : < /dev/tty ) 2>/dev/null; then
+    INTERACTIVE=true
+else
+    INTERACTIVE=false
+    info "No controlling terminal — interactive prompts will be skipped."
+fi
+
+# 0a — passwordless sudo for innopilot.  The first sudo invocation below is
+# the ONE password prompt the operator sees during the entire install (and
+# only when NOPASSWD wasn't already configured — e.g. default `pi` user has
+# it pre-configured).  After this, every later sudo runs without prompting,
+# so the long Phase 3 (~30 min) won't trip over sudo's 15-minute auth cache.
+SUDOERS_FILE="/etc/sudoers.d/010-innopilot-nopasswd"
+if sudo -n true 2>/dev/null; then
+    info "Passwordless sudo already configured — OK"
+else
+    info "Configuring passwordless sudo for innopilot (one-time password prompt)"
+    sudo bash -c "echo 'innopilot ALL=(ALL) NOPASSWD: ALL' > $SUDOERS_FILE && chmod 440 $SUDOERS_FILE"
+    info "NOPASSWD configured — no further password prompts during install."
+fi
+
+# 0b — Tailscale binary install (always) + auth (interactive only).
+# Done BEFORE Phase 1's apt-update so all interactive bits are at the top
+# and the operator can walk away once Phase 0 finishes.
+if ! command -v tailscale >/dev/null 2>&1; then
+    info "Installing Tailscale (apt repo + binary + service)"
+    curl -fsSL https://tailscale.com/install.sh | sh
+fi
+
+if $INTERACTIVE; then
+    if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
+        ts_ip=$(tailscale ip -4 2>/dev/null || echo "n/a")
+        info "Tailscale: already authenticated — IP $ts_ip"
+    else
+        echo
+        echo "======================================================"
+        echo "  ACTION 1 of 2: Tailscale authentication"
+        echo "  'sudo tailscale up' will print a URL — open it in"
+        echo "  your browser, log in, then press ENTER here."
+        echo "======================================================"
+        echo
+        sudo tailscale up || true
+        echo
+        read -rp "Press ENTER once Tailscale login is complete ... " _ack < /dev/tty
+        if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
+            info "Tailscale: authenticated — IP $ts_ip"
+        else
+            info "WARNING: Tailscale still not connected — continuing anyway"
+        fi
+    fi
+else
+    info "Tailscale binary installed; auth deferred (run 'sudo tailscale up' after reboot)"
+fi
+
+# 0c — Telegram conf (optional, interactive only).  Written to ~/.pypilot/
+# which is created here if needed.
+TELEGRAM_CONF="$HOME/.pypilot/telegram.conf"
+if $INTERACTIVE && [ ! -f "$TELEGRAM_CONF" ]; then
+    echo
+    echo "======================================================"
+    echo "  ACTION 2 of 2: Telegram bot credentials (optional)"
+    echo "  Used by inno-health-notify for OTA / failure alerts."
+    echo "  Press ENTER at the token prompt to skip."
+    echo "======================================================"
+    echo
+    read -rp "  Bot token (or ENTER to skip): " tg_token < /dev/tty
+    if [ -n "$tg_token" ]; then
+        read -rp "  Chat ID                    : " tg_chat_id < /dev/tty
+        if [ -n "$tg_chat_id" ]; then
+            mkdir -p "$(dirname "$TELEGRAM_CONF")"
+            printf '{"token": "%s", "chat_id": "%s"}\n' "$tg_token" "$tg_chat_id" \
+                > "$TELEGRAM_CONF"
+            chmod 600 "$TELEGRAM_CONF"
+            info "Telegram config written to $TELEGRAM_CONF"
+        else
+            info "No chat ID entered — Telegram skipped"
+        fi
+    else
+        info "Telegram skipped (write $TELEGRAM_CONF manually later to enable)"
+    fi
+elif [ -f "$TELEGRAM_CONF" ]; then
+    info "Telegram config already at $TELEGRAM_CONF — OK"
+fi
+
+info "Phase 0 complete — running unattended phases 1-7"
+
 # ── Phase 1 — base packages ───────────────────────────────────────────────────
 
 step "Phase 1: installing base packages"
@@ -350,86 +451,6 @@ case "$OS_CODENAME" in
         info "pypilot_client.conf set to 127.0.0.1"
         ;;
 esac
-
-# ── Phase 8 — first-run provisioning (Tailscale + Telegram) ──────────────────
-
-step "Phase 8: first-run provisioning (Tailscale + Telegram)"
-
-# inno_deploy.sh's "Step 0" historically owned this provisioning, but a fresh
-# install never reaches inno_deploy.sh on its own — so the first reboot would
-# come up with no Tailscale and no Telegram conf.  Pull the same logic in here.
-#
-# Both pieces require user interaction (Tailscale prints an auth URL the user
-# must visit in a browser; Telegram needs a bot token + chat ID).  When run as
-# `curl ... | bash`, bash's stdin is the curl pipe — `read` would consume the
-# script source.  Redirect from /dev/tty for prompts; if /dev/tty is unreadable
-# (e.g. plink -batch automation), skip the interactive bits and just install
-# the Tailscale binary so the operator can finish the setup later.
-TELEGRAM_CONF="$HOME/.pypilot/telegram.conf"
-
-# Tailscale binary install is unconditional — auth is the interactive part.
-if ! command -v tailscale >/dev/null 2>&1; then
-    info "Installing Tailscale (via official installer script)"
-    curl -fsSL https://tailscale.com/install.sh | sh
-fi
-
-if ( : < /dev/tty ) 2>/dev/null; then
-    # ---- Tailscale auth ----
-    if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
-        ts_ip=$(tailscale ip -4 2>/dev/null || echo "n/a")
-        info "Tailscale: already authenticated — IP $ts_ip"
-    else
-        echo
-        echo "======================================================"
-        echo "  ACTION REQUIRED: Tailscale not authenticated"
-        echo "  'sudo tailscale up' will print a URL — open it in"
-        echo "  your browser on any device and log in to Tailscale."
-        echo "======================================================"
-        echo
-        sudo tailscale up || true
-        echo
-        read -rp "Press ENTER once you have completed Tailscale login ... " _ack < /dev/tty
-        if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
-            ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
-            info "Tailscale: authenticated — IP $ts_ip"
-        else
-            info "WARNING: Tailscale still not connected. Run 'sudo tailscale up' after reboot."
-        fi
-    fi
-
-    # ---- Telegram config ----
-    if [ -f "$TELEGRAM_CONF" ]; then
-        info "Telegram: config already at $TELEGRAM_CONF"
-    else
-        echo
-        echo "======================================================"
-        echo "  Telegram bot credentials (for OTA + health alerts)"
-        echo "  Press ENTER at the token prompt to skip."
-        echo "======================================================"
-        echo
-        read -rp "  Bot token (or ENTER to skip): " tg_token < /dev/tty
-        if [ -n "$tg_token" ]; then
-            read -rp "  Chat ID                    : " tg_chat_id < /dev/tty
-            if [ -n "$tg_chat_id" ]; then
-                mkdir -p "$(dirname "$TELEGRAM_CONF")"
-                printf '{"token": "%s", "chat_id": "%s"}\n' "$tg_token" "$tg_chat_id" \
-                    > "$TELEGRAM_CONF"
-                chmod 600 "$TELEGRAM_CONF"
-                sudo chown -R innopilot:innopilot "$(dirname "$TELEGRAM_CONF")" 2>/dev/null || true
-                info "Telegram config written to $TELEGRAM_CONF"
-            else
-                info "No chat ID — Telegram skipped (write $TELEGRAM_CONF manually later)"
-            fi
-        else
-            info "Telegram skipped (write $TELEGRAM_CONF manually to enable notifications)"
-        fi
-    fi
-else
-    info "Non-interactive install (no /dev/tty) — skipping Tailscale auth + Telegram prompts."
-    info "Tailscale binary is installed.  After reboot, run:"
-    info "  sudo tailscale up           # auth via browser"
-    info "  echo '{\"token\":\"...\",\"chat_id\":\"...\"}' > $TELEGRAM_CONF && chmod 600 $TELEGRAM_CONF"
-fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
