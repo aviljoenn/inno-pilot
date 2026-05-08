@@ -269,6 +269,16 @@ else
         --fqbn "$INNO_BOARD_FQBN" \
         --build-property "$INNO_BOARD_BUILD_FLAGS" \
         .
+
+    # Free /dev/ttyUSB0 before upload.  Phase 4b's detect_arduino.sh stops
+    # the bridge, but inno-pilot-bridge.service has Restart=always, so on a
+    # re-run of install.sh the bridge auto-restarts during Phase 5 prep and
+    # holds the port — avrdude then sees "not in sync resp=0x1c".  Fresh
+    # install: stop is a no-op (services aren't started yet).
+    info "Stopping bridge/socat to free $INNO_BOARD_PORT for flash"
+    sudo systemctl stop inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
+    sleep 2
+
     info "Compile OK; uploading to $INNO_BOARD_PORT"
     "${ARDUINO_CMD[@]}" upload \
         -p "$INNO_BOARD_PORT" \
