@@ -373,7 +373,7 @@ if ! command -v tailscale >/dev/null 2>&1; then
     curl -fsSL https://tailscale.com/install.sh | sh
 fi
 
-if [ -r /dev/tty ]; then
+if ( : < /dev/tty ) 2>/dev/null; then
     # ---- Tailscale auth ----
     if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
         ts_ip=$(tailscale ip -4 2>/dev/null || echo "n/a")
