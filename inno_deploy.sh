@@ -403,6 +403,13 @@ if $FLASH_NANO; then
     log "Flash complete."
 
     # Record successful flash so future deploys can skip unchanged firmware.
+    # Repair ownership if a previous deploy ran via sudo and left the file
+    # root-owned — otherwise this redirect fails with "Permission denied"
+    # and the script aborts after a successful flash.
+    if [[ -e "$NANO_HASH_FILE" && ! -w "$NANO_HASH_FILE" ]]; then
+        log "Repairing ownership of $NANO_HASH_FILE (not writable as $(id -un)) ..."
+        sudo chown "$(id -un):$(id -gn)" "$NANO_HASH_FILE"
+    fi
     echo "$NANO_CURRENT_HASH" > "$NANO_HASH_FILE"
     log "Nano firmware hash saved."
 else

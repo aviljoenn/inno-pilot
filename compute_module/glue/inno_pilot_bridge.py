@@ -118,8 +118,8 @@ def ota_host() -> str:
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.3.3_B2"
-INNOPILOT_BUILD_NUM = 2  # increment with each push during development
+INNOPILOT_VERSION   = "v1.3.3_B3"
+INNOPILOT_BUILD_NUM = 3  # increment with each push during development
 
 # ---------------------------------------------------------------------------
 # Serial devices

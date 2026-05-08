@@ -6,6 +6,22 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v1.3.3_B3] — 2026-05-08 — Fix: deploy script aborts on root-owned nano_sketch.sha256
+
+### Fixed
+- **Deploy** (`inno_deploy.sh`): After a successful Nano flash the script
+  records the firmware hash via `echo > "$NANO_HASH_FILE"` (no sudo).
+  If a previous deploy was run with `sudo`, the hash file ends up
+  `root:root`, and the next unprivileged deploy fails with
+  `Permission denied` *after* the Nano has already been reflashed —
+  leaving the post-flash steps (boot wait, bridge restart, version
+  verification) unrun and the system in a half-deployed state.
+  The script now detects an unwritable hash file and repairs ownership
+  via `sudo chown` to the current user before writing.
+
+### Changed
+- **All** (Bridge, Web, Nano, Remote): version bump v1.3.3_B2 → v1.3.3_B3.
+
 ## [v1.3.3_B2] — 2026-05-08 — Fix: OTA URL `127.0.0.1` due to bridge/network startup race
 
 ### Fixed
