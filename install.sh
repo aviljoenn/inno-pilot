@@ -270,12 +270,14 @@ else
         --build-property "$INNO_BOARD_BUILD_FLAGS" \
         .
 
-    # Free /dev/ttyUSB0 before upload.  Phase 4b's detect_arduino.sh stops
-    # the bridge, but inno-pilot-bridge.service has Restart=always, so on a
-    # re-run of install.sh the bridge auto-restarts during Phase 5 prep and
-    # holds the port — avrdude then sees "not in sync resp=0x1c".  Fresh
-    # install: stop is a no-op (services aren't started yet).
-    info "Stopping bridge/socat to free $INNO_BOARD_PORT for flash"
+    # Free $INNO_BOARD_PORT before upload.  inno-pilot-bridge.service has
+    # `Restart=always RestartSec=2`, so a plain `stop` races: the bridge is
+    # back within 2s and holds the port, causing avrdude "not in sync resp=0x1c".
+    # Mask the unit to suppress auto-restart for the duration of the flash,
+    # then unmask afterwards.  On a fresh install the units don't exist yet,
+    # so mask/stop are no-ops (the `|| true` makes them tolerant).
+    info "Masking bridge/socat to prevent restart race during flash"
+    sudo systemctl mask inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
     sudo systemctl stop inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
     sleep 2
 
@@ -285,6 +287,10 @@ else
         --fqbn "$INNO_BOARD_FQBN" \
         .
     info "Nano flashed successfully"
+
+    # Restore normal startup behaviour — Phase 5 will start them via systemd
+    # after the deploy is complete (or the final reboot will).
+    sudo systemctl unmask inno-pilot-bridge inno-pilot-socat 2>/dev/null || true
 
     # Record sketch hash so inno_deploy.sh's hash-skip logic doesn't reflash
     # unnecessarily on the next deploy run.  Algorithm matches _nano_src_hash()
