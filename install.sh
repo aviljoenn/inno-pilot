@@ -335,6 +335,86 @@ case "$OS_CODENAME" in
         ;;
 esac
 
+# ── Phase 8 — first-run provisioning (Tailscale + Telegram) ──────────────────
+
+step "Phase 8: first-run provisioning (Tailscale + Telegram)"
+
+# inno_deploy.sh's "Step 0" historically owned this provisioning, but a fresh
+# install never reaches inno_deploy.sh on its own — so the first reboot would
+# come up with no Tailscale and no Telegram conf.  Pull the same logic in here.
+#
+# Both pieces require user interaction (Tailscale prints an auth URL the user
+# must visit in a browser; Telegram needs a bot token + chat ID).  When run as
+# `curl ... | bash`, bash's stdin is the curl pipe — `read` would consume the
+# script source.  Redirect from /dev/tty for prompts; if /dev/tty is unreadable
+# (e.g. plink -batch automation), skip the interactive bits and just install
+# the Tailscale binary so the operator can finish the setup later.
+TELEGRAM_CONF="$HOME/.pypilot/telegram.conf"
+
+# Tailscale binary install is unconditional — auth is the interactive part.
+if ! command -v tailscale >/dev/null 2>&1; then
+    info "Installing Tailscale (via official installer script)"
+    curl -fsSL https://tailscale.com/install.sh | sh
+fi
+
+if [ -r /dev/tty ]; then
+    # ---- Tailscale auth ----
+    if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
+        ts_ip=$(tailscale ip -4 2>/dev/null || echo "n/a")
+        info "Tailscale: already authenticated — IP $ts_ip"
+    else
+        echo
+        echo "======================================================"
+        echo "  ACTION REQUIRED: Tailscale not authenticated"
+        echo "  'sudo tailscale up' will print a URL — open it in"
+        echo "  your browser on any device and log in to Tailscale."
+        echo "======================================================"
+        echo
+        sudo tailscale up || true
+        echo
+        read -rp "Press ENTER once you have completed Tailscale login ... " _ack < /dev/tty
+        if tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi "logged out"; then
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
+            info "Tailscale: authenticated — IP $ts_ip"
+        else
+            info "WARNING: Tailscale still not connected. Run 'sudo tailscale up' after reboot."
+        fi
+    fi
+
+    # ---- Telegram config ----
+    if [ -f "$TELEGRAM_CONF" ]; then
+        info "Telegram: config already at $TELEGRAM_CONF"
+    else
+        echo
+        echo "======================================================"
+        echo "  Telegram bot credentials (for OTA + health alerts)"
+        echo "  Press ENTER at the token prompt to skip."
+        echo "======================================================"
+        echo
+        read -rp "  Bot token (or ENTER to skip): " tg_token < /dev/tty
+        if [ -n "$tg_token" ]; then
+            read -rp "  Chat ID                    : " tg_chat_id < /dev/tty
+            if [ -n "$tg_chat_id" ]; then
+                mkdir -p "$(dirname "$TELEGRAM_CONF")"
+                printf '{"token": "%s", "chat_id": "%s"}\n' "$tg_token" "$tg_chat_id" \
+                    > "$TELEGRAM_CONF"
+                chmod 600 "$TELEGRAM_CONF"
+                sudo chown -R innopilot:innopilot "$(dirname "$TELEGRAM_CONF")" 2>/dev/null || true
+                info "Telegram config written to $TELEGRAM_CONF"
+            else
+                info "No chat ID — Telegram skipped (write $TELEGRAM_CONF manually later)"
+            fi
+        else
+            info "Telegram skipped (write $TELEGRAM_CONF manually to enable notifications)"
+        fi
+    fi
+else
+    info "Non-interactive install (no /dev/tty) — skipping Tailscale auth + Telegram prompts."
+    info "Tailscale binary is installed.  After reboot, run:"
+    info "  sudo tailscale up           # auth via browser"
+    info "  echo '{\"token\":\"...\",\"chat_id\":\"...\"}' > $TELEGRAM_CONF && chmod 600 $TELEGRAM_CONF"
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 echo
