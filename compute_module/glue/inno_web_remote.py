@@ -49,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v1.3.3_B3"
+INNOPILOT_VERSION = "v1.3.3_B4"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -95,6 +95,7 @@ _DEFAULT_SETTINGS: dict = {
         "oled_sh1106":            False,
         "invert_clutch":          False,
         "invert_motor":           False,
+        "remote_helm":            False,  # Enables REMOTE button on main screen; OFF by default
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -1438,6 +1439,13 @@ body{
           <button class="sf-bb" data-boolid="invert_motor" data-bval="false">OFF</button>
         </div>
       </div>
+      <div class="sf-row" data-sfid="remote_helm">
+        <span class="sf-lbl" title="Allow the web remote to directly steer the rudder via the REMOTE button. Default OFF — enable only when actively helming from this screen.">Remote Helm Control &#9432;</span>
+        <div class="sf-bool">
+          <button class="sf-bb" data-boolid="remote_helm" data-bval="true">ON</button>
+          <button class="sf-bb" data-boolid="remote_helm" data-bval="false">OFF</button>
+        </div>
+      </div>
 
       <div class="ss-title">AUTOPILOT</div>
       <div class="sf-row" data-sfid="deadband_pct">
@@ -2330,6 +2338,7 @@ var SF = [
   {id:'oled_sh1106',            sec:'features', type:'bool'},
   {id:'invert_clutch',          sec:'features', type:'bool'},
   {id:'invert_motor',           sec:'features', type:'bool'},
+  {id:'remote_helm',            sec:'features', type:'bool'},
   // Autopilot
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
   {id:'pgain',                  sec:'autopilot', type:'number'},
@@ -2395,6 +2404,14 @@ function sfApplyToUI() {
       if (el) el.value = v;
     }
   });
+  applyRemoteHelmSetting();
+}
+
+// Enable or disable the REMOTE mode-radio button based on the remote_helm setting.
+function applyRemoteHelmSetting() {
+  var enabled = !!(gSettings && gSettings.features && gSettings.features.remote_helm);
+  var remBtn = document.querySelector('.mode-radio[data-action="remote"]');
+  if (remBtn) remBtn.classList.toggle('disabled', !enabled);
 }
 
 // Read text/number/password inputs back into gSettings.
@@ -2489,6 +2506,7 @@ function closeSettings(save) {
         msg = '\u2717 Save failed'; type = 'err';
       }
       setSovStatus(msg, type);
+      applyRemoteHelmSetting();
       setTimeout(_doClosePanel, 1800);
     })
     .catch(function(err) {
@@ -2595,6 +2613,7 @@ fetch('/settings')
   .then(function(s) {
     delete s['_source'];
     gSettings = s;
+    applyRemoteHelmSetting();
     var name = (s.vessel && s.vessel.name) ? s.vessel.name.trim() : '';
     if (!name) _bnmShow();
   })
