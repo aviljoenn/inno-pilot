@@ -7,6 +7,14 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 ## [Unreleased]
 
 ### Fixed
+- **I2C enable verification** (`install.sh`, `INSTALL.md`): `raspi-config nonint
+  do_i2c 0` can exit 0 without actually writing the `dtparam=i2c_arm=on` line
+  (seen in the field 2026-09-15, on a card whose boot partition had been
+  re-imaged separately from its rootfs). `install.sh` now greps
+  `/boot/firmware/config.txt` (falling back to `/boot/config.txt`) right after
+  the call and aborts with a clear error if the write didn't land, instead of
+  silently continuing with I2C never actually enabled. `INSTALL.md` documents
+  the same manual check for anyone enabling I2C by hand.
 - **pypilot web UI / install** (`install.sh`, `inno_deploy.sh`,
   `compute_module/pypilot/scripts/debian/etc/systemd/system/pypilot_web.service`):
   the pypilot web UI on port **8000** — which hosts the compass/heel

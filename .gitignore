@@ -10,3 +10,4 @@ CREDENTIALS.local.md
 *.swp
 *.swo
 *~
+instances.local/

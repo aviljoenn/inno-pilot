@@ -189,6 +189,16 @@ sudo apt-get "${APT_OPTS[@]}" install -y "${COMMON_PKGS[@]}" "${EXTRA_PKGS[@]}"
 
 step "Phase 1: enabling I2C"
 sudo raspi-config nonint do_i2c 0
+# `raspi-config nonint` can exit 0 without actually writing the dtparam line
+# (seen in the field on 2026-09-15: a card whose /boot/firmware/config.txt had
+# been reset to stock by a later re-image of just the boot partition — the
+# rootfs still carried an earlier install's i2c-tools package, which masked
+# the fact that I2C itself was never re-enabled on that card). Verify the
+# write actually landed instead of trusting the exit code.
+BOOT_CONFIG=/boot/firmware/config.txt
+[ -e "$BOOT_CONFIG" ] || BOOT_CONFIG=/boot/config.txt
+grep -q '^dtparam=i2c_arm=on' "$BOOT_CONFIG" || \
+    die "I2C enable did not persist to $BOOT_CONFIG — check the file is writable and not on a read-only boot partition, then re-run 'sudo raspi-config nonint do_i2c 0' by hand."
 
 # ── Phase 2 — clone repo ──────────────────────────────────────────────────────
 

@@ -52,6 +52,18 @@ Enable I2C (for OLED and ADS1115 on the Nano side):
 sudo raspi-config nonint do_i2c 0
 ```
 
+**Verify it actually took** — `raspi-config nonint` can exit 0 without writing the
+dtparam line (seen in the field 2026-09-15, on a card whose boot partition had been
+re-imaged separately from its rootfs). Don't trust the exit code alone:
+
+```bash
+grep '^dtparam=i2c_arm=on' /boot/firmware/config.txt || echo "I2C NOT enabled — re-run the command above"
+```
+
+If it's missing, re-run the `raspi-config` command and check again, then reboot before
+expecting `/dev/i2c-1` to exist. `install.sh` now checks this automatically and aborts
+with a clear error if the write didn't land — see below.
+
 ---
 
 ## Phase 3 — Clone and install inno-pilot (includes pypilot)
