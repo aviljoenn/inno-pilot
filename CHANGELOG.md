@@ -37,11 +37,48 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   - The unit runs as `User=innopilot` (upstream ships it with no `User=` line, so
     it would run as root with the wrong `~/.pypilot`) and uses an absolute
     `ExecStart` path.
+- **pypilot competing with avahi-daemon for mDNS (UDP 5353)** (`compute_module/pypilot/pypilot/server.py`,
+  `compute_module/pypilot/pypilot/signalk.py`, `compute_module/glue/inno_pilot_bridge.py`):
+  `<hostname>.local` resolution on the LAN was intermittently failing — diagnosed
+  on Dyason (2026-09-17) after the web UI appeared unreachable via mDNS. Three
+  independent pieces of code each ran their own IPv4 python-zeroconf mDNS
+  responder/scanner, all competing with the system `avahi-daemon` for the same
+  UDP 5353 socket (avahi itself logs `Detected another IPv4 mDNS stack running
+  on this host... makes mDNS unreliable` when this happens):
+  1. `server.py` self-announced `_pypilot._tcp.local.` for pypilot-client
+     auto-discovery — unused by anything in this repo, disabled outright.
+  2. `signalk.py`'s `ZeroConfProcess` scanned for `_http._tcp.local.` to
+     auto-discover a SignalK server — SignalK integration itself is a real,
+     wanted feature (see `TODO.md`), only the live LAN-scanning discovery was
+     disabled; `ZeroConfProcess.process()` now idles instead.
+  3. Our own `inno_pilot_bridge.py` called `pypilotClient()` with no host
+     argument, which makes pypilot's client library probe via zeroconf on every
+     (re)connect — fixed by pinning `pypilotClient('127.0.0.1')` (bridge and
+     pypilot always run co-resident on the same Pi at a fixed port, so no
+     discovery was ever needed).
+  - Verified on Dyason: `avahi-daemon` is now the sole UDP 5353 holder, a fresh
+    avahi restart logs no conflict warning, and a direct unicast mDNS query
+    (`dig @<pi-ip> -p 5353 <hostname>.local A`) resolves correctly.
+  - See `CLAUDE.md`'s "pypilot fork strategy" section for the full diagnosis
+    and the standing lesson for future pypilot integration code in this repo
+    (always pass an explicit host to `pypilotClient()`).
+
+### Added
+- **`TODO.md`**: parked a high-priority design task — proper SignalK
+  integration covering two scenarios (no central SignalK instance, Inno-Pilot
+  must stand alone reliably; vs. a central SignalK Pi that every instance
+  connects to via a static, known address rather than LAN discovery). Disabling
+  SignalK's zeroconf discovery above was a narrow mDNS-conflict fix, not this
+  design.
+- **CLAUDE.md**: firm rule that deployment always goes through `inno_deploy.sh`
+  — no component's own install/build tooling (`setup.py`, `arduino-cli upload`,
+  etc.) should ever be hand-run against a live instance.
 
 ### Notes
-- This change touches the **pypilot** subsystem and the installers only; it does
-  **not** modify any of the version-synced inno-remote components (Bridge, Nano,
-  Remote), so no `INNOPILOT_VERSION` bump is required.
+- This change touches the **pypilot** subsystem, the bridge glue, and docs
+  only; it does **not** modify any of the version-synced inno-remote
+  components (Bridge protocol, Nano firmware, Remote), so no
+  `INNOPILOT_VERSION` bump is required.
 
 ## [v1.3.3_B7] — 2026-06-26 — ADC mux-settle fix (spurious PiV HIGH) + 5V calibration
 
