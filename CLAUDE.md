@@ -186,9 +186,12 @@ integrations we don't use, optional hardware backends we don't have, etc.
   incremental stripping as issues surface, not a license for a sweeping
   rewrite of the fork in one PR (see Prime directive #1 and #3).
 - Because this is a vendored source fork (not `pip install pypilot`), edits
-  live directly in `compute_module/pypilot/pypilot/*.py` and deploy via the
-  same two-pass `setup.py install` as any other pypilot source change (see
-  the TWO-PASS gotcha below).
+  live directly in `compute_module/pypilot/pypilot/*.py`. Deploying them
+  always goes through `inno_deploy.sh` (see "Deployment: ALWAYS via
+  inno_deploy.sh" above) — never hand-run the two-pass `setup.py install`
+  described in the TWO-PASS gotcha below; that gotcha explains *why*
+  `inno_deploy.sh` needs two passes, it is not deploy instructions to follow
+  by hand.
 - Note removed/disabled behavior in the PR description so it's clear this was
   a deliberate strip, not a regression, if upstream pypilot is ever diffed
   against again.
@@ -201,6 +204,20 @@ the LAN. Diagnosed on Dyason; avahi itself logged
 `WARNING: Detected another IPv4 mDNS stack running on this host`. Nothing in
 Inno-Pilot's bridge/web stack used pypilot's self-announcement (they connect
 over a known local port), so it was pure unwanted surface area.
+
+**Second instance (2026-09-17):** `signalk.py`'s `ZeroConfProcess` (also
+python-zeroconf, scanning for `_http._tcp.local.` to auto-discover a SignalK
+server) was disabled too — same UDP 5353 conflict with `avahi-daemon`,
+persisting even after the first fix. Unlike the self-announcement, SignalK
+integration itself is a real, wanted feature (Inno-Pilot's architecture is one
+central SignalK Pi that every instance subscribes to — see
+`servo_motor_control/docs/ARCHITECTURE.md`) — it's the *live LAN discovery*
+mechanism that was unwanted, not SignalK support. `signalk.py`'s data
+translation and HTTP polling logic are untouched; `ZeroConfProcess.process()`
+now idles instead of scanning, so `signalk_host_port` never auto-populates.
+**Follow-up:** add a static `signalk_host` config option so a known central
+SignalK Pi's address can be configured directly, without depending on mDNS at
+all — not yet implemented.
 
 ---
 

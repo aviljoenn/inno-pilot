@@ -79,32 +79,19 @@ class ZeroConfProcess(multiprocessing.Process):
 
 
     def process(self):
-        warned = False        
+        # Inno-Pilot: SignalK auto-discovery disabled. This ran its own IPv4
+        # mDNS responder (python-zeroconf, scanning for "_http._tcp.local.")
+        # that competed with the system avahi-daemon on UDP 5353 -- the same
+        # class of conflict as server.py's self-announcement (see the comment
+        # there), diagnosed 2026-09-17 on Dyason. Inno-Pilot's target
+        # architecture is one central, known SignalK Pi that every instance
+        # connects to, not ad hoc LAN discovery, so this process now just
+        # idles: self.zero_conf.poll() (in signalk.poll() below) keeps
+        # working -- it just never receives anything, so signalk_host_port
+        # stays unset until a static-host config option is added (tracked as
+        # follow-up; not implemented here).
         while True:
-            try:
-                import zeroconf
-                if warned:
-                    print('signalk:' + _('succeeded') + ' import zeroconf')
-                break
-            except Exception as e:
-                if not warned:
-                    print('signalk: ' + _('failed to') + ' import zeroconf, ' + _('autodetection not possible'))
-                    print(_('try') + ' pip3 install zeroconf' + _('or') + ' apt install python3-zeroconf')
-                    warned = True
-                time.sleep(20)
-
-        current_ip_address = []
-        zc = None
-        while True:
-            new_ip_address = zeroconf.get_all_addresses()
-            if current_ip_address != new_ip_address:
-                debug("IP address changed from ", current_ip_address, "to", new_ip_address)
-                current_ip_address = new_ip_address
-                if zc != None:
-                    zc.close()
-                zc = zeroconf.Zeroconf()
-                self.browser = zeroconf.ServiceBrowser(zc, "_http._tcp.local.", self)
-            time.sleep(5)
+            time.sleep(3600)
 
     def poll(self):  # from signalk process
         last = False
