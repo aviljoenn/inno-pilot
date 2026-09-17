@@ -107,6 +107,34 @@ When asked to implement something:
 
 ---
 
+## Deployment: ALWAYS via `inno_deploy.sh` — never invoke pypilot's `setup.py` (or any other component's install steps) by hand
+
+**`inno_deploy.sh` (run on the Pi) is the only sanctioned way to deploy changes
+to a live Inno-Pilot instance.** This applies to every component it covers —
+pypilot, the bridge, the web remote, systemd units, the Nano sketch — not just
+pypilot.
+
+Do **not** manually replicate its steps (e.g. running `setup.py install`
+yourself, hand-copying files into `dist-packages`, manually restarting
+individual services in some other order) even when you know exactly what a
+step does and why — e.g. the two-pass `setup.py install` gotcha documented
+below. `inno_deploy.sh` encodes the full ordering, guards, and safety checks
+(stopping/restarting the right services in the right sequence, freeing
+`/dev/ttyUSB0` before any Nano flash, the pyproject.toml/deps two-pass
+workaround, etc.) — reproducing part of it ad hoc is how those guards get
+silently skipped.
+
+**How to apply:** if a fix needs deploying/testing on real hardware, say so
+and either run `inno_deploy.sh` itself (after checking what it does — it can
+flash the Nano and restart every service, so confirm with the user first
+given the blast radius) or ask the user to run it. Never invoke a component's
+own build/install tooling (`setup.py`, `pio run --target upload`,
+`arduino-cli upload`, etc.) directly against a live instance as a shortcut —
+those are implementation details `inno_deploy.sh` owns, not entry points for
+an agent to call.
+
+---
+
 ## PR description template (use this structure)
 **What**
 - (1–3 bullets)
