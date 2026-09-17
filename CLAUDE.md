@@ -133,6 +133,49 @@ If changes touch any of the following, add a dedicated "Hardware impact" section
 
 ---
 
+## pypilot fork strategy: progressively strip unwanted code
+
+`compute_module/pypilot/` is a **fork of upstream pypilot**, vendored into this
+repo, not a pristine third-party dependency. The long-term direction is for
+Inno-Pilot to run its own autopilot-core code; until that replacement exists,
+this fork is adapted incrementally to fit Inno-Pilot's actual needs rather than
+kept upstream-compatible for its own sake.
+
+**Principle:** whenever a piece of pypilot's behavior is found to conflict with,
+duplicate, or not serve Inno-Pilot's standalone operation, strip it out —
+don't just patch around it. Inno-Pilot instances must run rock-solid
+standalone (no dependency on network services, discovery protocols, or
+companion apps that aren't part of this project). Candidates for stripping
+include anything pypilot does for generic/standalone-pypilot use cases that
+Inno-Pilot doesn't need: third-party client auto-discovery, signalk/web
+integrations we don't use, optional hardware backends we don't have, etc.
+
+**How to apply:**
+- Prefer deleting/commenting the offending code (with a clear comment
+  explaining what it did and why it was removed — see Comments rules above)
+  over adding a workaround elsewhere that tolerates the bad behavior.
+- Keep changes scoped to what was actually diagnosed as a problem; this is
+  incremental stripping as issues surface, not a license for a sweeping
+  rewrite of the fork in one PR (see Prime directive #1 and #3).
+- Because this is a vendored source fork (not `pip install pypilot`), edits
+  live directly in `compute_module/pypilot/pypilot/*.py` and deploy via the
+  same two-pass `setup.py install` as any other pypilot source change (see
+  the TWO-PASS gotcha below).
+- Note removed/disabled behavior in the PR description so it's clear this was
+  a deliberate strip, not a regression, if upstream pypilot is ever diffed
+  against again.
+
+**First instance (2026-09-17):** `server.py`'s self-announcing zeroconf
+(`zeroconf_service.py`, `_pypilot._tcp.local.`) was disabled — it ran a second
+IPv4 mDNS responder on the same host as `avahi-daemon`, and the two competed
+for UDP 5353, causing intermittent `<hostname>.local` resolution failures on
+the LAN. Diagnosed on Dyason; avahi itself logged
+`WARNING: Detected another IPv4 mDNS stack running on this host`. Nothing in
+Inno-Pilot's bridge/web stack used pypilot's self-announcement (they connect
+over a known local port), so it was pure unwanted surface area.
+
+---
+
 ## Known hardware gotcha: Nano reset via HUPCL
 
 **The Arduino Nano resets whenever `/dev/ttyUSB0` is closed by any process.**

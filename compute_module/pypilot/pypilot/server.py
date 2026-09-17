@@ -18,6 +18,8 @@ from bufferedsocket import LineBufferedNonBlockingSocket
 from nonblockingpipe import NonBlockingPipe
 
 DEFAULT_PORT = 23322
+# Inno-Pilot: zeroconf_service import kept for reference but no longer
+# instantiated below -- see note at self.zeroconf assignment.
 from zeroconf_service import zeroconf
 max_connections = 30
 configfilepath = os.getenv('HOME') + '/.pypilot/'
@@ -651,8 +653,19 @@ class pypilotServer(object):
                 self.fd_to_pipe[fd] = pipe
             pipe.cwatches = {'values': True} # server always watches client values
         self.initialized = True
-        self.zeroconf = zeroconf()
-        self.zeroconf.start()
+        # Inno-Pilot: disabled. This spawned a second, independent IPv4 mDNS
+        # responder (python-zeroconf) purely to advertise "_pypilot._tcp.local."
+        # for pypilot-client auto-discovery. It binds the same UDP 5353 socket
+        # as the system avahi-daemon and both end up answering the same
+        # queries, which avahi itself flags at startup ("Detected another
+        # IPv4 mDNS stack running on this host... makes mDNS unreliable") --
+        # diagnosed 2026-09-17 on Dyason as the cause of intermittent
+        # "<hostname>.local" resolution failures. Nothing in the Inno-Pilot
+        # bridge/web stack discovers pypilot via zeroconf (they connect to a
+        # known local port), so this self-announcement serves no purpose here
+        # and avahi-daemon already owns mDNS for the host.
+        # self.zeroconf = zeroconf()
+        # self.zeroconf.start()
             
     def __del__(self):
         if not self.initialized:
