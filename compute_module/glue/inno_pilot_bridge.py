@@ -447,7 +447,16 @@ def pypilot_worker(
     """
     while True:
         try:
-            client = pypilotClient()
+            # Explicit host pins the connection to the local pypilot instance
+            # (always co-resident on this Pi at the default port) and, as a
+            # side effect, sets pypilotClient.can_probe = False -- omitting
+            # the host previously made the client import python-zeroconf and
+            # scan for "_pypilot._tcp.local." on every (re)connect, which
+            # competed with the system avahi-daemon on UDP 5353 the same way
+            # server.py's self-announcement and signalk.py's discovery did
+            # (see CLAUDE.md "pypilot fork strategy"). No discovery is ever
+            # needed here: bridge and pypilot always run on the same host.
+            client = pypilotClient('127.0.0.1')
             client.watch('imu.heading', True)
             client.watch('ap.heading_command', True)
             client.watch('rudder.angle', True)

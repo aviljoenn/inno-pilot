@@ -219,6 +219,20 @@ now idles instead of scanning, so `signalk_host_port` never auto-populates.
 SignalK Pi's address can be configured directly, without depending on mDNS at
 all — not yet implemented.
 
+**Third source, not a fork strip (2026-09-17):** even after both fixes above,
+avahi still logged the conflict warning. Root cause was in **our own**
+`compute_module/glue/inno_pilot_bridge.py`, not the pypilot fork: its
+`pypilot_worker()` thread called `pypilotClient()` with no host argument.
+pypilot's `client.py` sets `can_probe = not host` — an empty host makes every
+(re)connect import python-zeroconf and scan for `_pypilot._tcp.local.`,
+exactly the client-side counterpart of the two server-side sources above.
+Bridge and pypilot always run co-resident on the same Pi at a fixed port, so
+no discovery was ever needed here. Fixed by pinning the host explicitly:
+`pypilotClient('127.0.0.1')`, which also sets `can_probe = False`. Lesson for
+future pypilot integration code in this repo: **always pass an explicit host
+to `pypilotClient()`** — an implicit/omitted host silently opens this same
+mDNS surface area again.
+
 ---
 
 ## Known hardware gotcha: Nano reset via HUPCL
