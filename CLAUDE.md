@@ -217,7 +217,9 @@ translation and HTTP polling logic are untouched; `ZeroConfProcess.process()`
 now idles instead of scanning, so `signalk_host_port` never auto-populates.
 **Follow-up:** add a static `signalk_host` config option so a known central
 SignalK Pi's address can be configured directly, without depending on mDNS at
-all — not yet implemented.
+all — not yet implemented. **See `TODO.md` for the full two-scenario design
+task this is parked under** (standalone-no-SignalK vs. central-SignalK) — this
+was a narrow mDNS-conflict fix, not the real SignalK integration design.
 
 **Third source, not a fork strip (2026-09-17):** even after both fixes above,
 avahi still logged the conflict warning. Root cause was in **our own**
