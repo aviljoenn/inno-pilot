@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B7";
-const uint16_t INNOPILOT_BUILD_NUM = 7;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.3_B8";
+const uint16_t INNOPILOT_BUILD_NUM = 8;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -439,6 +439,121 @@ bool          comms_fault_silenced   = false;  // true after user silences comms
 bool          err_detail_pending     = false;   // true when an unsent error detail is queued
 uint16_t      err_detail_value       = 0;       // packed: lo=code byte, hi=received CRC
 unsigned long err_detail_last_ms     = 0;       // last time an error detail frame was sent
+
+// ---- Loop profiling (B8) — measurement only, no control-behaviour change ----
+// Added to find what blocks loop() long enough for the UART RX buffer to overflow.
+// Every CRC error observed on Dyason fell on a ~1.0086 s grid, but BOTH oled_draw()
+// and temp_service() run on a 1000 ms period, so the two cannot be told apart by
+// timing alone — hence the per-component measurements below.
+//
+// Durations are microseconds clamped to 65535. A reported 65535 means the sample
+// exceeded uint16 range and that metric must be rescaled before it is trusted.
+// micros() has 4 us resolution on AVR, so anything under 4 us reads 0 or 4.
+const uint8_t PROF_OLED_MAX_CODE        = 0xD0;  // oled_draw() worst case, us
+const uint8_t PROF_OLED_MEAN_CODE       = 0xD1;  // oled_draw() mean, us
+const uint8_t PROF_TEMP_MAX_CODE        = 0xD2;  // temp_service() worst case, us
+const uint8_t PROF_RUDDER_MAX_CODE      = 0xD3;  // service_rudder_adc() worst case, us
+const uint8_t PROF_MOTOR_MAX_CODE       = 0xD4;  // update_motor_from_command() worst case, us
+const uint8_t PROF_RX_MAX_CODE          = 0xD5;  // serial drain+parse worst case, us
+const uint8_t PROF_LOOP_MAX_CODE        = 0xD6;  // whole loop() worst case, us
+const uint8_t PROF_LOOP_MEAN_CODE       = 0xD7;  // whole loop() mean, us
+const uint8_t PROF_AVAIL_HW_CODE        = 0xD8;  // Serial.available() high-water at loop top
+const uint8_t PROF_AVAIL_CEIL_N_CODE    = 0xD9;  // times available() hit the ring-buffer ceiling
+const uint8_t PROF_RXBUF_SIZE_CODE      = 0xDA;  // compiled SERIAL_RX_BUFFER_SIZE (64 or 128)
+const uint8_t PROF_AVAIL_POST_OLED_CODE = 0xDB;  // available() right after oled_draw() returned
+const uint8_t PROF_AVAIL_POST_TEMP_CODE = 0xDC;  // available() right after temp_service() returned
+const uint8_t PROF_METRIC_COUNT         = 13;    // frames in one report burst
+
+const unsigned long PROF_REPORT_MS = 5000;       // one report burst every 5 s
+
+// Deliberately fixed at 63 (the ceiling of a DEFAULT 64-byte buffer) rather than
+// derived from SERIAL_RX_BUFFER_SIZE. The macro reflects only what THIS sketch was
+// compiled with: an incremental build on a warm cache can link a core built without
+// the -DSERIAL_RX_BUFFER_SIZE=128 flag, in which case a macro-derived ceiling of 127
+// could never be reached and would report a reassuring zero forever.
+// 63 is reachable either way:
+//   real buffer  64 -> 63 is the true ceiling, so a hit means bytes were dropped
+//   real buffer 128 -> 63 means the buffer ran half deep (pressure, not yet loss)
+// Cross-check with PROF_AVAIL_HW_CODE: a high-water that never exceeds 63 while
+// PROF_RXBUF_SIZE_CODE reports 128 means the flag did not reach the linked core.
+const uint8_t PROF_AVAIL_CEILING = 63;
+
+uint16_t prof_oled_max_us     = 0;
+uint32_t prof_oled_sum_us     = 0;
+uint16_t prof_oled_n          = 0;
+uint16_t prof_temp_max_us     = 0;
+uint16_t prof_rudder_max_us   = 0;
+uint16_t prof_motor_max_us    = 0;
+uint16_t prof_rx_max_us       = 0;
+uint16_t prof_loop_max_us     = 0;
+uint32_t prof_loop_sum_us     = 0;
+uint16_t prof_loop_n          = 0;
+uint8_t  prof_avail_hw        = 0;
+uint16_t prof_avail_ceil_n    = 0;
+uint8_t  prof_avail_post_oled = 0;
+uint8_t  prof_avail_post_temp = 0;
+
+// Snapshot taken when a report falls due so the live accumulators reset at once
+// and the multi-pass burst still reports one coherent window.
+uint16_t      prof_snap[PROF_METRIC_COUNT];
+uint8_t       prof_emit_idx        = 0;   // 0 = idle, else 1..PROF_METRIC_COUNT
+unsigned long prof_last_report_ms  = 0;
+
+static inline uint16_t prof_clamp(uint32_t v) {
+  return (v > 65535UL) ? 65535U : (uint16_t)v;
+}
+
+// Record one duration sample into a max-slot.
+static inline void prof_max(uint16_t &slot, uint32_t us) {
+  uint16_t v = prof_clamp(us);
+  if (v > slot) slot = v;
+}
+
+// Record one Serial.available() sample into a max-slot.
+static inline void prof_max_u8(uint8_t &slot, uint8_t v) {
+  if (v > slot) slot = v;
+}
+
+// Copy the live window into the snapshot, then zero the window.
+void prof_snapshot() {
+  prof_snap[0]  = prof_oled_max_us;
+  prof_snap[1]  = prof_oled_n ? prof_clamp(prof_oled_sum_us / prof_oled_n) : 0;
+  prof_snap[2]  = prof_temp_max_us;
+  prof_snap[3]  = prof_rudder_max_us;
+  prof_snap[4]  = prof_motor_max_us;
+  prof_snap[5]  = prof_rx_max_us;
+  prof_snap[6]  = prof_loop_max_us;
+  prof_snap[7]  = prof_loop_n ? prof_clamp(prof_loop_sum_us / prof_loop_n) : 0;
+  prof_snap[8]  = prof_avail_hw;
+  prof_snap[9]  = prof_avail_ceil_n;
+  prof_snap[10] = SERIAL_RX_BUFFER_SIZE;
+  prof_snap[11] = prof_avail_post_oled;
+  prof_snap[12] = prof_avail_post_temp;
+
+  prof_oled_max_us = 0; prof_oled_sum_us = 0; prof_oled_n = 0;
+  prof_temp_max_us = 0; prof_rudder_max_us = 0; prof_motor_max_us = 0;
+  prof_rx_max_us   = 0;
+  prof_loop_max_us = 0; prof_loop_sum_us = 0; prof_loop_n = 0;
+  prof_avail_hw    = 0; prof_avail_ceil_n = 0;
+  prof_avail_post_oled = 0; prof_avail_post_temp = 0;
+}
+
+// Send exactly one metric frame per call. Spreading the burst across successive
+// loop passes keeps it inside the 64-byte TX buffer; sending all 13 frames
+// (78 bytes) at once would block loop() waiting for the UART to drain.
+void prof_emit_step() {
+  const uint8_t codes[PROF_METRIC_COUNT] = {
+    PROF_OLED_MAX_CODE,     PROF_OLED_MEAN_CODE,   PROF_TEMP_MAX_CODE,
+    PROF_RUDDER_MAX_CODE,   PROF_MOTOR_MAX_CODE,   PROF_RX_MAX_CODE,
+    PROF_LOOP_MAX_CODE,     PROF_LOOP_MEAN_CODE,   PROF_AVAIL_HW_CODE,
+    PROF_AVAIL_CEIL_N_CODE, PROF_RXBUF_SIZE_CODE,
+    PROF_AVAIL_POST_OLED_CODE, PROF_AVAIL_POST_TEMP_CODE
+  };
+  uint8_t i = prof_emit_idx - 1;
+  send_frame(codes[i], prof_snap[i]);
+  prof_emit_idx++;
+  if (prof_emit_idx > PROF_METRIC_COUNT) prof_emit_idx = 0;
+}
 
 // ---- State / telemetry ----
 uint16_t flags            = REBOOTED;   // reported once then cleared
@@ -2018,11 +2133,23 @@ void setup() {
 }
 
 void loop() {
+  unsigned long prof_loop_start_us = micros();
   unsigned long now = millis();
+
+  // Sample RX depth before anything drains it: this is what accumulated during
+  // the previous pass, including whatever blocked inside it.
+  {
+    uint8_t avail_now = (uint8_t)Serial.available();
+    prof_max_u8(prof_avail_hw, avail_now);
+    if (avail_now >= PROF_AVAIL_CEILING) prof_avail_ceil_n++;
+  }
 
   // DS18B20 temperature service (feature-gated)
   if (feature_flags & FEATURE_TEMP_SENSOR) {
+    unsigned long prof_t0 = micros();
     temp_service(now);
+    prof_max(prof_temp_max_us, micros() - prof_t0);
+    prof_max_u8(prof_avail_post_temp, (uint8_t)Serial.available());
   }
   if (!oled_ok && (now - oled_last_init_ms >= OLED_INIT_RETRY_MS)) {
     oled_last_init_ms = now;
@@ -2296,6 +2423,7 @@ if (!ap_engaged && !remote_manual_active) {
   }
 
   // --- RX: parse incoming framed packets ---
+  unsigned long prof_rx_start_us = micros();
   while (Serial.available()) {
     uint8_t c = Serial.read();
     any_serial_rx = true;
@@ -2350,6 +2478,7 @@ if (!ap_engaged && !remote_manual_active) {
       break;
     }
   }
+  prof_max(prof_rx_max_us, micros() - prof_rx_start_us);
 
   // --- Telemetry: periodic FLAGS and RUDDER ---
   if (now - last_flags_ms >= FLAGS_PERIOD_MS) {
@@ -2439,7 +2568,11 @@ if (!ap_engaged && !remote_manual_active) {
   }
 
   // --- Motor + clutch control with limit logic ---
-  update_motor_from_command();
+  {
+    unsigned long prof_t0 = micros();
+    update_motor_from_command();
+    prof_max(prof_motor_max_us, micros() - prof_t0);
+  }
 
   // ---- H-bridge pin-state telemetry (on-change, debug diagnostics) ----
   // Sent whenever D2/D3/D9 change — lets the bridge log exact motor on/off
@@ -2469,12 +2602,40 @@ if (!ap_engaged && !remote_manual_active) {
   // update_motor_from_command() uses the previous iteration's published value
   // (latency ≤ one loop iteration) and all other ADC channel work is already
   // complete, guaranteeing a channel switch into A2 every call.
-  service_rudder_adc();
+  {
+    unsigned long prof_t0 = micros();
+    service_rudder_adc();
+    prof_max(prof_rudder_max_us, micros() - prof_t0);
+  }
 
   static unsigned long last_draw = 0;
   if (oled_ok && (now - last_draw >= 1000)) {
     last_draw = now;
+    unsigned long prof_t0 = micros();
     oled_draw();
+    unsigned long prof_dt = micros() - prof_t0;
+    prof_max(prof_oled_max_us, prof_dt);
+    prof_oled_sum_us += prof_clamp(prof_dt);
+    prof_oled_n++;
+    // Sampled before the next pass drains anything: shows how much arrived while
+    // the draw held the CPU. This is what separates the OLED from temp_service().
+    prof_max_u8(prof_avail_post_oled, (uint8_t)Serial.available());
+  }
+
+  // ---- Profiling: loop duration, then the report burst ----
+  // Duration is taken before the emit so the metric reflects real loop cost; the
+  // emit adds one 6-byte frame on report passes and is deliberately excluded.
+  prof_max(prof_loop_max_us, micros() - prof_loop_start_us);
+  prof_loop_sum_us += prof_clamp(micros() - prof_loop_start_us);
+  prof_loop_n++;
+
+  if (prof_emit_idx == 0 && (now - prof_last_report_ms >= PROF_REPORT_MS)) {
+    prof_last_report_ms = now;
+    prof_snapshot();
+    prof_emit_idx = 1;
+  }
+  if (prof_emit_idx) {
+    prof_emit_step();
   }
 }
 

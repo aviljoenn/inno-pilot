@@ -88,10 +88,21 @@ Before adding new tooling, check what the repo already uses:
 > Every Inno-Pilot constructed may be on different IP subnets with different IP addresses
 > `arduino-cli` is installed at `/usr/local/bin/arduino-cli`
 > with the `arduino:avr` core. The Nano is on `/dev/ttyUSB0`.
-> Compile: `arduino-cli compile --fqbn arduino:avr:nano --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .`
+> Compile: `arduino-cli compile --clean --fqbn arduino:avr:nano --build-property "build.extra_flags=-DSERIAL_RX_BUFFER_SIZE=128" .`
 > Upload:  `arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:nano .`
 > The `SERIAL_RX_BUFFER_SIZE=128` flag is **required** — the default 64-byte buffer overflows
 > during bridge telemetry bursts while the OLED I2C draw blocks `loop()`.
+> `--clean` is **equally required**: without it `arduino-cli` reuses cached core/library
+> objects that may have been built WITHOUT the flag, silently linking a 64-byte-buffer
+> `HardwareSerial` against a sketch that believes it has 128. Under `-flto` that is a
+> real ODR violation, and the only visible hint is an easily-missed note reading
+> `HardwareSerial.h:93: array types have different bounds`.
+> Demonstrated on 2026-09-17 — identical source, same command, cache state the only
+> difference: incremental build = 1137 bytes RAM (64-byte buffer, warning present),
+> clean build = 1201 bytes RAM (128-byte buffer, no warning). The 64-byte delta is the
+> buffer. Verify a build landed correctly by checking the `Serial` object size in the
+> ELF (`avr-nm --print-size --radix=d <elf> | grep ' Serial'`): **221 bytes = 128-byte
+> RX buffer**; ~157 bytes means the flag did not reach the linked core.
 > Stop `inno-pilot-bridge`, `inno-pilot-socat`, `pypilot` services before flashing; restart after.
 
 ---
