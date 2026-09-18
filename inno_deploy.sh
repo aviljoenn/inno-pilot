@@ -307,7 +307,18 @@ info "Step 2 — Pre-compile Nano firmware (services still running)"
 if $FLASH_NANO; then
     cd "$NANO_SKETCH_DIR"
     log "Compiling $NANO_SKETCH_DIR ..."
+    # --clean is REQUIRED, not an optimisation to drop for speed. Without it
+    # arduino-cli reuses cached core/library objects that may have been built
+    # WITHOUT -DSERIAL_RX_BUFFER_SIZE=128, silently linking a 64-byte-buffer
+    # HardwareSerial against a sketch compiled as if it had 128. Under -flto that
+    # is a real ODR violation whose only hint is an easily-missed note reading
+    # "HardwareSerial.h:93: array types have different bounds".
+    # Demonstrated 2026-09-17: identical source, cache state the only difference —
+    # incremental = 1137 bytes RAM (64-byte buffer), clean = 1201 bytes (128-byte).
+    # Costs a full core rebuild (slower), which is cheap next to flashing a Nano
+    # whose serial buffer is half what every timing assumption in the sketch expects.
     "${ARDUINO[@]}" compile \
+        --clean \
         --fqbn "$NANO_FQBN" \
         --build-property "$NANO_BUILD_FLAG" \
         .

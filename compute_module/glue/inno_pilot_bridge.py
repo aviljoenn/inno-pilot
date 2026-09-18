@@ -194,6 +194,41 @@ BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
 COMMS_DIAG_CODE       = 0xEC  # Nano->Bridge: comms diagnostics (lo=err_window_sum, hi=crit_consec_s)
 COMMS_ERR_DETAIL_CODE = 0xED  # Nano->Bridge: error detail (lo=corrupt code, hi=rx_crc)
 
+# ---------------------------------------------------------------------------
+# Nano loop profiling (B8) — measurement only, no control effect.
+# The Nano sends one metric per frame in a 13-frame burst every 5 s, spread one
+# frame per loop pass so the burst stays inside its 64-byte TX buffer.
+#
+# Durations are microseconds already clamped to 65535 by the Nano; a reported
+# 65535 means that metric overflowed uint16 and must be rescaled on the Nano
+# before the number is trusted.
+#
+# Purpose: every CRC error observed on Dyason fell on a ~1.0086 s grid, but both
+# oled_draw() and temp_service() run on a 1000 ms period — these metrics (in
+# particular rx_avail after oled vs after temp) are what tell the two apart.
+#
+# Reading the buffer metrics: SERIAL_RX_BUFFER_SIZE (0xDA) is only what the SKETCH
+# was compiled with, which an incremental build on a warm cache can leave out of
+# step with the linked core. The trustworthy figure is the observed high-water
+# (0xD8), which can never exceed the real buffer size minus one. If 0xDA reports
+# 128 but 0xD8 never passes 63, the flag did not reach the linked core.
+# ---------------------------------------------------------------------------
+PROF_CODES: dict[int, tuple[str, str]] = {
+    0xD0: ("oled_draw max",         "us"),
+    0xD1: ("oled_draw mean",        "us"),
+    0xD2: ("temp_service max",      "us"),
+    0xD3: ("rudder_adc max",        "us"),
+    0xD4: ("motor_update max",      "us"),
+    0xD5: ("serial_rx max",         "us"),
+    0xD6: ("loop max",              "us"),
+    0xD7: ("loop mean",             "us"),
+    0xD8: ("rx_avail high-water",   "bytes"),
+    0xD9: ("rx_avail >= 63",        "times"),
+    0xDA: ("SERIAL_RX_BUFFER_SIZE", "bytes"),
+    0xDB: ("rx_avail after oled",   "bytes"),
+    0xDC: ("rx_avail after temp",   "bytes"),
+}
+
 # Bridge -> Nano: feature enable bitmask (0xEF)
 FEATURES_CODE             = 0xEF  # Bridge->Nano: uint8 feature bitmask (sent on startup + settings change)
 FEATURE_LIMIT_SWITCHES    = 0x01  # use D7/D8 NC limit switches
@@ -2021,6 +2056,17 @@ def main() -> None:
                 elif code == RCT_HZ_CODE:
                     # Ratify loop Hz: forward to remote for display on MODE line
                     remote_send_many(remote_clients, f"HZ {value}")
+
+                elif code in PROF_CODES:
+                    # Logged at INFO so a profiling run does not need DEBUG level:
+                    # DEBUG floods journald on a Pi Zero, which perturbs bridge send
+                    # pacing — the very timing this measurement is trying to observe.
+                    prof_label, prof_unit = PROF_CODES[code]
+                    log.info("Nano prof: %-22s %6d %s", prof_label, value, prof_unit)
+                    # Also written to the diag file so profiling and ERR_DETAIL share
+                    # one timeline, and so the data survives journald rotation (which
+                    # already destroyed one set of comparison logs during this work).
+                    diag_log.info("PROF %-22s %6d %s", prof_label, value, prof_unit)
 
             # ── Plain-text relay (test mode only) ──────────────────���──────
             # When bstate.test_mode is True, the Nano is running pwm_test.ino
