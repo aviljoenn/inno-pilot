@@ -112,6 +112,49 @@ Encoding note: For int16 values:
   - Latest-wins: if multiple errors occur within one 200 ms window, only the last is sent
   - Bridge logs these to `/tmp/inno_pilot_comms_diag.log` (volatile, does not survive reboot)
 
+### 2.6 Nano → Bridge: Loop profiling (v1.3.3_B8–B9)
+
+Diagnostic instrumentation for finding what blocks `loop()` long enough to overflow
+the UART RX buffer. One metric per frame, emitted as a 13-frame burst every 5 s,
+**one frame per loop pass** so a burst stays inside the Nano's 64-byte TX buffer
+(sending all 78 bytes at once would block `loop()` waiting on the UART).
+
+| Code | Metric | Unit |
+|------|--------|------|
+| `0xD0` | `oled_draw()` max | 4 µs |
+| `0xD1` | `oled_draw()` mean | 4 µs |
+| `0xD2` | `temp_service()` max | µs |
+| `0xD3` | `service_rudder_adc()` max | µs |
+| `0xD4` | `update_motor_from_command()` max | µs |
+| `0xD5` | serial drain + parse max | µs |
+| `0xD6` | whole `loop()` max | 4 µs |
+| `0xD7` | whole `loop()` mean | 4 µs |
+| `0xD8` | `Serial.available()` high-water at loop top | bytes |
+| `0xD9` | times `available()` reached 63 | count |
+| `0xDA` | compiled `SERIAL_RX_BUFFER_SIZE` | bytes |
+| `0xDB` | `available()` immediately after `oled_draw()` | bytes |
+| `0xDC` | `available()` immediately after `temp_service()` | bytes |
+
+Notes:
+
+- **`0xD0/D1/D6/D7` are in 4 µs units**, not µs. `micros()` quantises to 4 µs on AVR,
+  so this costs no precision and raises the range from 65.5 ms to 262 ms. The bridge
+  multiplies by 4 before logging, so the log reads in plain µs. A logged value of
+  `262140 us` means the metric is still clamped and needs rescaling again.
+- Plain-µs metrics clamp at `65535`. A reading of exactly 65535 means clamped.
+- **`0xDA` is only what the *sketch* believes.** An `arduino-cli` build without
+  `--clean` can link a core built without `-DSERIAL_RX_BUFFER_SIZE=128`, leaving the
+  sketch's macro out of step with the real buffer. The trustworthy figure is the
+  observed high-water (`0xD8`), which cannot exceed the real buffer minus one — if
+  `0xDA` reports 128 while `0xD8` never passes 63, the flag did not reach the core.
+- `0xD9` is deliberately fixed at 63 (the ceiling of a *default* 64-byte buffer)
+  rather than derived from the macro, so a stale-cache mismatch cannot make it read
+  a reassuring zero.
+- Bridge logs these at **INFO** (not DEBUG) and mirrors them into
+  `/tmp/inno_pilot_comms_diag.log`, so profiling and `ERR_DETAIL` share one timeline.
+  DEBUG is deliberately avoided: it floods journald on a Pi Zero and perturbs bridge
+  send pacing — the very timing being measured.
+
 ---
 
 ## 3) TCP protocol: Remote ↔ Bridge (v0.2.0_B7)

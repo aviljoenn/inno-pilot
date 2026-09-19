@@ -248,6 +248,109 @@ mDNS surface area again.
 
 ---
 
+## Nano sketch: OLED row shadow — INVARIANT you must not break
+
+`oled_draw()` keeps an 8×22 text shadow (`oled_shadow`) and **skips the I2C write for
+any row whose rendered text is unchanged**. This is what took the redraw from 184 ms
+to ~26 ms. It also means:
+
+> **If you write a display row by any route other than `draw_row()`, you MUST call
+> `oled_shadow_invalidate(row)` for every row you touched.**
+
+Otherwise the stale shadow will silently suppress the *next* legitimate write to that
+row — and because the fault/warning messages on rows 1–2 are drawn directly (2X
+centred text, direct 1X prints), getting this wrong can mean **a `!STEER LOSS` or
+`!OVERTEMP!` message never appears.** That is a safety defect, not a cosmetic one.
+
+Current invalidation points (keep them in step with any edit):
+- `display.clear()` → `oled_shadow_invalidate_all()`
+- the rows 0–1 header block → invalidates rows 1, 2
+- the rows 1–2 message chain → `rows12_message` flag; invalidates rows 1, 2 unless
+  the steady-state `else` ran
+- the two centred boot rows → invalidates rows 4, 5
+
+Row 0 is written directly and is never shadow-managed; nothing calls `draw_row(0,…)`.
+
+**Measured baseline (Dyason, idle, v1.3.3_B11).** Use these to spot regressions:
+
+| metric | value |
+|---|---|
+| `oled_draw` mean / max | ~26 ms / ~36 ms |
+| `temp_service` max | ~27 ms (now the 2nd-largest blocker; OneWire, not I2C) |
+| `loop` mean | ~1.3 ms |
+| `rx_avail` high-water | ~30 bytes (buffer 128) |
+| flash / RAM | 92% (28278/30720) / 69% (1427/2048) |
+
+History: 184 ms (100 kHz) → 80 ms (400 kHz) → ~36 ms (row shadow) → ~26 ms (version
+sync stopped `!VER MISMATCH!` redrawing rows 1–2 every second).
+
+**Do not reach for a faster I2C clock again.** Solving `bus + overhead = 184` against
+`bus/4 + overhead = 80` puts ~45 ms in fixed Wire-library/ADC overhead that does not
+scale with bus clock. Sending fewer bytes is the only real lever.
+
+**Peak RX buffer depth is bounded by the bridge's send burst (~30 bytes), not by the
+Nano's blackout.** Further shortening `oled_draw()` will not buy more buffer headroom.
+
+---
+
+## Nano sketch: I2C configuration — both lines are required
+
+In `setup()`, immediately after `Wire.begin()`:
+
+```cpp
+Wire.setWireTimeout(25000, true);   // SAFETY — see below
+Wire.setClock(400000L);             // 100 kHz default is far too slow here
+```
+
+**`setWireTimeout` is a safety requirement, not a tuning knob.** The AVR Wire library
+ships with timeout checking *disabled* — `twi.c` sets `twi_timeout_us = 0`, and its own
+comment says a non-zero value "prevents the code from getting stuck in various while
+loops". With it off, `endTransmission()` blocks **forever** if SDA or SCL is held low
+(stuck slave, loose OLED connector, EMI transient). There is **no watchdog** in this
+sketch, so the Nano never recovers — and because it holds the H-bridge pins, it would
+freeze the motor in whatever state it was driving. A display fault must never be able
+to wedge steering.
+
+`reset_with_timeout=true` re-initialises TWI so the bus is usable afterwards.
+
+Hardware assumption for 400 kHz: short I2C run, adequate pull-ups. A marginal bus shows
+as a corrupt or dead display, **not** a hang — `oled_try_init()` retries once per second
+and the timeout bounds any stuck transaction.
+
+**Still open:** no watchdog (needs a bootloader that clears `WDRF` on boot, or the board
+bootloops), and `Wire.getWireTimeoutFlag()` is not surfaced, so a *recovered* I2C timeout
+is currently silent.
+
+---
+
+## Version sync: check all THREE constants before deploying
+
+CLAUDE.md's change strategy already says keep component versions in sync. In practice
+this is easy to violate silently — four consecutive Nano bumps went unnoticed. The
+three that must agree:
+
+| file | constants |
+|---|---|
+| `servo_motor_control/arduino/motor_simple/motor_simple.ino` | `INNOPILOT_VERSION`, `INNOPILOT_BUILD_NUM` |
+| `compute_module/glue/inno_pilot_bridge.py` | `INNOPILOT_VERSION`, `INNOPILOT_BUILD_NUM` |
+| `compute_module/glue/inno_web_remote.py` | `INNOPILOT_VERSION` |
+
+```bash
+grep -rnE 'INNOPILOT_(VERSION|BUILD_NUM)\s*[=:]' --include=*.py --include=*.ino .
+```
+
+Why it matters concretely:
+- The Nano flashes `!VER MISMATCH!` on rows 1–2 when `bridge_build_num` differs from its
+  own. That message sits **above** `comms_warn`, rudder-overshoot and ap-pressed in the
+  priority chain, so it **masks genuine warnings** underneath it.
+- The bridge offers an OTA binary to any remote whose version *string* differs
+  (`inno_pilot_bridge.py`, "Offer OTA if remote is behind"). Bumping the bridge without
+  the web remote makes it a permanent OTA candidate. **Check whether a physical ESP32 is
+  connected before changing the bridge version** — a loopback client on port 8555 is the
+  local web remote, not a handheld.
+
+---
+
 ## Known hardware gotcha: Nano reset via HUPCL
 
 **The Arduino Nano resets whenever `/dev/ttyUSB0` is closed by any process.**
