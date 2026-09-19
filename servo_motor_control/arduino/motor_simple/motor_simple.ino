@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B10";
-const uint16_t INNOPILOT_BUILD_NUM = 10;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.3_B11";
+const uint16_t INNOPILOT_BUILD_NUM = 11;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -855,6 +855,46 @@ void temp_service(unsigned long now) {
 
 
 
+// ---- Row shadow (B11): skip I2C writes for rows whose text has not changed ----
+// B10 measured oled_draw() at 80 ms with the bus already at 400 kHz. Profiling of
+// the steady-state path showed it rewrites 7 of 8 rows every second (~900 bytes of
+// I2C) even though rows 1, 2 and 5 are blank and the rest usually differ by a digit
+// or not at all. Every row costs a full ~128 bytes because clearToEOL() pads to the
+// end of the line regardless of how short the text is.
+//
+// The remaining time could not be won back with a faster clock: solving
+// bus + overhead = 184 ms (100 kHz) against bus/4 + overhead = 80 ms (400 kHz)
+// puts ~45 ms in fixed Wire-library/ADC overhead that does not scale with the bus.
+// The only lever left is sending fewer bytes.
+//
+// Rows are compared as rendered text; a row whose text is unchanged is not written
+// at all. Blank rows therefore cost nothing after the first pass.
+const uint8_t OLED_COLS = 21;          // 128 px / 6 px per char at 1X
+char oled_shadow[8][OLED_COLS + 1];    // zero-init => every row starts as ""
+
+// Force the next draw_row() for this row to write, whatever the shadow says.
+// 0xFF can never appear in rendered text, so the comparison is guaranteed to differ.
+static inline void oled_shadow_invalidate(uint8_t row) {
+  oled_shadow[row][0] = '\xFF';
+  oled_shadow[row][1] = '\0';
+}
+
+static void oled_shadow_invalidate_all() {
+  for (uint8_t r = 0; r < 8; r++) oled_shadow_invalidate(r);
+}
+
+// Draw a 1X row at column 0, but only if its text changed since the last draw.
+// Callers that write a row by any other route (2X messages, centred text) MUST
+// invalidate that row, or the stale shadow will suppress the next legitimate write.
+static void draw_row(uint8_t row, const char *text) {
+  if (strncmp(oled_shadow[row], text, OLED_COLS) == 0) return;
+  strncpy(oled_shadow[row], text, OLED_COLS);
+  oled_shadow[row][OLED_COLS] = '\0';
+  display.setCursor(0, row);
+  display.print(text);
+  display.clearToEOL();
+}
+
 void oled_draw() {
   if (!oled_ok) {
     return;
@@ -930,6 +970,7 @@ void oled_draw() {
   }
   if (cur_state != prev_state) {
     display.clear();
+    oled_shadow_invalidate_all();   // screen is now blank; shadow must not claim otherwise
     prev_state = cur_state;
   }
 
@@ -968,6 +1009,10 @@ void oled_draw() {
     // --- Row 1: fault/warning area — cleared on state change; fault section overwrites each frame ---
     display.setCursor(0, 1);
     display.clearToEOL();
+    // Rows 0-2 were just written outside draw_row(); drop the shadow for the two
+    // rows the fault section owns so its next write is not suppressed.
+    oled_shadow_invalidate(1);
+    oled_shadow_invalidate(2);
   }
 
   // --- Pre-calculate rudder overshoot (used in rows 1-2 warning) ---
@@ -994,6 +1039,12 @@ void oled_draw() {
     if (ap_pressed_warn_active && (now - ap_pressed_warn_ms >= AP_PRESSED_WARN_MS)) {
       ap_pressed_warn_active = false;
     }
+
+    // Every branch below except the final else renders a message by writing rows 1-2
+    // directly (2X centred text, or direct 1X prints) rather than through draw_row().
+    // Those paths are deliberately left untouched — suppressing a fault message would
+    // be a safety defect — so instead the shadow is dropped afterwards.
+    bool rows12_message = true;
 
     if (steer_loss_active && !steer_loss_silenced) {
       // STEER LOSS: flash 2X "!STEER LOSS" every 400ms
@@ -1113,22 +1164,27 @@ void oled_draw() {
       display.clearToEOL();
       display.set1X();
     } else {
+      // Steady state: rows 1-2 blank. After the first pass these cost nothing.
+      rows12_message = false;
       if (!overlay_active || (now - overlay_start_ms >= OVERLAY_DURATION_MS)) {
         overlay_active = false;
-        display.setCursor(0, 1); display.clearToEOL();
-        display.setCursor(0, 2); display.clearToEOL();
+        draw_row(1, "");
+        draw_row(2, "");
       }
+    }
+
+    if (rows12_message) {
+      oled_shadow_invalidate(1);
+      oled_shadow_invalidate(2);
     }
   }
 
   // --- Row 7: V/A/T (always shown) ---
-  display.setCursor(0, 7);
-  display.print(vbuf);
-  display.print(F("  "));
-  display.print(ibuf);
-  display.print(F("  "));
-  display.print(tbuf);
-  display.clearToEOL();
+  {
+    char r7[OLED_COLS + 1];
+    snprintf(r7, sizeof(r7), "%s  %s  %s", vbuf, ibuf, tbuf);
+    draw_row(7, r7);
+  }
 
   // --- Boot window: show Nano + Bridge versions in the middle rows, then done ---
   if (within_boot_window) {
@@ -1154,30 +1210,27 @@ void oled_draw() {
       display.print(buf);
       display.clearToEOL();
     }
+    // Rows 4-5 were drawn centred, not via draw_row(); drop their shadow.
+    oled_shadow_invalidate(4);
+    oled_shadow_invalidate(5);
     return;
   }
 
   // Offline: clear middle rows and return
   if (boot_offline || pi_timed_out) {
-    display.setCursor(0, 3); display.clearToEOL();
-    display.setCursor(0, 4); display.clearToEOL();
-    display.setCursor(0, 5); display.clearToEOL();
-    display.setCursor(0, 6); display.clearToEOL();
+    draw_row(3, "");
+    draw_row(4, "");
+    draw_row(5, "");
+    draw_row(6, "");
     return;
   }
 
   // --- Online-only rows ---
 
   // Row 3: Helm mode — HAND (manual jog), AUTO (AP engaged), REMOTE (TCP remote manual)
-  display.setCursor(0, 3);
-  if (remote_manual_active) {
-    display.print(F("Helm: REMOTE"));
-  } else if (ap_display) {
-    display.print(F("Helm: AUTO"));
-  } else {
-    display.print(F("Helm: HAND"));
-  }
-  display.clearToEOL();
+  draw_row(3, remote_manual_active ? "Helm: REMOTE"
+              : (ap_display        ? "Helm: AUTO"
+                                   : "Helm: HAND"));
 
   // Row 4: Cmd (left, 3-digit leading zeros) | HDG right-justified (3-digit leading zeros)
   {
@@ -1204,12 +1257,10 @@ void oled_draw() {
     }
     memcpy(row5 + 14, tmp, 7);
 
-    display.setCursor(0, 4);
-    display.print(row5);
-    display.clearToEOL();
+    draw_row(4, row5);
   }
 
-  display.setCursor(0, 5); display.clearToEOL();
+  draw_row(5, "");
 
   // --- Row 6: rudder position — label left, ADC count right-justified ---
   {
@@ -1222,9 +1273,7 @@ void oled_draw() {
     snprintf(val, sizeof(val), "%d", rudder_adc_raw_disp);
     uint8_t vlen = (uint8_t)strlen(val);
     memcpy(row6 + 21 - vlen, val, vlen);
-    display.setCursor(0, 6);
-    display.print(row6);
-    display.clearToEOL();
+    draw_row(6, row6);
   }
 }
 
