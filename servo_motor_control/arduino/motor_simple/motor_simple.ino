@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B8";
-const uint16_t INNOPILOT_BUILD_NUM = 8;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.3_B9";
+const uint16_t INNOPILOT_BUILD_NUM = 9;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -478,15 +478,22 @@ const unsigned long PROF_REPORT_MS = 5000;       // one report burst every 5 s
 // PROF_RXBUF_SIZE_CODE reports 128 means the flag did not reach the linked core.
 const uint8_t PROF_AVAIL_CEILING = 63;
 
-uint16_t prof_oled_max_us     = 0;
-uint32_t prof_oled_sum_us     = 0;
+// oled_draw and loop are accumulated as 32-bit TRUE microseconds and only scaled to
+// 4 us units when reported (B9). B8 measured both pinned at the uint16 us ceiling —
+// max AND mean — so their real durations were invisible. micros() has 4 us
+// resolution on AVR anyway, so reporting in 4 us units costs no precision and lifts
+// the range from 65.5 ms to 262 ms. The remaining metrics stay in plain us: B8
+// measured temp_service at 26.8 ms, rudder 924 us, motor 76 us, rx 80 us — all
+// comfortably inside uint16, where the finer resolution is worth more than range.
+uint32_t prof_oled_max_us     = 0;   // true us (scaled to 4 us units at report)
+uint32_t prof_oled_sum_us     = 0;   // true us
 uint16_t prof_oled_n          = 0;
 uint16_t prof_temp_max_us     = 0;
 uint16_t prof_rudder_max_us   = 0;
 uint16_t prof_motor_max_us    = 0;
 uint16_t prof_rx_max_us       = 0;
-uint16_t prof_loop_max_us     = 0;
-uint32_t prof_loop_sum_us     = 0;
+uint32_t prof_loop_max_us     = 0;   // true us (scaled to 4 us units at report)
+uint32_t prof_loop_sum_us     = 0;   // true us
 uint16_t prof_loop_n          = 0;
 uint8_t  prof_avail_hw        = 0;
 uint16_t prof_avail_ceil_n    = 0;
@@ -514,16 +521,29 @@ static inline void prof_max_u8(uint8_t &slot, uint8_t v) {
   if (v > slot) slot = v;
 }
 
+// Record one duration sample into a 32-bit max-slot, kept as TRUE microseconds so
+// values beyond the uint16 us ceiling survive until they are scaled at report time.
+static inline void prof_max32(uint32_t &slot, uint32_t us) {
+  if (us > slot) slot = us;
+}
+
+// Scale true microseconds to the 4 us report unit used by oled_draw and loop.
+// A returned 65535 still means clamped — but now at 262 ms, not 65.5 ms.
+static inline uint16_t prof_clamp4(uint32_t us) {
+  return prof_clamp(us / 4UL);
+}
+
 // Copy the live window into the snapshot, then zero the window.
 void prof_snapshot() {
-  prof_snap[0]  = prof_oled_max_us;
-  prof_snap[1]  = prof_oled_n ? prof_clamp(prof_oled_sum_us / prof_oled_n) : 0;
+  // Slots 0,1,6,7 are in 4 us units; the bridge multiplies them back to real us.
+  prof_snap[0]  = prof_clamp4(prof_oled_max_us);
+  prof_snap[1]  = prof_oled_n ? prof_clamp4(prof_oled_sum_us / prof_oled_n) : 0;
   prof_snap[2]  = prof_temp_max_us;
   prof_snap[3]  = prof_rudder_max_us;
   prof_snap[4]  = prof_motor_max_us;
   prof_snap[5]  = prof_rx_max_us;
-  prof_snap[6]  = prof_loop_max_us;
-  prof_snap[7]  = prof_loop_n ? prof_clamp(prof_loop_sum_us / prof_loop_n) : 0;
+  prof_snap[6]  = prof_clamp4(prof_loop_max_us);
+  prof_snap[7]  = prof_loop_n ? prof_clamp4(prof_loop_sum_us / prof_loop_n) : 0;
   prof_snap[8]  = prof_avail_hw;
   prof_snap[9]  = prof_avail_ceil_n;
   prof_snap[10] = SERIAL_RX_BUFFER_SIZE;
@@ -2614,8 +2634,8 @@ if (!ap_engaged && !remote_manual_active) {
     unsigned long prof_t0 = micros();
     oled_draw();
     unsigned long prof_dt = micros() - prof_t0;
-    prof_max(prof_oled_max_us, prof_dt);
-    prof_oled_sum_us += prof_clamp(prof_dt);
+    prof_max32(prof_oled_max_us, prof_dt);
+    prof_oled_sum_us += prof_dt;   // raw us: clamping here is what pinned the B8 mean
     prof_oled_n++;
     // Sampled before the next pass drains anything: shows how much arrived while
     // the draw held the CPU. This is what separates the OLED from temp_service().
@@ -2625,8 +2645,9 @@ if (!ap_engaged && !remote_manual_active) {
   // ---- Profiling: loop duration, then the report burst ----
   // Duration is taken before the emit so the metric reflects real loop cost; the
   // emit adds one 6-byte frame on report passes and is deliberately excluded.
-  prof_max(prof_loop_max_us, micros() - prof_loop_start_us);
-  prof_loop_sum_us += prof_clamp(micros() - prof_loop_start_us);
+  unsigned long prof_loop_dt = micros() - prof_loop_start_us;
+  prof_max32(prof_loop_max_us, prof_loop_dt);
+  prof_loop_sum_us += prof_loop_dt;   // raw us, scaled to 4 us units at report time
   prof_loop_n++;
 
   if (prof_emit_idx == 0 && (now - prof_last_report_ms >= PROF_REPORT_MS)) {
