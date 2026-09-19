@@ -229,6 +229,13 @@ PROF_CODES: dict[int, tuple[str, str]] = {
     0xDC: ("rx_avail after temp",   "bytes"),
 }
 
+# Codes the Nano sends in 4 us units rather than plain us (B9). B8 reported these
+# four pinned at the uint16 us ceiling — max AND mean — so their real durations were
+# invisible; micros() resolution on AVR is 4 us, so this costs no precision and
+# raises the range from 65.5 ms to 262 ms. Scaled back here so the log reads in
+# plain us. A value of 262140 us means it is STILL clamped and needs rescaling again.
+PROF_SCALE_4US: frozenset[int] = frozenset({0xD0, 0xD1, 0xD6, 0xD7})
+
 # Bridge -> Nano: feature enable bitmask (0xEF)
 FEATURES_CODE             = 0xEF  # Bridge->Nano: uint8 feature bitmask (sent on startup + settings change)
 FEATURE_LIMIT_SWITCHES    = 0x01  # use D7/D8 NC limit switches
@@ -2062,11 +2069,12 @@ def main() -> None:
                     # DEBUG floods journald on a Pi Zero, which perturbs bridge send
                     # pacing — the very timing this measurement is trying to observe.
                     prof_label, prof_unit = PROF_CODES[code]
-                    log.info("Nano prof: %-22s %6d %s", prof_label, value, prof_unit)
+                    prof_value = value * 4 if code in PROF_SCALE_4US else value
+                    log.info("Nano prof: %-22s %6d %s", prof_label, prof_value, prof_unit)
                     # Also written to the diag file so profiling and ERR_DETAIL share
                     # one timeline, and so the data survives journald rotation (which
                     # already destroyed one set of comparison logs during this work).
-                    diag_log.info("PROF %-22s %6d %s", prof_label, value, prof_unit)
+                    diag_log.info("PROF %-22s %6d %s", prof_label, prof_value, prof_unit)
 
             # ── Plain-text relay (test mode only) ──────────────────���──────
             # When bstate.test_mode is True, the Nano is running pwm_test.ino
