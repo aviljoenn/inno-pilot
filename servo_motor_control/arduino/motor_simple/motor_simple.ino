@@ -26,8 +26,8 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B9";
-const uint16_t INNOPILOT_BUILD_NUM = 9;  // increment with each push during development
+const char INNOPILOT_VERSION[] = "v1.3.3_B10";
+const uint16_t INNOPILOT_BUILD_NUM = 10;  // increment with each push during development
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -2133,6 +2133,35 @@ void setup() {
   temp_cycle_ms = 0;
 
   Wire.begin();
+
+  // ---- I2C bus timeout (B10) — SAFETY, not an optimisation ----
+  // The AVR Wire library ships with timeout checking DISABLED (twi.c:
+  // "twi_timeout_us = 0" / "if twi_timeout_us == 0 then timeout checking is
+  // disabled"). With it off, endTransmission() can block FOREVER if SDA or SCL is
+  // held low — a stuck slave, a loose OLED connector, or an EMI transient. There is
+  // no watchdog here, so the Nano would never recover, and because it holds the
+  // H-bridge pins it would freeze the motor in whatever state it was driving.
+  // A display fault must not be able to wedge steering.
+  // 25000 us is the library's own default: comfortably above any legitimate
+  // transaction (~3 ms worst case at 100 kHz) so it cannot false-trip mid-draw,
+  // while still converting an infinite hang into a bounded, recoverable stall.
+  // reset_with_timeout=true re-initialises the TWI peripheral so the bus is usable
+  // again afterwards instead of staying wedged.
+  Wire.setWireTimeout(25000, true);
+
+  // ---- I2C clock 100 kHz -> 400 kHz (B10) ----
+  // Wire.begin() leaves the bus at the 100 kHz default, where oled_draw() measured
+  // 184 ms (mean) per redraw — ~18% of every second with the UART unserviced, which
+  // is the root of the RX-buffer overflows. Both SSD1306 and SH1106 are rated for
+  // 400 kHz fast mode; this cuts bus time ~4x to roughly 46 ms.
+  // Set AFTER Wire.begin() (begin() resets the prescaler) and before the first
+  // oled_try_init() so the splash draws at the new rate too.
+  // Hardware assumption: the I2C run is short enough and the pull-ups strong enough
+  // for 400 kHz. If a unit's wiring is marginal the symptom is a corrupt or dead
+  // display, NOT a hang — oled_try_init() already retries once per second, and the
+  // timeout above now bounds any stuck transaction.
+  Wire.setClock(400000L);
+
   oled_last_init_ms = millis();
   oled_try_init(true);
 
