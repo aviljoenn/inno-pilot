@@ -7,6 +7,37 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 ## [Unreleased]
 
 ### Fixed
+- **Latent `NameError` in vendored pypilot GPS filter**
+  (`compute_module/pypilot/pypilot/gps_filter.py`): the world-magnetic-model
+  declination path called `datetime.date.today().year` but the module never
+  imported `datetime` — and neither `from values import *` nor
+  `from resolv import *` supplies the name (verified: `values.py` imports only
+  `os, time, math, pyjson, resolv`; `resolv.py` imports nothing; neither
+  defines `__all__`). Added the missing `import datetime`.
+  - **Dormant on every current install, not a live fault.** The line runs only
+    when the `wmm2020` package is installed *and* `gps.filtered.enabled` is
+    true. On Dyason `wmm2020` is absent (`ModuleNotFoundError`) and
+    `gps.filtered.enabled=false` is persisted in `~/.pypilot/pypilot.conf`, so
+    it was unreachable. Found 2026-09-26 while auditing whether GPS input could
+    influence autopilot heading.
+  - **What it would have done if reached:** `filter_process()` calls
+    `f.update(*args)` with no `try`/`except`, so the `NameError` would have
+    killed the GPS filter child process. The parent keeps calling
+    `pipe.send(...)`; because the parent still holds its own copy of the read
+    fd, no `EPIPE` is raised — the writes simply fill the 64 KB pipe buffer and
+    then fail with `BlockingIOError`, which `NonBlockingPipe.send()` swallows
+    into a **rate-limited (once per 10 s) and misleading** log line reading
+    `ERROR: failed to encode data pipe!`. Net effect: filtered GPS output stops
+    dead with no obvious indication of why.
+  - This is a genuine upstream bug fix inside the vendored fork, **not** one of
+    the deliberate strips described under "pypilot fork strategy" in CLAUDE.md.
+  - Repo-wide check: `gps_filter.py:257` was the only `datetime.` use in the
+    fork. The only other importer, `gpsd.py`, does `from datetime import
+    datetime` and is correct (that import is currently unused, left untouched).
+  - **Follow-up (not done here):** `filter_process()`'s `predict`/`update` calls
+    remain unguarded, so any exception in the filter still kills the child
+    process semi-silently. Adding a guard is a separate robustness concern and
+    was kept out of this fix per CLAUDE.md's "keep changes small and focused".
 - **I2C enable verification** (`install.sh`, `INSTALL.md`): `raspi-config nonint
   do_i2c 0` can exit 0 without actually writing the `dtparam=i2c_arm=on` line
   (seen in the field 2026-09-15, on a card whose boot partition had been
