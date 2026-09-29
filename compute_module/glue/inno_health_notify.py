@@ -10,26 +10,33 @@ Every important event is logged (Python logging → journalctl) for audit.
 
 Periodic behaviour
 ------------------
-Each tick fires one ping batch that acts as the tick sleep (~TICK_S seconds).
-Results feed a 10-minute sliding-window packet-loss monitor.  State changes
+A single non-blocking loop runs one long-lived `ping` process (default every
+1 s, settable 1-30 s in Settings, forced to 0.5 s while the remote is in Debug
+mode).  Every ping result is recorded and evaluated the moment it arrives into
+a WARN_WINDOW_S (60 s) sliding-window packet-loss monitor.  State changes
 (WARN / CLEAR) are logged with structured markers and trigger Telegram alerts.
+This measures the Pi -> WiFi router path only (outward pings); the
+browser -> Pi path is measured separately by the web remote itself.
 
 Packet-loss state machine
 --------------------------
-  OK  → WARN  when 10-min moving avg > PACKET_LOSS_WARN_PCT (2 %)
-  WARN→ OK    when 10-min avg stays ≤ 2 % for CLEAR_WINDOW_S (30 min)
+  OK  → WARN  when the WARN_WINDOW_S (60 s) moving avg > PACKET_LOSS_WARN_PCT (2 %)
+  WARN→ OK    when that avg stays ≤ 2 % for CLEAR_WINDOW_S (60 s)
               clearance only accrues while pings are actually succeeding;
               100 % loss (gateway unreachable) does NOT count toward clearance.
 
 All state transitions, anomalies and service faults are written to the Python
 logger (captured by journalctl under the inno-health-notify unit).
-inno_web_remote.py tails this journal to surface net_warn in the browser UI.
+Every tick the monitor also publishes its state to NET_STATUS_FILE (tmpfs) as
+JSON; inno_web_remote.py reads that file to show the Pi -> router state on the
+remote (replaces the old journal tail).
 """
 
 import collections
 import json
 import os
 import re
+import select
 import signal
 import socket
 import subprocess
@@ -48,10 +55,24 @@ SETTINGS_FILE = "/var/lib/inno-pilot/settings.json"
 # ---------------------------------------------------------------------------
 BOOT_SETTLE_S        = 45     # wait after systemd start before boot report
 BOOT_PING_COUNT      = 10     # gateway pings in one-shot boot test
-TICK_S               = 60     # nominal period between ping batches / samples
-PACKET_LOSS_WARN_PCT = 2.0    # 10-min moving-avg threshold for WARN
-WARN_WINDOW_S        = 600    # sliding window for moving average (10 min)
-CLEAR_WINDOW_S       = 1800   # time below threshold required to clear (30 min)
+PING_INTERVAL_DEFAULT_S = 1.0 # standard Pi->router ping interval
+PING_INTERVAL_MIN_S     = 1.0     # Settings range is 1..30 s
+PING_INTERVAL_MAX_S     = 30.0
+PING_INTERVAL_DEBUG_S   = 0.5     # forced while the remote is in Debug mode (finer metrics)
+MIN_LOST_TO_WARN     = 2      # a single lost ping never alerts, however few samples yet
+MIN_WINDOW_SAMPLES   = 20     # never judge loss on fewer samples than this; the window
+                              # stretches to MIN_WINDOW_SAMPLES x interval for slow pings
+CFG_POLL_S           = 1.0    # how often the loop re-reads settings / debug flag
+GW_REFRESH_S         = 10.0   # how often the default gateway is re-checked
+SAMPLE_S             = 60.0   # temperature / RSSI sampling period for period reports
+LOOP_MAX_WAIT_S      = 0.25   # longest the loop ever waits => bounds shutdown latency
+PACKET_LOSS_WARN_PCT = 2.0    # moving-avg threshold for WARN (2 % is acceptable for AP control)
+WARN_WINDOW_S        = 60     # sliding window for moving average (was 10 min — too slow to react)
+CLEAR_WINDOW_S       = 60     # time below threshold required to clear (was 30 min)
+# tmpfs (RAM) so a 10 s rewrite cadence never wears the SD card.  World-readable.
+NET_STATUS_FILE      = "/dev/shm/inno-pilot-net.json"
+# Existence of this tmpfs file (touched by inno_web_remote.py) means Debug is on.
+DEBUG_FLAG_FILE      = "/dev/shm/inno-pilot-debug"
 
 INNO_SERVICES = [
     ("bridge",     "inno-pilot-bridge"),
@@ -132,14 +153,14 @@ def _read_interval() -> int:
 
 
 def _read_ping_interval() -> float:
-    """Return notifications.ping_interval_s from settings (default 0.5, clamped 0.2–60)."""
+    """Return notifications.ping_interval_s (default 1.0, clamped 1-30 s)."""
     try:
         with open(SETTINGS_FILE) as fh:
             s = json.load(fh)
-        v = float(s.get("notifications", {}).get("ping_interval_s", 0.5))
-        return max(0.2, min(60.0, v))
+        v = float(s.get("notifications", {}).get("ping_interval_s", PING_INTERVAL_DEFAULT_S))
+        return max(PING_INTERVAL_MIN_S, min(PING_INTERVAL_MAX_S, v))
     except Exception:
-        return 0.5
+        return PING_INTERVAL_DEFAULT_S
 
 # ---------------------------------------------------------------------------
 # Packet-loss sliding-window state machine
@@ -147,68 +168,175 @@ def _read_ping_interval() -> float:
 
 class _NetMonitor:
     """
-    Maintains a WARN_WINDOW_S sliding window of ping results and drives the
-    OK ↔ WARN state machine.
+    Per-ping sliding-window packet-loss monitor driving the OK <-> WARN state
+    machine.  Every ping result (reply or timeout) is recorded and evaluated the
+    moment it arrives via record().
 
-    Each deque entry is (monotonic_ts, sent, received).
+    Each deque entry is (monotonic_ts, ok, rtt_ms_or_None).
     """
 
     def __init__(self) -> None:
         self._window: collections.deque = collections.deque()
         self._state   = "OK"
+        self._interval = PING_INTERVAL_DEFAULT_S
         self._clear_start: Optional[float] = None  # when below-threshold run began
+
+    def set_interval(self, seconds: float) -> None:
+        """Tell the monitor the current ping interval (sizes the window)."""
+        self._interval = seconds
+
+    def window_s(self) -> float:
+        """Window length: WARN_WINDOW_S, stretched so it always holds enough
+        samples to be statistically meaningful at slow ping intervals."""
+        return max(float(WARN_WINDOW_S), MIN_WINDOW_SAMPLES * self._interval)
+
+    def reset(self) -> None:
+        """Clean slate (e.g. gateway changed — old samples are about another path)."""
+        self._window.clear()
+        self._state = "OK"
+        self._clear_start = None
+
+    def lost_count(self) -> int:
+        """Number of lost pings currently in the window."""
+        return sum(1 for _, ok, _ in self._window if not ok)
 
     def moving_avg_pct(self) -> Optional[float]:
         """Packet-loss % over the current window, or None if no data."""
-        total_sent = sum(s for _, s, _ in self._window)
-        total_recv = sum(r for _, _, r in self._window)
-        if total_sent == 0:
+        n = len(self._window)
+        if n == 0:
             return None
-        return round((total_sent - total_recv) / total_sent * 100, 2)
+        return round(self.lost_count() / n * 100, 2)
+
+    def _over(self, avg: float) -> bool:
+        """True when loss breaches: above the threshold AND at least
+        MIN_LOST_TO_WARN pings lost (so one stray drop in a young window, where
+        1 ping is >2 % of a handful of samples, can never raise an alert)."""
+        return avg > PACKET_LOSS_WARN_PCT and self.lost_count() >= MIN_LOST_TO_WARN
+
+    def avg_rtt_ms(self) -> Optional[float]:
+        """Mean round-trip of the replies in the window, or None."""
+        rtts = [r for _, ok, r in self._window if ok and r is not None]
+        return round(sum(rtts) / len(rtts), 1) if rtts else None
 
     def _prune(self, now: float) -> None:
-        while self._window and (now - self._window[0][0]) > WARN_WINDOW_S:
+        w = self.window_s()
+        while self._window and (now - self._window[0][0]) > w:
             self._window.popleft()
 
-    def update(self, sent: int, received: int) -> Optional[str]:
+    def no_data(self) -> None:
+        """No gateway: nothing to measure. Pause any clearance progress."""
+        self._clear_start = None
+
+    def record(self, ok: bool, rtt_ms: Optional[float]) -> Optional[str]:
         """
-        Record a batch result and check for state transitions.
+        Record one ping result and check for state transitions.
         Returns 'WARN', 'CLEAR', or None (no transition).
-        Clearance only accrues when sent > 0 (gateway actually reachable).
+        Nothing is judged until MIN_WINDOW_SAMPLES results are in the window.
         """
         now = time.monotonic()
-        self._window.append((now, sent, received))
+        self._window.append((now, ok, rtt_ms))
         self._prune(now)
-
-        avg       = self.moving_avg_pct()
-        pings_ok  = sent > 0
-
+        if len(self._window) < MIN_WINDOW_SAMPLES:
+            return None
+        avg = self.moving_avg_pct()
         if avg is None:
             return None
 
         if self._state == "OK":
-            if avg > PACKET_LOSS_WARN_PCT:
+            if self._over(avg):
                 self._state       = "WARN"
                 self._clear_start = None
                 return "WARN"
 
         elif self._state == "WARN":
-            if avg > PACKET_LOSS_WARN_PCT:
+            if self._over(avg):
                 # Still above threshold — reset any clearance progress
+                # (this also covers a dead gateway: 100 % loss never clears)
                 self._clear_start = None
-            else:
-                if not pings_ok:
-                    # Gateway unreachable: 100 % loss doesn't count toward clearance
-                    self._clear_start = None
-                else:
-                    if self._clear_start is None:
-                        self._clear_start = now
-                    elif (now - self._clear_start) >= CLEAR_WINDOW_S:
-                        self._state       = "OK"
-                        self._clear_start = None
-                        return "CLEAR"
+            elif self._clear_start is None:
+                self._clear_start = now
+            elif (now - self._clear_start) >= CLEAR_WINDOW_S:
+                self._state       = "OK"
+                self._clear_start = None
+                return "CLEAR"
 
         return None
+
+
+class _PingStream:
+    """
+    One long-lived `ping` process read WITHOUT blocking.
+
+    Why a stream instead of ping batches: a batch call blocks the caller for the
+    whole batch.  Here the child is spawned once (and restarted only on a change
+    of gateway or interval); the main loop drains whatever output has arrived
+    with a non-blocking read and evaluates each result immediately.
+
+    `-O` makes iputils ping print "no answer yet for icmp_seq=N" as soon as the
+    next echo is sent with N still unanswered, so losses show up promptly.
+    Unprivileged (no raw socket / sysctl needed), same as the old batch ping.
+    """
+
+    def __init__(self, host: str, interval: float) -> None:
+        self.host     = host
+        self.interval = interval
+        self._buf     = b""
+        self._done: set = set()     # seqs already counted (lost or replied)
+        self._max_seq = 0
+        self.proc = subprocess.Popen(
+            ["ping", "-O", "-n", "-W", "1", "-i", str(interval), host],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        os.set_blocking(self.proc.stdout.fileno(), False)
+
+    def fileno(self) -> int:
+        return self.proc.stdout.fileno()
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def close(self) -> None:
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        try:
+            self.proc.stdout.close()
+        except Exception:
+            pass
+
+    def poll(self) -> list:
+        """Return [(ok, rtt_ms_or_None), ...] for everything that has arrived.
+        Never blocks."""
+        try:
+            chunk = os.read(self.fileno(), 4096)
+        except (BlockingIOError, InterruptedError):
+            return []
+        except OSError:
+            return []
+        self._buf += chunk
+        out = []
+        *lines, self._buf = self._buf.split(b"\n")
+        for raw in lines:
+            line = raw.decode("ascii", "replace")
+            m = re.search(r"icmp_seq=(\d+)", line)
+            if not m or "DUP!" in line:
+                continue                      # banner / summary / duplicate reply
+            seq = int(m.group(1))
+            if seq in self._done:
+                continue                      # late reply to a seq already counted lost
+            self._done.add(seq)
+            self._max_seq = max(self._max_seq, seq)
+            t = re.search(r"time=([\d.]+)", line)
+            out.append((True, float(t.group(1))) if t else (False, None))
+        if len(self._done) > 512:            # bound memory on long runs
+            self._done = {q for q in self._done if q >= self._max_seq - 256}
+        return out
+
 
 # ---------------------------------------------------------------------------
 # System probes
@@ -263,7 +391,21 @@ def _wifi_rssi() -> Optional[int]:
 
 
 def _default_gateway() -> Optional[str]:
-    """Return the default gateway IP address, or None."""
+    """Return the default gateway IP address, or None.
+
+    Reads /proc/net/route (a plain file read — no subprocess, so it is cheap
+    enough for the main loop); falls back to `ip route` if that fails."""
+    try:
+        with open("/proc/net/route") as fh:
+            next(fh)                                   # header
+            for line in fh:
+                f = line.split()
+                # default route: Destination 00000000, RTF_GATEWAY (0x2) set
+                if len(f) >= 4 and f[1] == "00000000" and int(f[3], 16) & 2:
+                    return socket.inet_ntoa(bytes.fromhex(f[2])[::-1])
+        return None
+    except Exception:
+        pass
     try:
         out = subprocess.check_output(
             ["ip", "route", "show", "default"],
@@ -578,88 +720,114 @@ def main() -> None:
     _send(build_boot_report(boot_ping))
 
     # --- Periodic loop ---
+    # One single-threaded, non-blocking loop.  Each pass: (1) housekeeping that is
+    # due (settings, gateway, samples, period report), (2) start/keep the ping
+    # stream, (3) drain whatever ping results have arrived and record + evaluate
+    # + publish each immediately, (4) wait — but only in select(), for at most
+    # LOOP_MAX_WAIT_S, so shutdown and setting changes are noticed promptly.
     net_monitor   = _NetMonitor()   # clean slate — no history from previous run
     gw            = _default_gateway()
+    stream: Optional[_PingStream] = None
+    stream_restart_ok_at = 0.0      # rate-limit respawns of a dead ping process
+
+    interval_min  = _read_interval()
     ping_interval = _read_ping_interval()
+    debug_on      = os.path.exists(DEBUG_FLAG_FILE)
+    eff_interval  = PING_INTERVAL_DEBUG_S if debug_on else ping_interval
+    net_monitor.set_interval(eff_interval)
+
+    now = time.monotonic()
+    next_cfg    = now + CFG_POLL_S
+    next_gw     = now + GW_REFRESH_S
+    next_sample = now + SAMPLE_S
 
     # Accumulated stats for the current period report
-    ping_sent_acc    = 0
-    ping_recv_acc    = 0
-    ping_ms_sum      = 0.0
-    ping_ms_count    = 0
+    ping_sent_acc = ping_recv_acc = ping_ms_count = 0
+    ping_ms_sum   = 0.0
     temp_samples: list = []
     rssi_samples: list = []
-    period_start     = time.strftime("%Y-%m-%d %H:%M:%S")
-    ticks_done       = 0
+    period_start  = time.strftime("%Y-%m-%d %H:%M:%S")
+    period_t0     = now
 
     while not _shutdown[0]:
-        interval_min  = _read_interval()
-        ping_interval = _read_ping_interval()
+        now = time.monotonic()
 
-        if interval_min <= 0:
-            # Boot-only mode — still run pings for the monitor, just no period reports
-            n = max(1, int(TICK_S / ping_interval))
-            if gw:
-                p = _ping(gw, n, ping_interval)
-                transition = net_monitor.update(p["sent"], p["received"])
-                _handle_transition(transition, net_monitor)
-                # Refresh gateway each tick
-                gw = _default_gateway()
-            else:
-                time.sleep(TICK_S)
-                gw = _default_gateway()
-                if gw:
-                    log.info("NETWORK: Default gateway appeared: %s", gw)
-            continue
+        # ---- settings / debug flag (cheap; once per CFG_POLL_S) ----
+        if now >= next_cfg:
+            next_cfg = now + CFG_POLL_S
+            new_min   = _read_interval()
+            ping_interval = _read_ping_interval()
+            debug_on  = os.path.exists(DEBUG_FLAG_FILE)
+            new_eff   = PING_INTERVAL_DEBUG_S if debug_on else ping_interval
+            if new_eff != eff_interval:
+                log.info("PING interval %.1fs -> %.1fs%s", eff_interval, new_eff,
+                         " (debug)" if debug_on else "")
+                eff_interval = new_eff
+                net_monitor.set_interval(eff_interval)
+                if stream is not None:          # respawn at the new interval
+                    stream.close()
+                    stream = None
+            if new_min != interval_min:
+                log.info("PERIOD: Interval changed — resetting accumulator")
+                interval_min = new_min
+                ping_sent_acc = ping_recv_acc = ping_ms_count = 0
+                ping_ms_sum   = 0.0
+                temp_samples, rssi_samples = [], []
+                period_start  = time.strftime("%Y-%m-%d %H:%M:%S")
+                period_t0     = now
 
-        ticks_needed = max(1, (interval_min * 60) // TICK_S)
+        # ---- gateway (file read, once per GW_REFRESH_S) ----
+        if now >= next_gw:
+            next_gw = now + GW_REFRESH_S
+            new_gw = _default_gateway()
+            if new_gw != gw:
+                log.info("NETWORK: Default gateway %s -> %s", gw, new_gw)
+                gw = new_gw
+                net_monitor.reset()     # old samples describe a different path
+                if stream is not None:
+                    stream.close()
+                    stream = None
 
-        # Ping batch acts as the tick sleep (~TICK_S seconds)
-        n = max(1, int(TICK_S / ping_interval))
-        if gw:
-            p = _ping(gw, n, ping_interval)
-        else:
-            time.sleep(TICK_S)
-            gw = _default_gateway()
-            if gw:
-                log.info("NETWORK: Default gateway appeared: %s", gw)
-            p = {"sent": 0, "received": 0, "lost": 0, "loss_pct": 100.0, "avg_ms": None}
+        # ---- ping stream lifecycle ----
+        if gw and stream is not None and not stream.alive():
+            # ping exited (e.g. network unreachable).  Count it as a lost ping
+            # and respawn no faster than once a second.
+            stream.close()
+            stream = None
+            stream_restart_ok_at = now + 1.0
+            _record_ping(False, None, net_monitor, gw)
+            ping_sent_acc += 1
+        if gw and stream is None and now >= stream_restart_ok_at:
+            try:
+                stream = _PingStream(gw, eff_interval)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("NETWORK: could not start ping: %s", exc)
+                stream_restart_ok_at = now + 5.0
+        if not gw:
+            net_monitor.no_data()
 
-        # Feed monitor and check for state transitions
-        transition = net_monitor.update(p["sent"], p["received"])
-        _handle_transition(transition, net_monitor)
+        # ---- drain results that have arrived; record + evaluate each at once ----
+        if stream is not None:
+            for ok, rtt in stream.poll():
+                _record_ping(ok, rtt, net_monitor, gw)
+                ping_sent_acc += 1
+                if ok:
+                    ping_recv_acc += 1
+                    ping_ms_sum   += rtt
+                    ping_ms_count += 1
 
-        # Accumulate ping stats for period report
-        ping_sent_acc += p["sent"]
-        ping_recv_acc += p["received"]
-        if p["avg_ms"] is not None:
-            ping_ms_sum   += p["avg_ms"]
-            ping_ms_count += 1
+        # ---- temperature / RSSI samples for period reports ----
+        if now >= next_sample:
+            next_sample = now + SAMPLE_S
+            t = _cpu_temp()
+            if t is not None:
+                temp_samples.append(t)
+            r = _wifi_rssi()
+            if r is not None:
+                rssi_samples.append(r)
 
-        # Temperature and RSSI samples
-        t = _cpu_temp()
-        if t is not None:
-            temp_samples.append(t)
-        r = _wifi_rssi()
-        if r is not None:
-            rssi_samples.append(r)
-
-        ticks_done += 1
-
-        # Check if interval changed mid-period; if so, reset without sending
-        if _read_interval() != interval_min:
-            log.info("PERIOD: Interval changed mid-period — resetting accumulator")
-            ping_sent_acc = ping_recv_acc = ping_ms_count = 0
-            ping_ms_sum   = 0.0
-            temp_samples  = []
-            rssi_samples  = []
-            period_start  = time.strftime("%Y-%m-%d %H:%M:%S")
-            ticks_done    = 0
-            gw = _default_gateway()
-            continue
-
-        if ticks_done >= ticks_needed:
-            # Full period complete — build and send report
+        # ---- period report ----
+        if interval_min > 0 and (now - period_t0) >= interval_min * 60:
             ping_lost = ping_sent_acc - ping_recv_acc
             period_ping = {
                 "sent":     ping_sent_acc,
@@ -676,37 +844,81 @@ def main() -> None:
                 rssi_samples, gw,
                 net_monitor._state,
             ))
-
-            # Reset accumulators
             ping_sent_acc = ping_recv_acc = ping_ms_count = 0
             ping_ms_sum   = 0.0
-            temp_samples  = []
-            rssi_samples  = []
+            temp_samples, rssi_samples = [], []
             period_start  = time.strftime("%Y-%m-%d %H:%M:%S")
-            ticks_done    = 0
-            gw = _default_gateway()
+            period_t0     = now
+
+        # ---- wait: only ever inside select(), never a bare sleep ----
+        if stream is not None:
+            try:
+                select.select([stream.fileno()], [], [], LOOP_MAX_WAIT_S)
+            except (OSError, ValueError):
+                time.sleep(0.05)   # fd vanished mid-select; loop will respawn
+        else:
+            select.select([], [], [], LOOP_MAX_WAIT_S)
+
+    if stream is not None:
+        stream.close()
 
 
-def _handle_transition(transition: Optional[str], monitor: "_NetMonitor") -> None:
-    """Log and notify on packet-loss state transitions."""
+def _record_ping(ok: bool, rtt_ms: Optional[float], monitor: "_NetMonitor",
+                 gw: Optional[str]) -> None:
+    """Record ONE ping result, evaluate it, log any transition, publish status.
+
+    This is the single quick step run the moment a result arrives, so the alert
+    state (and the remote's display, via NET_STATUS_FILE) never lags a ping.
+    """
+    transition = monitor.record(ok, rtt_ms)
+    _handle_transition(transition, monitor, gw)
+
+
+def _publish_net_status(monitor: "_NetMonitor", gw: Optional[str]) -> None:
+    """Write the monitor's current state to NET_STATUS_FILE for the web remote.
+
+    Atomic (tmp + rename) so the reader never sees a half-written file.  The
+    reader treats a stale 'ts' as "Pi-side monitor not running".  Failures are
+    logged at debug only — status publishing must never disturb monitoring.
+    """
+    try:
+        tmp = NET_STATUS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({
+                "ts":       time.time(),
+                "state":    monitor._state,           # "OK" | "WARN"
+                "loss_pct": monitor.moving_avg_pct(), # window average
+                "avg_ms":   monitor.avg_rtt_ms(),     # window mean RTT
+                "gateway":  gw,
+            }, f)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, NET_STATUS_FILE)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("net status publish failed: %s", exc)
+
+
+def _handle_transition(transition: Optional[str], monitor: "_NetMonitor",
+                       gw: Optional[str] = None) -> None:
+    """Log and notify on packet-loss state transitions; publish current state."""
+    _publish_net_status(monitor, gw)
     if transition == "WARN":
         avg = monitor.moving_avg_pct()
         log.warning(
-            "PACKET_LOSS_WARN: 10-min avg %.1f%% exceeds threshold %.1f%%",
-            avg, PACKET_LOSS_WARN_PCT,
+            "PACKET_LOSS_WARN: Pi->router %ds avg %.1f%% exceeds threshold %.1f%%",
+            WARN_WINDOW_S, avg, PACKET_LOSS_WARN_PCT,
         )
         _send(
-            f"NETWORK ALERT: Packet loss {avg:.1f}% "
-            f"(10-min avg, threshold {PACKET_LOSS_WARN_PCT:.0f}%)"
+            f"WIFI ALERT: Autopilot WiFi is weak — {avg:.1f}% of messages lost "
+            f"over the last {WARN_WINDOW_S}s (limit {PACKET_LOSS_WARN_PCT:.0f}%)"
         )
     elif transition == "CLEAR":
         log.info(
-            "PACKET_LOSS_CLEAR: avg below %.1f%% for %d min — network OK",
-            PACKET_LOSS_WARN_PCT, CLEAR_WINDOW_S // 60,
+            "PACKET_LOSS_CLEAR: Pi->router avg below %.1f%% for %d s — network OK",
+            PACKET_LOSS_WARN_PCT, CLEAR_WINDOW_S,
         )
         _send(
-            f"NETWORK OK: Packet loss cleared "
-            f"(below {PACKET_LOSS_WARN_PCT:.0f}% for {CLEAR_WINDOW_S // 60} min)"
+            f"WIFI OK: Autopilot WiFi is back to normal "
+            f"(under {PACKET_LOSS_WARN_PCT:.0f}% lost for {CLEAR_WINDOW_S}s)"
         )
 
 

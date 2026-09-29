@@ -6,6 +6,69 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+### Added
+- **Two separate network-link monitors, one display** (`inno_web_remote.py`,
+  `inno_health_notify.py`). Both are kept; they watch different paths and each
+  alerts and logs on its own.
+  - **Remote -> Pi** (new, `inno_web_remote.py`): the page probes `/health` once a
+    second from the browser and tracks loss and round-trip over a rolling 60 s.
+    Breach = loss > 2% (acceptable for AP control) with >= 10 samples; clears when
+    the window is back at <= 2%. Each breach/clear is POSTed to the new
+    `/linkevent` endpoint and written to the journal as `LINK_LOSS_BREACH` /
+    `LINK_LOSS_CLEAR`; a report that fails during an outage is retried.
+  - **Pi -> router** (`inno_health_notify.py`, unchanged in purpose): thresholds
+    shortened from a 10 min window / 30 min clear to **60 s window / 60 s clear**.
+    Still logs `PACKET_LOSS_WARN/CLEAR` and sends Telegram alerts. Also publishes
+    its state on every ping result to `/dev/shm/inno-pilot-net.json` (tmpfs, no SD wear).
+    - **Ping interval:** default 1 s (was 0.5 s), settable 1-30 s in Settings
+      (`notifications.ping_interval_s`, clamped 1-30). Forced to 0.5 s while the
+      remote is in Debug mode, for finer debug metrics (the web remote mirrors its
+      Debug state to `/dev/shm/inno-pilot-debug`; the loop notices within ~1 s).
+    - **Non-blocking rewrite:** the 60 s batch-`ping` calls are gone. One
+      long-lived `ping -O` process is read with non-blocking reads in a single
+      loop; each result is recorded, evaluated, logged and published the moment it
+      arrives (`_record_ping`). The loop only ever waits in `select()` for <= 0.25 s,
+      so shutdown, setting changes and Debug toggles are prompt. The default
+      gateway is read from `/proc/net/route` (no subprocess) every 10 s; a gateway
+      change resets the window (samples described a different path).
+    - **Alert rule:** WARN when loss > 2% of the window AND >= 2 pings lost (one
+      stray drop in a young window can't alert); nothing is judged before 20
+      samples; the window stretches to 20 x interval at slow intervals (e.g. 10 min
+      at 30 s) so it is always statistically meaningful.
+  - **Display:** the full-width `#net-warn-banner` (outside the remote body) is
+    removed. A miniature OLED-styled panel in the footer, right of the Debug
+    button, replaces it. Normal mode: quiet `PI WIFI WEAK` / `REMOTE WIFI WEAK`
+    lines only while a link is over threshold. Debug mode: live numbers for both
+    (`PI>RTR loss% ms`, `REM>PI loss% avg/max ms`).
+  - The web remote now reads the Pi-side state from that file instead of tailing
+    `journalctl -f` for `PACKET_LOSS_*` strings; a file older than 60 s means the
+    monitor isn't running and is shown as unknown (nothing displayed).
+  - **Plain-language wording** for the skipper: the full-screen "NO BRIDGE" overlay
+    (look and grey-out unchanged) now reads "AUTO PILOT: CONNECTION LOST /
+    Trying to reconnect...", with the heading wrapped to stay inside the remote's
+    width; the OLED status row says "AUTOPILOT LOST". Footer messages read
+    "AUTOPILOT WIFI: WEAK" / "REMOTE WIFI: WEAK"; Telegram alerts read "WIFI ALERT:
+    Autopilot WiFi is weak ..." / "WIFI OK: ...". Technical log markers
+    (`PACKET_LOSS_*`, `LINK_LOSS_*`) are unchanged.
+  - **One alerting area (principle):** all warnings, errors and system messages
+    moved out of the skipper's command-and-control area into the bottom-right panel
+    (`#alert-oled`, OLED-styled, 3 rows: red blinking = critical, amber = warning,
+    cyan = info/debug). Quiet when all is well; if more than 3 are active the last
+    row reads `+N MORE`. Priority: rudder not moving, autopilot lost, steer-motor
+    fault, no compass heading, motor link poor, autopilot WiFi weak, remote WiFi weak.
+    - Removed the OLED's bottom status row (version + connection text) — the OLED now
+      shows steering information only. The software version moved to the panel in
+      Debug mode (shown when no alert is active).
+    - Replaced the centre-screen "Settings only available in OFF mode" toast (it sat
+      outside the remote body) with a transient message in the panel; the same path
+      shows "could not start autopilot" style errors, word-wrapped.
+    - Reworded: RUDDER NOT RESPONDING -> "RUDDER: NOT MOVING", MOTOR FAULT ->
+      "STEER MOTOR: FAULT", NO HEADING -> "COMPASS: NO HEADING", COMMS WARN ->
+      "MOTOR LINK: POOR". Server error texts and the Settings / Software Update
+      dialogs no longer say "bridge", "GitHub" or "git error".
+  - No bridge, Nano or ESP32 change, so no version bump. Needs `inno_deploy.sh`
+    (restarts health-notify and web-remote).
+
 ### Fixed
 - **I2C enable verification** (`install.sh`, `INSTALL.md`): `raspi-config nonint
   do_i2c 0` can exit 0 without actually writing the `dtparam=i2c_arm=on` line
