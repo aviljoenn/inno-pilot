@@ -116,8 +116,8 @@ _DEFAULT_SETTINGS: dict = {
         # 0 = send one health report at boot only.
         # >0 = repeat every N minutes (stats accumulated over the period).
         "health_interval_min": 0,
-        # Seconds between gateway pings (0.5 = 2/s, 5 = every 5 s, etc.)
-        "ping_interval_s": 0.5,
+        # Seconds between Pi->router pings (1-30, standard 1; Pi side forces 0.5 in Debug)
+        "ping_interval_s": 1.0,
     },
 }
 
@@ -172,7 +172,7 @@ _state: dict = {
     "rudder_stall": False,    # True when motor commanded but rudder not moving
     "pypilot_ok":   True,     # False when pypilot process has lost its connection
     "debug":        False,    # True when bridge is in DEBUG log level
-    "net_warn":     False,    # True when inno-health-notify reports packet-loss WARN
+    "net_pi":       None,     # Pi->router link from inno-health-notify: {state, loss_pct, avg_ms} or None
 }
 _state_lock = threading.Lock()
 
@@ -734,26 +734,6 @@ body{
   touch-action:manipulation;
 }
 .oled-btn:active{background:#1a3060}
-/* Bottom row of OLED screen: version left, conn centred */
-.oled-status{
-  display:flex;
-  align-items:center;
-  position:relative;
-  font-family:'Courier New',monospace;
-  letter-spacing:1px;
-}
-#o-ver{
-  font-size:0.63em;
-  color:#6ee0ff;
-}
-#o-conn{
-  position:absolute;
-  left:50%;
-  transform:translateX(-50%);
-  font-size:0.945em;
-  font-weight:700;
-  white-space:nowrap;
-}
 .ok{color:#00cc70}
 .warn{color:#ffaa00}
 .crit{color:#ff3030;animation:blink .45s step-end infinite}
@@ -857,8 +837,7 @@ body{
 .oled.blank-mode .oled-title,
 .oled.blank-mode .rdr-bar,
 .oled.blank-mode .oled-mode,
-.oled.blank-mode .oled-data,
-.oled.blank-mode .oled-status{visibility:hidden}
+.oled.blank-mode .oled-data{visibility:hidden}
 
 /* ── Ship's wheel ── */
 .wheel-section{
@@ -925,9 +904,12 @@ body{
   backdrop-filter:blur(5px);
 }
 .no-bridge-overlay h2{
-  font-size:1.8em;
+  font-size:1.5em;
   color:#ff4040;
   letter-spacing:3px;
+  text-align:center;
+  max-width:300px;     /* keep the text inside the remote's width (design rule 1);
+                          the longer plain-English heading wraps to two lines */
 }
 .no-bridge-overlay p{color:#aaa;font-size:.9em}
 .no-bridge-overlay.hidden{display:none}
@@ -937,7 +919,7 @@ body{
 }
 
 /* ── Gear / settings button ─────────────────────────────────────────── */
-.settings-footer{display:flex;justify-content:flex-start;padding:0 4px 2px;gap:8px}
+.settings-footer{display:flex;justify-content:flex-start;align-items:center;padding:0 4px 2px;gap:8px}
 .gear-btn{
   width:38px;height:38px;border-radius:50%;
   background:#111;border:1.5px solid #333;
@@ -952,19 +934,6 @@ body{
   background:#0d2a40;border-color:#00bfff;color:#00d4ff;
   box-shadow:0 0 8px rgba(0,191,255,.45),0 3px 8px rgba(0,0,0,.4);
 }
-
-/* ── Settings warning toast ─────────────────────────────────────────── */
-.sw-toast{
-  position:fixed;top:50%;left:50%;
-  transform:translate(-50%,-50%) scale(.85);
-  background:rgba(155,50,0,.97);color:#fff;
-  padding:11px 20px;border-radius:9px;
-  font-size:.88em;font-weight:700;text-align:center;line-height:1.5;
-  opacity:0;pointer-events:none;z-index:500;
-  transition:opacity .18s,transform .18s;
-  box-shadow:0 6px 24px rgba(0,0,0,.7);
-}
-.sw-toast.visible{opacity:1;transform:translate(-50%,-50%) scale(1)}
 
 /* ── Settings overlay panel ─────────────────────────────────────────── */
 .sov{
@@ -1174,11 +1143,27 @@ body{
 .tftr-btn.back{background:linear-gradient(180deg,#1a1000,#0d0800);color:#a07020;border:1px solid #2a1800}
 .tftr-btn.close{background:linear-gradient(180deg,#280c0c,#140404);color:#cc3030;border:1px solid #3a1010}
 
-/* ── Packet-loss warning banner ─────────────────────────────────────────── */
-#net-warn-banner{display:none;position:fixed;top:0;left:0;right:0;z-index:1500;
-  background:#7a2000;color:#ffe0c0;font-size:0.82em;font-weight:bold;
-  text-align:center;padding:5px 8px;letter-spacing:0.03em}
-#net-warn-banner.visible{display:block}
+/* ── Alert panel (footer, right of Debug button; inside the remote body) ──
+   The ONE place for warnings, errors and system info (the OLED above is for
+   steering command/control only).  A miniature of the main .oled screen: same
+   near-black ground, Courier text and ringed bezel.  Rows: cyan = info/debug,
+   amber = warning, red blinking = critical.  The bezel rings extend outside the
+   box, so the margins keep them clear of the Debug button and the remote's edge. */
+#alert-oled{
+  flex:1;min-width:0;height:46px;box-sizing:border-box;
+  margin:3px 5px 3px 6px;padding:3px 6px;
+  background:#06081a;border-radius:7px;
+  box-shadow:inset 0 2px 6px rgba(0,0,0,.9),
+             0 0 0 2px #1e2040,0 0 0 3px #2e3060;
+  display:flex;flex-direction:column;justify-content:center;
+  font-family:'Courier New',monospace;font-size:.62em;line-height:1.35;
+  letter-spacing:.3px;color:#00d4ff;white-space:nowrap;overflow:hidden;
+  text-shadow:0 0 6px rgba(0,191,255,.5);
+}
+#alert-oled div{overflow:hidden;text-overflow:ellipsis}
+#alert-oled .a-warn{color:#ffaa00;text-shadow:0 0 6px rgba(255,170,0,.4)}
+#alert-oled .a-crit{color:#ff3030;text-shadow:0 0 6px rgba(255,48,48,.5);
+  animation:blink .45s step-end infinite}
 
 /* ── Boat-name setup modal ──────────────────────────────────────────────── */
 .bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:none;
@@ -1222,8 +1207,8 @@ body{
 
 <!-- Disconnected overlay (visible until SSE delivers connected=true) -->
 <div class="no-bridge-overlay" id="overlay">
-  <h2>NO BRIDGE</h2>
-  <p>Connecting to inno-pilot-bridge\u2026</p>
+  <h2>AUTO PILOT: CONNECTION LOST</h2>
+  <p>Trying to reconnect\u2026</p>
   <p id="dots">\u25cf</p>
 </div>
 
@@ -1250,10 +1235,8 @@ body{
 
     <div class="oled-mode" id="oled-mode-row">MODE: <b id="o-mode">IDLE</b></div>
 
-    <div class="oled-status">
-      <span id="o-ver">---</span>
-      <span id="o-conn" class="warn">CONNECTING\u2026</span>
-    </div>
+    <!-- Warnings, errors and system info are NOT shown here: this screen is for the
+         skipper's steering command/control only.  See #alert-oled (bottom right). -->
 
   </div>
 
@@ -1308,12 +1291,12 @@ body{
   <div class="settings-footer">
     <button class="gear-btn" id="gear-btn" title="Settings (OFF mode only)">&#9881;</button>
     <button class="dbg-btn" id="dbg-btn" title="Toggle bridge debug logging">Debug</button>
+    <!-- Alert panel: every warning / error / system message (plain wording).  Quiet when
+         all is well.  Debug mode adds live link numbers and the software version. -->
+    <div id="alert-oled"></div>
   </div>
 
 </div><!-- .remote -->
-
-<!-- Settings warning toast -->
-<div class="sw-toast" id="sw-toast">Settings only<br>available in OFF mode</div>
 
 <!-- Settings overlay -->
 <div class="sov hidden" id="sov">
@@ -1492,8 +1475,8 @@ body{
         <input class="sf-inp" type="number" id="sf-health_interval_min" min="0" max="1440" step="5">
       </div>
       <div class="sf-row" data-sfid="ping_interval_s">
-        <span class="sf-lbl" title="Seconds between gateway pings. 0.5 = 2 per second. Increase if router rate-limits ICMP.">Ping Interval (s) &#9432;</span>
-        <input class="sf-inp" type="number" id="sf-ping_interval_s" min="0.5" max="30" step="0.5">
+        <span class="sf-lbl" title="Seconds between Pi-to-router pings (1-30, standard 1). Automatically 0.5 while Debug is on. Increase if router rate-limits ICMP.">Ping Interval (s) &#9432;</span>
+        <input class="sf-inp" type="number" id="sf-ping_interval_s" min="1" max="30" step="1">
       </div>
 
       <div class="ss-title">TESTS</div>
@@ -1577,9 +1560,6 @@ body{
     </div>
   </div><!-- .tpanel -->
 </div><!-- .tov -->
-
-<!-- Packet-loss warning banner: shown when net_warn is true in SSE state -->
-<div id="net-warn-banner">NETWORK: Packet loss elevated &mdash; check WiFi / router</div>
 
 <!-- Software update modal -->
 <div id="upd-overlay" class="upd-overlay">
@@ -1735,6 +1715,7 @@ function setDebugState(active) {
   var btn = document.getElementById('dbg-btn');
   btn.textContent = gDebugActive ? 'Debugging' : 'Debug';
   btn.classList.toggle('dbg-active', gDebugActive);
+  if (typeof linkRender === 'function') linkRender();
 }
 
 function toggleDebug() {
@@ -1890,6 +1871,141 @@ var es = new EventSource('/events');
 es.onmessage = function(e) { updateUI(JSON.parse(e.data)); };
 es.onerror   = function()  { setConnected(false); };
 
+// ── Link-quality probe ────────────────────────────────────────────────────
+// Measures the path the remote actually uses (this browser -> Pi over WiFi),
+// which the Pi-side gateway ping in inno_health_notify.py cannot see: it pings
+// OUTWARD, so a Pi receive-path problem looks healthy from there.
+// Fetches the tiny /health endpoint once a second; a probe with no reply in
+// LP_TIMEOUT_MS counts as lost. Keeps a rolling LP_WINDOW_MS of samples.
+// Design rules: loss <= 2% is acceptable for autopilot control (LP_BREACH_PCT);
+// numbers are shown ONLY in Debug mode; in normal mode a breach shows just a
+// quiet "WiFi weak" in the footer status area; every breach/clear transition
+// is POSTed to /linkevent so it lands in the event log (journal).
+var LP_PERIOD_MS = 1000, LP_TIMEOUT_MS = 2000, LP_WINDOW_MS = 60000;
+var LP_BREACH_PCT = 2.0, LP_MIN_SAMPLES = 10;
+var gLpSamples  = [];     // [{t: ms timestamp, rtt: ms or null when lost}]
+var gLpBreach   = false;  // current breach state
+var gLpReported = false;  // last breach state the server acknowledged
+var gLpStats    = null;   // latest {pct, avg, max, n}
+function linkProbe() {
+  var t0 = performance.now();
+  var ctrl = new AbortController();
+  var timer = setTimeout(function() { ctrl.abort(); }, LP_TIMEOUT_MS);
+  fetch('/health', {cache: 'no-store', signal: ctrl.signal})
+    .then(function(r) { return r.ok ? r.text() : Promise.reject(); })
+    .then(function() { linkProbeDone(performance.now() - t0); })
+    .catch(function()  { linkProbeDone(null); })
+    .then(function()   { clearTimeout(timer); });
+}
+function linkProbeDone(rtt) {
+  var now = Date.now();
+  gLpSamples.push({t: now, rtt: rtt});
+  while (gLpSamples.length && now - gLpSamples[0].t > LP_WINDOW_MS) gLpSamples.shift();
+  var lost = 0, sum = 0, n = 0, max = 0;
+  gLpSamples.forEach(function(s) {
+    if (s.rtt === null) { lost++; return; }
+    sum += s.rtt; n++; if (s.rtt > max) max = s.rtt;
+  });
+  gLpStats = {pct: lost * 100 / gLpSamples.length, avg: n ? sum / n : null, max: max, n: gLpSamples.length};
+  // Don't judge on fewer than LP_MIN_SAMPLES so one early miss isn't a "breach".
+  if (gLpStats.n >= LP_MIN_SAMPLES) gLpBreach = gLpStats.pct > LP_BREACH_PCT;
+  linkReportBreach();
+  linkRender();
+}
+// Tell the server about breach/clear transitions. If the POST fails (which is
+// likely exactly when the link is bad) gLpReported stays put and we retry on
+// the next probe, so the event is not lost.
+function linkReportBreach() {
+  if (gLpBreach === gLpReported || !gLpStats) return;
+  var want = gLpBreach;
+  fetch('/linkevent', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({state: want ? 'breach' : 'clear',
+      loss_pct: Math.round(gLpStats.pct * 10) / 10,
+      avg_ms: gLpStats.avg === null ? null : Math.round(gLpStats.avg),
+      max_ms: Math.round(gLpStats.max), samples: gLpStats.n})})
+    .then(function(r) { if (r.ok) gLpReported = want; })
+    .catch(function() {});
+}
+// ── Alert panel ───────────────────────────────────────────────────────────
+// Single alerting area (bottom right of the remote).  Sources, highest priority first:
+//   0 transient message for something the skipper just did (showWarning)
+//   1-5 autopilot/steering faults from the bridge (computed in updateAlertsFromState)
+//   6-7 WiFi links: AUTOPILOT WIFI (Pi -> router, measured by inno-health-notify,
+//       gNetPi) and REMOTE WIFI (this browser -> Pi, measured here, gLpBreach)
+// Normal mode: shows only active alerts (max 3 rows), nothing when all is well.
+// Debug mode: live link numbers, plus the top alert or else the software version.
+var gNetPi = null;        // {state:'OK'|'WARN', loss_pct, avg_ms} from SSE, or null if unknown
+var gStateAlerts = [];    // [{p, text, cls}] derived from the latest SSE state
+var gToast = null;        // {rows:[text], until: ms} transient message
+var gVersion = '---';
+var ALERT_COLS = 21;      // characters that fit a panel row
+
+function updateAlertsFromState(d) {
+  var a = [];
+  var comms = (d.comms || 'OK').toUpperCase();
+  if (d.connected && d.rudder_stall)                  a.push({p:1, text:'RUDDER: NOT MOVING',    cls:'a-crit'});
+  if (!d.connected && gTogglePos !== 'off')           a.push({p:2, text:'AUTOPILOT: LOST',       cls:'a-crit'});
+  if (d.connected && comms === 'CRIT')                a.push({p:3, text:'STEER MOTOR: FAULT',    cls:'a-crit'});
+  if (d.connected && d.pypilot_ok === false)          a.push({p:4, text:'COMPASS: NO HEADING',   cls:'a-warn'});
+  if (d.connected && comms === 'WARN')                a.push({p:5, text:'MOTOR LINK: POOR',      cls:'a-warn'});
+  gStateAlerts = a;
+  gVersion = d.bridge_ver || d.version || '---';
+}
+
+// Word-wrap a message to panel rows (max 3), upper-cased like an OLED.
+function alertWrap(msg) {
+  var words = String(msg).toUpperCase().split(/\\s+/), rows = [], cur = '';
+  words.forEach(function(w) {
+    if (cur && (cur + ' ' + w).length > ALERT_COLS) { rows.push(cur); cur = w; }
+    else cur = cur ? cur + ' ' + w : w;
+  });
+  if (cur) rows.push(cur);
+  return rows.slice(0, 3);
+}
+
+function linkRender() {
+  var el = document.getElementById('alert-oled');
+  if (!el) return;
+  var alerts = gStateAlerts.slice();
+  if (gNetPi && gNetPi.state === 'WARN') alerts.push({p:6, text:'AUTOPILOT WIFI: WEAK', cls:'a-warn'});
+  if (gLpBreach)                         alerts.push({p:7, text:'REMOTE WIFI: WEAK',    cls:'a-warn'});
+  alerts.sort(function(x, y) { return x.p - y.p; });
+  var rows = [];   // [{text, cls}]
+  if (gToast && Date.now() < gToast.until) {
+    gToast.rows.forEach(function(t) { rows.push({text: t, cls: 'a-warn'}); });
+  } else {
+    gToast = null;
+  }
+  if (gDebugActive) {
+    var pi = 'PI>RTR ';
+    if (gNetPi && gNetPi.loss_pct != null) {
+      pi += gNetPi.loss_pct.toFixed(gNetPi.loss_pct < 10 ? 1 : 0) + '%';
+      if (gNetPi.avg_ms != null) pi += ' ' + Math.round(gNetPi.avg_ms) + 'ms';
+    } else pi += '--';
+    var rm = 'REM>PI ';
+    if (gLpStats) {
+      rm += gLpStats.pct.toFixed(gLpStats.pct < 10 ? 1 : 0) + '%';
+      if (gLpStats.avg !== null) rm += ' ' + Math.round(gLpStats.avg) + '/' + Math.round(gLpStats.max) + 'ms';
+    } else rm += '--';
+    rows = rows.slice(0, 1).concat([{text: pi, cls: ''}, {text: rm, cls: ''}]);
+    rows.push(alerts.length ? {text: alerts[0].text, cls: alerts[0].cls} : {text: 'VER ' + gVersion, cls: ''});
+    rows = rows.slice(-3);   // keep the newest three (stats + top alert/version)
+  } else {
+    alerts.forEach(function(a) { rows.push({text: a.text, cls: a.cls}); });
+    if (rows.length > 3) {   // never hide alerts silently: last row says how many more
+      rows = rows.slice(0, 2).concat([{text: '+' + (rows.length - 2) + ' MORE', cls: 'a-warn'}]);
+    }
+  }
+  el.textContent = '';
+  rows.forEach(function(r) {
+    var d = document.createElement('div');
+    d.textContent = r.text;
+    if (r.cls) d.className = r.cls;
+    el.appendChild(d);
+  });
+}
+setInterval(linkProbe, LP_PERIOD_MS);
+
 // ── UI updater ────────────────────────────────────────────────────────────
 function updateUI(d) {
   gConnected = !!d.connected;
@@ -1900,9 +2016,7 @@ function updateUI(d) {
   if (d.cmd != null) gCmd = d.cmd;
   if (d.ui_mode) gTogglePos = d.ui_mode;
   if (d.debug !== undefined) setDebugState(d.debug);
-  if (d.net_warn !== undefined) {
-    document.getElementById('net-warn-banner').classList.toggle('visible', !!d.net_warn);
-  }
+  if (d.net_pi !== undefined) gNetPi = d.net_pi;   // rendered by linkRender() below
 
   // Suppress overlay when connected, or when disconnect is intentional (OFF).
   // This also handles occasional mode/ui-mode desync by treating the selector
@@ -1950,35 +2064,9 @@ function updateUI(d) {
   arrowPort.style.display = (d.rdr_cmd ===  1) ? 'block' : 'none';
   arrowStbd.style.display = (d.rdr_cmd === -1) ? 'block' : 'none';
 
-  // Version + status line (priority order: stall > no-bridge > motor-fault > no-heading > comms-warn > ok)
-  document.getElementById('o-ver').textContent = d.bridge_ver || d.version || '---';
-  var connEl = document.getElementById('o-conn');
-  var comms  = (d.comms || 'OK').toUpperCase();
-  if (d.connected && d.rudder_stall) {
-    // Highest priority: motor commanded but rudder position not changing
-    connEl.textContent = 'RUDDER NOT RESPONDING';
-    connEl.className   = 'crit';
-  } else if (!d.connected && gTogglePos !== 'off') {
-    connEl.textContent = 'NO BRIDGE';
-    connEl.className   = 'crit';
-  } else if (d.connected && comms === 'CRIT') {
-    // Motor driver CRC error rate at critical level
-    connEl.textContent = 'MOTOR FAULT';
-    connEl.className   = 'crit';
-  } else if (d.connected && d.pypilot_ok === false) {
-    // pypilot process has lost its internal connection
-    connEl.textContent = 'NO HEADING';
-    connEl.className   = 'warn';
-  } else if (d.connected && comms === 'WARN') {
-    connEl.textContent = 'COMMS WARN';
-    connEl.className   = 'warn';
-  } else if (d.connected) {
-    connEl.textContent = 'CONNECTED';
-    connEl.className   = 'ok';
-  } else {
-    connEl.textContent = 'OFFLINE';
-    connEl.className   = 'warn';   // amber — intentional disconnect (OFF mode)
-  }
+  // Warnings/errors/version go to the alert panel (bottom right), not the OLED.
+  updateAlertsFromState(d);
+  linkRender();
 
   // Mode radio selector — driven by physical position, not bridge mode
   setToggle(gTogglePos);
@@ -2111,7 +2199,7 @@ function stopJog() {
         // GO in AUTO mode while AP is off: lock onto current heading then engage.
         sendCmd('AP_ENGAGE_AT_HDG').then(function(res) {
           if (!res.ok || res.body.ok === false) {
-            var msg = (res.body && res.body.error) ? res.body.error : 'AP engage failed';
+            var msg = (res.body && res.body.error) ? res.body.error : 'Could not start autopilot';
             showWarning(msg);
           }
         });
@@ -2435,17 +2523,17 @@ function setSovStatus(msg, type) {
   el.className = 'shdr-status' + (type ? ' s-' + type : '');
 }
 
-// showWarning: display a transient warning toast in the centre of the screen.
+// showWarning: show a transient message in the alert panel (bottom right) for ~4 s.
+// Long text word-wraps onto up to three rows.
 function showWarning(msg) {
-  var t = document.getElementById('sw-toast');
-  t.innerHTML = msg;
-  t.classList.add('visible');
-  setTimeout(function() { t.classList.remove('visible'); }, 2500);
+  gToast = {rows: alertWrap(msg), until: Date.now() + 4000};
+  linkRender();
+  setTimeout(linkRender, 4100);   // clear it when it expires
 }
 
 function openSettings() {
   if (gTogglePos !== 'off') {
-    showWarning('Settings only<br>available in OFF mode');
+    showWarning('Settings only work when the switch is OFF');
     return;
   }
   gSettingsOpen = true;
@@ -2463,12 +2551,12 @@ function openSettings() {
       sfApplyToUI();
       sfSyncVisibility();
       if (src === 'bridge') {
-        setSovStatus('\u2713 Loaded from bridge', 'ok');
+        setSovStatus('\u2713 Settings loaded', 'ok');
       } else {
-        setSovStatus('\u26a0 Using local settings \u2014 bridge unavailable', 'warn');
+        setSovStatus('\u26a0 Showing saved settings \u2014 autopilot did not reply', 'warn');
       }
     })
-    .catch(function() { setSovStatus('\u2717 Failed to load settings', 'err'); });
+    .catch(function() { setSovStatus('\u2717 Could not load settings', 'err'); });
 }
 
 // Internal: tears down the settings overlay without any save action.
@@ -2498,12 +2586,12 @@ function closeSettings(save) {
     .then(function(d) {
       var msg, type;
       if (d.ok && d.via === 'bridge') {
-        msg = '\u2713 Saved via bridge'; type = 'ok';
+        msg = '\u2713 Saved'; type = 'ok';
       } else if (d.ok) {
         // Saved to local file — bridge was unavailable or timed out
-        msg = '\u26a0 Saved locally \u2014 bridge unavailable'; type = 'warn';
+        msg = '\u26a0 Saved, but autopilot did not confirm'; type = 'warn';
       } else {
-        msg = '\u2717 Save failed'; type = 'err';
+        msg = '\u2717 Could not save'; type = 'err';
       }
       setSovStatus(msg, type);
       applyRemoteHelmSetting();
@@ -2512,8 +2600,8 @@ function closeSettings(save) {
     .catch(function(err) {
       clearTimeout(abortTimer);
       var msg = (err && err.name === 'AbortError')
-        ? '\u2717 Save timed out'
-        : '\u2717 Save failed \u2014 network error';
+        ? '\u2717 Save timed out \u2014 try again'
+        : '\u2717 Could not save \u2014 WiFi problem';
       setSovStatus(msg, 'err');
       setTimeout(_doClosePanel, 2000);
     });
@@ -2629,7 +2717,7 @@ function _updHide() { document.getElementById('upd-overlay').classList.remove('v
 function _updCheck() {
   var body = document.getElementById('upd-body');
   var inst = document.getElementById('upd-install');
-  body.textContent = 'Fetching from GitHub...';
+  body.textContent = 'Checking for updates...';
   inst.style.display = 'none';
   document.getElementById('upd-close').textContent = 'CLOSE';
   _updShow();
@@ -2637,7 +2725,7 @@ function _updCheck() {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.error) {
-        body.textContent = 'Error: ' + d.error;
+        body.textContent = 'Could not check for updates.\\n\\n' + d.error;
       } else if (d.up_to_date) {
         body.textContent = 'Already up to date.\\n\\nBranch : ' + d.branch + '\\nCommit : ' + d.sha;
       } else {
@@ -2646,7 +2734,7 @@ function _updCheck() {
         inst.style.display = '';
       }
     })
-    .catch(function(e) { body.textContent = 'Check failed: ' + e; });
+    .catch(function(e) { body.textContent = 'Could not check for updates.'; });
 }
 
 function _updInstall() {
@@ -2658,13 +2746,13 @@ function _updInstall() {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.error) {
-        body.textContent = 'Failed to start update:\\n' + d.error;
+        body.textContent = 'Could not start the update.\\n\\n' + d.error;
         inst.style.display = '';
       } else {
         _startProgressStream();
       }
     })
-    .catch(function(e) { body.textContent = 'Request failed: ' + e; });
+    .catch(function(e) { body.textContent = 'Could not reach the autopilot.'; });
 }
 
 // Switch the update modal to terminal view and stream deploy output via SSE.
@@ -2760,7 +2848,7 @@ class _Handler(BaseHTTPRequestHandler):
     # HTTP/1.1 is required for Server-Sent Events (persistent connection).
     # Python's BaseHTTPRequestHandler defaults to HTTP/1.0, which browsers
     # reject for EventSource — the SSE stream never delivers and the
-    # "NO BRIDGE" overlay stays permanently.
+    # "AUTO PILOT: CONNECTION LOST" overlay (formerly "NO BRIDGE") stays permanently.
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):  # suppress default access log noise
@@ -2789,6 +2877,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_settings_post()
         elif self.path == "/debug":
             self._handle_debug_toggle()
+        elif self.path == "/linkevent":
+            self._handle_link_event()
         elif self.path == "/update/start":
             self._handle_update_start()
         else:
@@ -2829,7 +2919,7 @@ class _Handler(BaseHTTPRequestHandler):
         HTTP/1.1 streaming responses require either Content-Length or
         Transfer-Encoding: chunked so the browser knows each frame boundary.
         Without chunked encoding Chrome buffers the entire SSE stream and
-        onmessage never fires, leaving the 'NO BRIDGE' overlay permanently.
+        onmessage never fires, leaving the 'AUTO PILOT: CONNECTION LOST' (formerly 'NO BRIDGE') overlay permanently.
         """
         self.wfile.write(f"{len(data):x}\r\n".encode())
         self.wfile.write(data)
@@ -2872,6 +2962,31 @@ class _Handler(BaseHTTPRequestHandler):
                     _sse_subs.remove(sub)
                 except ValueError:
                     pass
+
+    # ---- POST /linkevent ----
+
+    def _handle_link_event(self) -> None:
+        """Write a browser-reported link-quality threshold transition to the
+        event log (journal). Loss above 2% breaches; back at/below clears."""
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(min(length, 1024)) if length else b""
+        try:
+            d     = json.loads(body)
+            state = d["state"]
+            if state not in ("breach", "clear"):
+                raise ValueError
+            loss  = float(d["loss_pct"])
+            avg   = d.get("avg_ms")
+            mx    = float(d.get("max_ms", 0))
+            n     = int(d.get("samples", 0))
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            self._send_json(400, {"ok": False})  # sets Content-Length (keep-alive safe)
+            return
+        msg = "LINK_LOSS_%s client=%s loss=%.1f%% avg=%sms max=%.0fms samples=%d" % (
+            "BREACH" if state == "breach" else "CLEAR",
+            self.client_address[0], loss, avg, mx, n)
+        (log.warning if state == "breach" else log.info)(msg)
+        self._send_json(200, {"ok": True})
 
     # ---- POST /command ----
 
@@ -2949,10 +3064,10 @@ class _Handler(BaseHTTPRequestHandler):
                 hdg = _state["hdg"]
                 cmd = _state["cmd"]
             if hdg is None:
-                self._send_json(200, {"ok": False, "error": "No heading signal—compass not ready"})
+                self._send_json(200, {"ok": False, "error": "No compass heading yet. Try again shortly."})
                 return
             if cmd is None:
-                self._send_json(200, {"ok": False, "error": "AP heading unknown—try again"})
+                self._send_json(200, {"ok": False, "error": "Heading not known yet. Try again."})
                 return
             # Shortest-path delta so the heading command wraps correctly at 0/360.
             delta = ((hdg - cmd) + 180.0) % 360.0 - 180.0
@@ -2961,7 +3076,7 @@ class _Handler(BaseHTTPRequestHandler):
                 _cmd_q.put_nowait("BTN TOGGLE")
             except queue.Full:
                 log.warning("AP_ENGAGE_AT_HDG: cmd queue full")
-                self._send_json(200, {"ok": False, "error": "Command queue full—try again"})
+                self._send_json(200, {"ok": False, "error": "Too busy. Try again."})
                 return
             # Optimistic local state update (bridge confirms via telemetry ~200 ms later)
             _update(ap=1, mode="AP")
@@ -3080,7 +3195,7 @@ class _Handler(BaseHTTPRequestHandler):
             ).strip()
             pid = int(pid_str)
             if pid <= 0:
-                self._send_json(500, {"ok": False, "error": "Bridge not running"})
+                self._send_json(500, {"ok": False, "error": "Autopilot not connected"})
                 return
             os.kill(pid, _signal.SIGUSR1)
             new_state = not _snap()["debug"]
@@ -3137,9 +3252,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "current_sha": local_sha[:7],
             })
         except subprocess.TimeoutExpired:
-            self._send_json(504, {"error": "git fetch timed out — check network"})
+            self._send_json(504, {"error": "Update check timed out. Check the internet connection."})
         except subprocess.CalledProcessError as exc:
-            self._send_json(500, {"error": f"git error: {(exc.output or '').strip()}"})
+            self._send_json(500, {"error": "Update check failed"})
         except Exception as exc:
             self._send_json(500, {"error": str(exc)})
 
@@ -3339,37 +3454,54 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
-# Journal monitor — tracks inno-health-notify for packet-loss state changes
+# Pi -> router link state — published by inno-health-notify to a tmpfs file
 # ---------------------------------------------------------------------------
+# Must match NET_STATUS_FILE in inno_health_notify.py.  This replaced a
+# `journalctl -f` tail of that unit (fragile string matching, no numbers).
+NET_STATUS_FILE    = "/dev/shm/inno-pilot-net.json"
+NET_STATUS_STALE_S = 60   # older than this => health monitor not running => "unknown"
+NET_STATUS_POLL_S  = 1.0
+# Existence of this tmpfs file tells inno_health_notify.py that Debug is on, so it
+# pings the router at 0.5 s for finer debug metrics.  Must match its DEBUG_FLAG_FILE.
+DEBUG_FLAG_FILE    = "/dev/shm/inno-pilot-debug"
 
-def _net_warn_monitor() -> None:
-    """Daemon thread: tails the inno-health-notify journal and updates net_warn.
-
-    Uses clean-slate semantics (no history replay) so web-remote restart always
-    starts from net_warn=False.  The health-notify service itself is the source
-    of truth; its state is logged and persists across web-remote restarts.
-    """
+def _sync_debug_flag() -> None:
+    """Make DEBUG_FLAG_FILE's existence mirror state['debug'] (best effort)."""
     try:
-        proc = subprocess.Popen(
-            ["journalctl", "-u", "inno-health-notify",
-             "--no-pager", "-o", "cat", "-n", "0", "-f"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        log.info("Net-warn monitor: tailing inno-health-notify journal")
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            if "PACKET_LOSS_WARN" in line:
-                _update(net_warn=True)
-                log.warning("NET_WARN: Packet loss warning received from health monitor")
-            elif "PACKET_LOSS_CLEAR" in line:
-                _update(net_warn=False)
-                log.info("NET_WARN: Packet loss cleared — network OK")
-    except Exception as exc:
-        log.warning("Net-warn monitor thread error: %s", exc)
+        want = bool(_snap().get("debug"))
+        have = os.path.exists(DEBUG_FLAG_FILE)
+        if want and not have:
+            open(DEBUG_FLAG_FILE, "w").close()
+            os.chmod(DEBUG_FLAG_FILE, 0o644)
+        elif have and not want:
+            os.remove(DEBUG_FLAG_FILE)
+    except OSError:
+        pass
+
+def _net_status_monitor() -> None:
+    """Daemon thread: polls NET_STATUS_FILE and mirrors it into state['net_pi'].
+
+    The health-notify service is the source of truth and the one that logs the
+    WARN/CLEAR events and sends the Telegram alerts; this thread only displays.
+    net_pi is only re-published when its content changes, to keep SSE quiet.
+    """
+    last = "unset"
+    while True:
+        cur = None
+        try:
+            with open(NET_STATUS_FILE) as f:
+                d = json.load(f)
+            if time.time() - float(d["ts"]) <= NET_STATUS_STALE_S:
+                cur = {"state":    "WARN" if d.get("state") == "WARN" else "OK",
+                       "loss_pct": d.get("loss_pct"),
+                       "avg_ms":   d.get("avg_ms")}
+        except (OSError, ValueError, KeyError, TypeError):
+            cur = None   # missing/garbled/stale => unknown, show nothing
+        if cur != last:
+            _update(net_pi=cur)
+            last = cur
+        _sync_debug_flag()
+        time.sleep(NET_STATUS_POLL_S)
 
 
 # ---------------------------------------------------------------------------
@@ -3382,10 +3514,10 @@ def main() -> None:
     t.start()
     log.info("Bridge client thread started (target: %s:%d)", BRIDGE_HOST, BRIDGE_PORT)
 
-    # Start journal monitor thread for packet-loss network warnings
-    m = threading.Thread(target=_net_warn_monitor, daemon=True, name="net-warn-monitor")
+    # Start thread mirroring the Pi->router link state (from inno-health-notify)
+    m = threading.Thread(target=_net_status_monitor, daemon=True, name="net-status-monitor")
     m.start()
-    log.info("Net-warn monitor thread started")
+    log.info("Net-status monitor thread started")
 
     # Start HTTP server
     server = ThreadingHTTPServer(("", WEB_PORT), _Handler)
