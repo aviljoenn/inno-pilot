@@ -640,17 +640,18 @@ body{
   height:138px; /* content-box height; rendered total ≈ 146px (est. base +50px) */
 }
 
-/* Rudder position bar */
+/* Rudder position bar — all heights doubled (bar 16→32, track 2→4, tick 10→20,
+   marker 12→24, arrow 14→28); widths unchanged so the JS arrow offsets still fit. */
 .rdr-bar{
   position:relative;
-  height:16px;
+  height:32px;
   display:flex;
   align-items:center;
   padding:0 4px;
 }
 .rdr-track{
   width:100%;
-  height:2px;
+  height:4px;
   background:repeating-linear-gradient(90deg,
     #1a4060 0,#1a4060 4px,transparent 4px,transparent 8px);
   position:relative;
@@ -658,16 +659,16 @@ body{
 .rdr-center-tick{
   position:absolute;
   left:50%;
-  top:-4px;
+  top:-8px;
   width:2px;
-  height:10px;
+  height:20px;
   background:#2a6090;
   transform:translateX(-50%);
 }
 .rdr-marker{
   position:absolute;
   width:12px;
-  height:12px;
+  height:24px;
   background:#00d4ff;
   box-shadow:0 0 6px #00bfff;
   top:50%;
@@ -683,8 +684,8 @@ body{
   transform:translateY(-50%);
   width:0;
   height:0;
-  border-top:7px solid transparent;
-  border-bottom:7px solid transparent;
+  border-top:14px solid transparent;
+  border-bottom:14px solid transparent;
   display:none;        /* hidden by default; shown by JS */
   transition:left 0.12s ease;   /* match rdr-marker so arrow glides in lockstep */
 }
@@ -710,6 +711,8 @@ body{
   display:flex;
   justify-content:space-between;
 }
+/* Each readout is two lines: label on top, value centred beneath it */
+.oled-data .od-col{display:flex;flex-direction:column;align-items:center;line-height:1.2}
 .oled-btns{
   display:flex;
   justify-content:center;
@@ -1243,8 +1246,8 @@ body{
     </div>
 
     <div class="oled-data">
-      <span>CMD:&nbsp;<span id="o-cmd">---</span>&deg;</span>
-      <span>Head:&nbsp;<span id="o-hdg">---</span>&deg;</span>
+      <div class="od-col"><span>Command</span><span><span id="o-cmd">---</span>&deg;</span></div>
+      <div class="od-col"><span>Heading</span><span><span id="o-hdg">---</span>&deg;</span></div>
     </div>
 
     <div class="oled-mode" id="oled-mode-row"><b id="o-mode">IDLE</b></div>

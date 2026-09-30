@@ -78,6 +78,10 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   - OLED mode line is centred, no longer prefixed with "MODE:", and uses the same
     font, size and colour as CMD/Head (previously grey small text with a big "AP",
     so "AP ON" showed a small white "ON").
+  - OLED rudder position bar is twice as tall (track, centre tick, marker and
+    command arrow heights all doubled; widths unchanged).
+  - OLED "CMD: / Head:" line is now two lines: "Command" and "Heading" labels with
+    the degrees centred beneath each.
   - Alert panel uses the same face, weight and colour as the OLED CMD/Head readout
     (bold Courier, cyan). Warnings are now cyan too (were amber); critical alerts
     stay red and blinking. Alerts use a smaller size so three rows still fit. When
