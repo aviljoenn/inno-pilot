@@ -73,11 +73,12 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 - **Web remote layout** (`inno_web_remote.py`, page only):
   - The "Inno-Web-Remote" title moved out of the top OLED to the bottom edge of the
     remote body, in black, left-justified, with the software version right-justified
-    beside it (served from `INNOPILOT_VERSION`).
+    beside it (served from `INNOPILOT_VERSION`). Same font size as the OLED "Head".
   - OLED mode line is centred and no longer prefixed with "MODE:".
   - Alert panel uses the same face, weight and colour as the OLED CMD/Head readout
-    (bold Courier, cyan; smaller size so three rows still fit). When there is
-    nothing to report it shows "All Services Nominal" instead of staying blank.
+    (bold Courier, cyan). Alerts use a smaller size so three rows still fit. When
+    there is nothing to report it shows "All Services Nominal" at full CMD/Head
+    size on two centred lines ("All Services" / "Nominal") instead of staying blank.
   - Helm wheel + nudge buttons moved up by the height of the old title row; wheel,
     Settings/Debug/alert footer and name/version row are evenly spaced (13 px).
     STOP, the mode radios and the nudge-button spacing are unchanged.

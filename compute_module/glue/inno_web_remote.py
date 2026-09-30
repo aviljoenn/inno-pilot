@@ -1158,13 +1158,19 @@ body{
   color:#00d4ff;white-space:nowrap;overflow:hidden;
 }
 #alert-oled div{overflow:hidden;text-overflow:ellipsis}
+/* "All Services Nominal": two centred lines at the full CMD/Head size.
+   1.2em of the remote = (1.2/.7)em of this panel.  line-height:1 so both
+   lines fit the 46px panel. */
+#alert-oled .a-nominal{font-size:calc(1.2em / .7);line-height:1;text-align:center}
 #alert-oled .a-warn{color:#ffaa00;text-shadow:0 0 6px rgba(255,170,0,.4)}
 #alert-oled .a-crit{color:#ff3030;text-shadow:0 0 6px rgba(255,48,48,.5);
   animation:blink .45s step-end infinite}
 
 /* ── Name + version, printed in black on the bottom edge of the remote body ── */
 .remote-id{display:flex;justify-content:space-between;align-items:baseline;
-  padding:0 8px;color:#000;font-size:.72em;font-weight:700;letter-spacing:1px;line-height:1.2}
+  padding:0 8px;column-gap:8px;color:#000;font-size:1.2em;font-weight:700;letter-spacing:.5px;line-height:1.2;
+  white-space:nowrap}
+/* font-size matches the OLED "Head"/"CMD" readout (.oled-data, 1.2em) */
 
 /* ── Boat-name setup modal ──────────────────────────────────────────────── */
 .bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:none;
@@ -2003,7 +2009,10 @@ function linkRender() {
     if (rows.length > 3) {   // never hide alerts silently: last row says how many more
       rows = rows.slice(0, 2).concat([{text: '+' + (rows.length - 2) + ' MORE', cls: 'a-warn'}]);
     }
-    if (!rows.length) rows.push({text: 'All Services Nominal', cls: ''});   // all is well
+    if (!rows.length) {   // all is well: two centred lines at full CMD/Head size
+      rows.push({text: 'All Services', cls: 'a-nominal'});
+      rows.push({text: 'Nominal',      cls: 'a-nominal'});
+    }
   }
   el.textContent = '';
   rows.forEach(function(r) {
