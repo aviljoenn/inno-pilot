@@ -118,8 +118,11 @@ def ota_host() -> str:
 # ---------------------------------------------------------------------------
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
-INNOPILOT_VERSION   = "v1.3.3_B11"
-INNOPILOT_BUILD_NUM = 11  # increment with each push during development
+# Release versions only: "vMAJOR.MINOR.PATCH" — no "_Bxx" beta build suffix (dropped at v3.0.1).
+INNOPILOT_VERSION      = "v3.0.1"
+# Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
+# MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
+INNOPILOT_VERSION_CODE = 30001
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -362,7 +365,7 @@ BRIDGE_MAGIC2         = 0x5A
 BRIDGE_HELLO_CODE     = 0xF0
 BRIDGE_HELLO_ACK_CODE = 0xF1
 BRIDGE_HELLO_VALUE    = 0xBEEF
-BRIDGE_VERSION_CODE   = 0xF2  # Bridge -> Nano: build number (uint16)
+BRIDGE_VERSION_CODE   = 0xF2  # Bridge -> Nano: version code, major*10000+minor*100+patch (uint16)
 
 # ---------------------------------------------------------------------------
 # Bridge mode identifiers
@@ -1527,7 +1530,7 @@ def main() -> None:
         # ================================================================
         if (now - last_hello_ts) >= HELLO_PERIOD_S:
             send_nano_frame(nano, BRIDGE_HELLO_CODE, BRIDGE_HELLO_VALUE)
-            send_nano_frame(nano, BRIDGE_VERSION_CODE, INNOPILOT_BUILD_NUM)
+            send_nano_frame(nano, BRIDGE_VERSION_CODE, INNOPILOT_VERSION_CODE)
             last_hello_ts = now
             log.debug("HELLO + VERSION sent to Nano")
 
