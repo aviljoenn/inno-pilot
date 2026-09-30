@@ -331,17 +331,23 @@ three that must agree:
 
 | file | constants |
 |---|---|
-| `servo_motor_control/arduino/motor_simple/motor_simple.ino` | `INNOPILOT_VERSION`, `INNOPILOT_BUILD_NUM` |
-| `compute_module/glue/inno_pilot_bridge.py` | `INNOPILOT_VERSION`, `INNOPILOT_BUILD_NUM` |
+| `servo_motor_control/arduino/motor_simple/motor_simple.ino` | `INNOPILOT_VERSION`, `INNOPILOT_VERSION_CODE` |
+| `compute_module/glue/inno_pilot_bridge.py` | `INNOPILOT_VERSION`, `INNOPILOT_VERSION_CODE` |
 | `compute_module/glue/inno_web_remote.py` | `INNOPILOT_VERSION` |
 
 ```bash
-grep -rnE 'INNOPILOT_(VERSION|BUILD_NUM)\s*[=:]' --include=*.py --include=*.ino .
+grep -rnE 'INNOPILOT_(VERSION|VERSION_CODE)\s*[=:]' --include=*.py --include=*.ino .
 ```
 
+**Version format (from v3.0.1):** release versions only, `vMAJOR.MINOR.PATCH` — the
+`_Bxx` beta build suffix is dropped. `INNOPILOT_VERSION_CODE` (replaces the old
+`INNOPILOT_BUILD_NUM` beta counter) is the numeric form, `major*10000 + minor*100 + patch`
+(v3.0.1 → 30001); it travels to the Nano in the uint16 `BRIDGE_VERSION_CODE` frame, so
+major must stay ≤ 6 and minor/patch ≤ 99. Change it together with the string.
+
 Why it matters concretely:
-- The Nano flashes `!VER MISMATCH!` on rows 1–2 when `bridge_build_num` differs from its
-  own. That message sits **above** `comms_warn`, rudder-overshoot and ap-pressed in the
+- The Nano flashes `!VER MISMATCH!` on rows 1–2 when `bridge_ver_code` differs from its
+  own (row 2 shows both decoded, e.g. `Pi:3.0.1 Nano:3.0.2`). That message sits **above** `comms_warn`, rudder-overshoot and ap-pressed in the
   priority chain, so it **masks genuine warnings** underneath it.
 - The bridge offers an OTA binary to any remote whose version *string* differs
   (`inno_pilot_bridge.py`, "Offer OTA if remote is behind"). Bumping the bridge without

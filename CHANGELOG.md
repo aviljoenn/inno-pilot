@@ -6,6 +6,8 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
 
 ## [Unreleased]
 
+## [v3.0.1] — 2026-09-30
+
 ### Added
 - **Two separate network-link monitors, one display** (`inno_web_remote.py`,
   `inno_health_notify.py`). Both are kept; they watch different paths and each
@@ -70,6 +72,16 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
     (restarts health-notify and web-remote).
 
 ### Changed
+- **Version scheme:** all components (Nano, bridge, web remote) move to **v3.0.1** and
+  from now on carry release versions only (`vMAJOR.MINOR.PATCH`); the `_Bxx` beta build
+  suffix is dropped. The Nano/bridge build counter `INNOPILOT_BUILD_NUM` is replaced by
+  `INNOPILOT_VERSION_CODE` = major*10000 + minor*100 + patch (30001), sent in the existing
+  `BRIDGE_VERSION_CODE` (0xF2) uint16 frame — no protocol change. The Nano's
+  `!VER MISMATCH!` row and boot screen now show real versions (`Pi:3.0.1 Nano:3.0.1`,
+  `Bridge: v3.0.1`) instead of `B11` / a hard-coded `v0.2.0_Bxx`.
+  - ESP32 handheld remote source (`inno-remote/.../inno_remote.c`) and its OTA binary
+    are NOT changed: remotes are offline pending development, and the source there is
+    known not to match the firmware on the device.
 - **Web remote layout** (`inno_web_remote.py`, page only):
   - The "Inno-Web-Remote" title moved out of the top OLED to the bottom edge of the
     remote body, in black, left-justified, with the software version right-justified
@@ -90,8 +102,7 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   - Helm wheel + nudge buttons moved up by the height of the old title row; wheel,
     Settings/Debug/alert footer and name/version row are evenly spaced (13 px).
     STOP, the mode radios and the nudge-button spacing are unchanged.
-  - No bridge, Nano or ESP32 change, so no version bump. Needs `inno_deploy.sh`
-    (restarts web-remote).
+  - Web-remote-only change; shipped with the v3.0.1 version sync above.
 
 ### Fixed
 - **I2C enable verification** (`install.sh`, `INSTALL.md`): `raspi-config nonint

@@ -26,8 +26,12 @@
 enum ButtonID : uint8_t;
 
 // ---- Inno-Pilot version (must match bridge + remote) ----
-const char INNOPILOT_VERSION[] = "v1.3.3_B11";
-const uint16_t INNOPILOT_BUILD_NUM = 11;  // increment with each push during development
+// Release versions only: "vMAJOR.MINOR.PATCH" — no "_Bxx" beta build suffix (dropped at v3.0.1).
+const char INNOPILOT_VERSION[] = "v3.0.1";
+// Numeric form of INNOPILOT_VERSION: major*10000 + minor*100 + patch (v3.0.1 -> 30001).
+// Sent by the bridge in BRIDGE_VERSION_CODE (uint16) and compared for !VER MISMATCH!.
+// MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
+const uint16_t INNOPILOT_VERSION_CODE = 30001;
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -46,7 +50,7 @@ const uint8_t BRIDGE_MAGIC1 = 0xA5;
 const uint8_t BRIDGE_MAGIC2 = 0x5A;
 const uint8_t BRIDGE_HELLO_CODE = 0xF0;
 const uint8_t BRIDGE_HELLO_ACK_CODE = 0xF1;
-const uint8_t BRIDGE_VERSION_CODE = 0xF2;  // Bridge -> Nano: build number
+const uint8_t BRIDGE_VERSION_CODE = 0xF2;  // Bridge -> Nano: version code (major*10000+minor*100+patch)
 // Bridge->Nano: pypilot rudder limits (tenths of degrees)
 const uint8_t PILOT_RUDDER_DIRB_LIM_CODE = 0xE5; // Dir-B limit * 10 (int16)
 const uint8_t PILOT_RUDDER_DIRA_LIM_CODE = 0xE6; // Dir-A limit * 10 (int16)
@@ -160,8 +164,8 @@ unsigned long pi_online_time_ms = 0; // when we first saw Pi online
 bool pi_ever_online       = false;
 unsigned long last_pi_frame_ms = 0;
 const unsigned long PI_OFFLINE_TIMEOUT_MS = 5000UL;  // 5s no frames => offline
-uint16_t bridge_build_num = 0;     // received from bridge via BRIDGE_VERSION_CODE
-bool     bridge_build_valid = false;
+uint16_t bridge_ver_code = 0;      // received from bridge via BRIDGE_VERSION_CODE
+bool     bridge_ver_valid = false;
 
 // ---- Pins ----
 const uint8_t LED_PIN          = 13;
@@ -1094,8 +1098,8 @@ void oled_draw() {
         display.setCursor(0, 1); display.clearToEOL();
         display.setCursor(0, 2); display.clearToEOL();
       }
-    } else if (bridge_build_valid && bridge_build_num != INNOPILOT_BUILD_NUM) {
-      // Version mismatch: flash 1X warning — all components must run the same build
+    } else if (bridge_ver_valid && bridge_ver_code != INNOPILOT_VERSION_CODE) {
+      // Version mismatch: flash 1X warning — all components must run the same version
       static bool vm_vis = true;
       static unsigned long vm_flash_ms = 0;
       if (now - vm_flash_ms >= 500UL) { vm_flash_ms = now; vm_vis = !vm_vis; }
@@ -1104,7 +1108,11 @@ void oled_draw() {
         display.print(F("!VER MISMATCH!"));
         display.clearToEOL();
         char vmbuf[22];
-        snprintf(vmbuf, sizeof(vmbuf), "Pi:B%u Nano:B%u", bridge_build_num, INNOPILOT_BUILD_NUM);
+        // Decode both version codes to "M.m.p" (e.g. "Pi:3.0.1 Nano:3.0.2" = 19 chars)
+        snprintf(vmbuf, sizeof(vmbuf), "Pi:%u.%u.%u Nano:%u.%u.%u",
+                 bridge_ver_code / 10000, (bridge_ver_code / 100) % 100, bridge_ver_code % 100,
+                 INNOPILOT_VERSION_CODE / 10000, (INNOPILOT_VERSION_CODE / 100) % 100,
+                 INNOPILOT_VERSION_CODE % 100);
         display.setCursor(0, 2);
         display.print(vmbuf);
         display.clearToEOL();
@@ -1200,8 +1208,9 @@ void oled_draw() {
     // Row 5: Bridge version centred
     {
       char buf[22];
-      if (bridge_build_valid) {
-        snprintf(buf, sizeof(buf), "Bridge: v0.2.0_B%u", bridge_build_num);
+      if (bridge_ver_valid) {
+        snprintf(buf, sizeof(buf), "Bridge: v%u.%u.%u",
+                 bridge_ver_code / 10000, (bridge_ver_code / 100) % 100, bridge_ver_code % 100);
       } else {
         snprintf(buf, sizeof(buf), "Bridge: waiting...");
       }
@@ -2072,8 +2081,8 @@ void process_packet() {
       break;
 
     case BRIDGE_VERSION_CODE:
-      bridge_build_num = value;
-      bridge_build_valid = true;
+      bridge_ver_code = value;
+      bridge_ver_valid = true;
       break;
 
     case FEATURES_CODE: {
