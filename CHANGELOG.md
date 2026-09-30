@@ -69,6 +69,21 @@ Version applies to all three components (Bridge, Nano, Remote) simultaneously an
   - No bridge, Nano or ESP32 change, so no version bump. Needs `inno_deploy.sh`
     (restarts health-notify and web-remote).
 
+### Changed
+- **Web remote layout** (`inno_web_remote.py`, page only):
+  - The "Inno-Web-Remote" title moved out of the top OLED to the bottom edge of the
+    remote body, in black, left-justified, with the software version right-justified
+    beside it (served from `INNOPILOT_VERSION`).
+  - OLED mode line is centred and no longer prefixed with "MODE:".
+  - Alert panel uses the same face, weight and colour as the OLED CMD/Head readout
+    (bold Courier, cyan; smaller size so three rows still fit). When there is
+    nothing to report it shows "All Services Nominal" instead of staying blank.
+  - Helm wheel + nudge buttons moved up by the height of the old title row; wheel,
+    Settings/Debug/alert footer and name/version row are evenly spaced (13 px).
+    STOP, the mode radios and the nudge-button spacing are unchanged.
+  - No bridge, Nano or ESP32 change, so no version bump. Needs `inno_deploy.sh`
+    (restarts web-remote).
+
 ### Fixed
 - **I2C enable verification** (`install.sh`, `INSTALL.md`): `raspi-config nonint
   do_i2c 0` can exit 0 without actually writing the `dtparam=i2c_arm=on` line

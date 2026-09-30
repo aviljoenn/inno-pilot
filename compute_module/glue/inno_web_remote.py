@@ -614,7 +614,7 @@ body{
     0 30px 80px rgba(0,0,0,0.65),
     inset 0 1px 0 rgba(255,255,255,0.9),
     inset 0 -2px 6px rgba(0,0,0,0.12);
-  padding:16px 14px 20px;
+  padding:16px 14px 13px;   /* bottom kept small: .remote-id sits on the bottom edge */
   width:340px;
   max-width:98vw;
   display:flex;
@@ -638,14 +638,6 @@ body{
   gap:0;
   justify-content:space-between;
   height:138px; /* content-box height; rendered total ≈ 146px (est. base +50px) */
-}
-.oled-title{
-  color:#00d4ff;
-  font-size:1.2em;
-  font-weight:700;
-  text-align:center;
-  letter-spacing:3px;
-  text-shadow:0 0 10px #00bfff,0 0 22px rgba(0,191,255,0.35);
 }
 
 /* Rudder position bar */
@@ -704,7 +696,7 @@ body{
 }
 
 /* line-height:1.5 pre-reserves height for the 1.5× AP label so layout never shifts */
-.oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px;line-height:1.5;display:flex;align-items:flex-end}
+.oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px;line-height:1.5;display:flex;align-items:flex-end;justify-content:center}
 .oled-mode b{color:#00d4ff}
 /* AP label in AUTO mode — 1.5× the surrounding text size */
 .oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;line-height:1}
@@ -834,7 +826,6 @@ body{
 .mode-radio:hover .mrd-lbl{color:#444}
 .mode-radio.disabled{pointer-events:none;cursor:default;opacity:0.28}
 /* OFF mode: blank the OLED content area */
-.oled.blank-mode .oled-title,
 .oled.blank-mode .rdr-bar,
 .oled.blank-mode .oled-mode,
 .oled.blank-mode .oled-data{visibility:hidden}
@@ -845,6 +836,11 @@ body{
   flex-direction:column;
   align-items:center;
   gap:5px;
+  /* Moved up by the height of the former OLED title row (22px) — the space freed
+     by moving the name to the bottom edge.  The wheel's round top clears the
+     STOP button and radios.  Below this, wheel / footer / .remote-id are spaced
+     evenly by the remote's 13px flex gap. */
+  margin-top:-22px;
 }
 .wheel-wrap{
   width:210px;
@@ -1156,14 +1152,19 @@ body{
   box-shadow:inset 0 2px 6px rgba(0,0,0,.9),
              0 0 0 2px #1e2040,0 0 0 3px #2e3060;
   display:flex;flex-direction:column;justify-content:center;
-  font-family:'Courier New',monospace;font-size:.62em;line-height:1.35;
-  letter-spacing:.3px;color:#00d4ff;white-space:nowrap;overflow:hidden;
-  text-shadow:0 0 6px rgba(0,191,255,.5);
+  /* Same face, weight and colour as the OLED CMD/Head readout (.oled-data).
+     Size is smaller than CMD/Head's 1.2em so 3 rows x ALERT_COLS fit the panel. */
+  font-family:'Courier New',monospace;font-weight:700;font-size:.7em;line-height:1.2;
+  color:#00d4ff;white-space:nowrap;overflow:hidden;
 }
 #alert-oled div{overflow:hidden;text-overflow:ellipsis}
 #alert-oled .a-warn{color:#ffaa00;text-shadow:0 0 6px rgba(255,170,0,.4)}
 #alert-oled .a-crit{color:#ff3030;text-shadow:0 0 6px rgba(255,48,48,.5);
   animation:blink .45s step-end infinite}
+
+/* ── Name + version, printed in black on the bottom edge of the remote body ── */
+.remote-id{display:flex;justify-content:space-between;align-items:baseline;
+  padding:0 8px;color:#000;font-size:.72em;font-weight:700;letter-spacing:1px;line-height:1.2}
 
 /* ── Boat-name setup modal ──────────────────────────────────────────────── */
 .bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:none;
@@ -1216,7 +1217,8 @@ body{
 
   <!-- OLED display panel -->
   <div class="oled">
-    <div class="oled-title">Inno-Web-Remote</div>
+    <!-- The product name + version moved out of the OLED to the bottom edge of the
+         remote (.remote-id), so this screen carries steering info only. -->
 
     <!-- Rudder position bar -->
     <div class="rdr-bar">
@@ -1233,7 +1235,7 @@ body{
       <span>Head:&nbsp;<span id="o-hdg">---</span>&deg;</span>
     </div>
 
-    <div class="oled-mode" id="oled-mode-row">MODE: <b id="o-mode">IDLE</b></div>
+    <div class="oled-mode" id="oled-mode-row"><b id="o-mode">IDLE</b></div>
 
     <!-- Warnings, errors and system info are NOT shown here: this screen is for the
          skipper's steering command/control only.  See #alert-oled (bottom right). -->
@@ -1294,6 +1296,12 @@ body{
     <!-- Alert panel: every warning / error / system message (plain wording).  Quiet when
          all is well.  Debug mode adds live link numbers and the software version. -->
     <div id="alert-oled"></div>
+  </div>
+
+  <!-- Product name (left) and software version (right), in black on the bottom edge -->
+  <div class="remote-id">
+    <span>Inno-Web-Remote</span>
+    <span id="remote-ver">$$VERSION$$</span>
   </div>
 
 </div><!-- .remote -->
@@ -1932,7 +1940,7 @@ function linkReportBreach() {
 //   1-5 autopilot/steering faults from the bridge (computed in updateAlertsFromState)
 //   6-7 WiFi links: AUTOPILOT WIFI (Pi -> router, measured by inno-health-notify,
 //       gNetPi) and REMOTE WIFI (this browser -> Pi, measured here, gLpBreach)
-// Normal mode: shows only active alerts (max 3 rows), nothing when all is well.
+// Normal mode: shows only active alerts (max 3 rows), "All Services Nominal" when all is well.
 // Debug mode: live link numbers, plus the top alert or else the software version.
 var gNetPi = null;        // {state:'OK'|'WARN', loss_pct, avg_ms} from SSE, or null if unknown
 var gStateAlerts = [];    // [{p, text, cls}] derived from the latest SSE state
@@ -1995,6 +2003,7 @@ function linkRender() {
     if (rows.length > 3) {   // never hide alerts silently: last row says how many more
       rows = rows.slice(0, 2).concat([{text: '+' + (rows.length - 2) + ' MORE', cls: 'a-warn'}]);
     }
+    if (!rows.length) rows.push({text: 'All Services Nominal', cls: ''});   // all is well
   }
   el.textContent = '';
   rows.forEach(function(r) {
@@ -2023,20 +2032,21 @@ function updateUI(d) {
   // position as authoritative for intentional offline state.
   setConnected(gConnected || gMode === 'OFF' || gTogglePos === 'off');
 
-  // OLED mode line — AUTO: show AP ON/OFF with oversized "AP"; other modes: plain label
+  // OLED mode line (centred, no "MODE:" prefix) — AUTO: show AP ON/OFF with oversized "AP";
+  // other modes: plain label
   var modeRow = document.getElementById('oled-mode-row');
   var b3btn   = document.querySelector('.hw-btn.b3');
   if (gMode === 'RAM_ON') {
-    modeRow.innerHTML = 'MODE: <b style="color:#ff6a00">RAM Test ON</b>';
+    modeRow.innerHTML = '<b style="color:#ff6a00">RAM Test ON</b>';
     if (b3btn) b3btn.textContent = 'Stop';
   } else if (gMode === 'RAM_OFF') {
-    modeRow.innerHTML = 'MODE: <b style="color:#e09000">RAM Test OFF</b>';
+    modeRow.innerHTML = '<b style="color:#e09000">RAM Test OFF</b>';
     if (b3btn) b3btn.textContent = 'Run';
   } else if (gMode === 'AP' && gApOn) {
-    modeRow.innerHTML = 'MODE: <span class="ap-label">AP</span>\u00a0ON';
+    modeRow.innerHTML = '<span class="ap-label">AP</span>\u00a0ON';
     if (b3btn) b3btn.textContent = 'Off';  // AP is engaged; pressing will disengage
   } else {
-    modeRow.innerHTML = 'MODE: <b id="o-mode">' + (gMode || 'IDLE') + '</b>';
+    modeRow.innerHTML = '<b id="o-mode">' + (gMode || 'IDLE') + '</b>';
     if (b3btn) b3btn.textContent = gTogglePos === 'auto' ? 'On' : 'Go';  // AUTO: engage; other modes: generic
   }
 
@@ -2837,7 +2847,7 @@ setInterval(function() {
 </script>
 
 </body>
-</html>""".replace("$$WHEEL_SVG$$", _WHEEL_SVG)
+</html>""".replace("$$WHEEL_SVG$$", _WHEEL_SVG).replace("$$VERSION$$", INNOPILOT_VERSION)
 
 # ---------------------------------------------------------------------------
 # HTTP request handler
