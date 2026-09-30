@@ -695,11 +695,13 @@ body{
   border-left:12px solid #ff6a00;   /* orange, points right */
 }
 
-/* line-height:1.5 pre-reserves height for the 1.5× AP label so layout never shifts */
-.oled-mode{color:#ccc;font-size:0.8em;letter-spacing:1px;line-height:1.5;display:flex;align-items:flex-end;justify-content:center}
+/* Mode line: same face, weight, size and colour as the CMD/Head readout (.oled-data),
+   so e.g. "AP ON" reads as one uniform OLED line.  (RAM-test labels keep their
+   inline orange.)  Previously grey 0.8em text with a 1.5x "AP". */
+.oled-mode{color:#00d4ff;font-family:'Courier New',monospace;font-weight:700;font-size:1.2em;
+  line-height:1.2;display:flex;align-items:flex-end;justify-content:center}
 .oled-mode b{color:#00d4ff}
-/* AP label in AUTO mode — 1.5× the surrounding text size */
-.oled-mode .ap-label{font-size:1.5em;font-weight:700;color:#00d4ff;line-height:1}
+.oled-mode .ap-label{color:#00d4ff}
 .oled-data{
   color:#00d4ff;
   font-size:1.2em;
@@ -1143,7 +1145,7 @@ body{
    The ONE place for warnings, errors and system info (the OLED above is for
    steering command/control only).  A miniature of the main .oled screen: same
    near-black ground, Courier text and ringed bezel.  Rows: cyan = info/debug,
-   amber = warning, red blinking = critical.  The bezel rings extend outside the
+   cyan = warning (like CMD/Head), red blinking = critical.  The bezel rings extend outside the
    box, so the margins keep them clear of the Debug button and the remote's edge. */
 #alert-oled{
   flex:1;min-width:0;height:46px;box-sizing:border-box;
@@ -1162,15 +1164,19 @@ body{
    1.2em of the remote = (1.2/.7)em of this panel.  line-height:1 so both
    lines fit the 46px panel. */
 #alert-oled .a-nominal{font-size:calc(1.2em / .7);line-height:1;text-align:center}
-#alert-oled .a-warn{color:#ffaa00;text-shadow:0 0 6px rgba(255,170,0,.4)}
+/* Warnings use the panel's OLED cyan (same as CMD/Head); only criticals stand out
+   in red and blink. */
+#alert-oled .a-warn{color:#00d4ff}
 #alert-oled .a-crit{color:#ff3030;text-shadow:0 0 6px rgba(255,48,48,.5);
   animation:blink .45s step-end infinite}
 
 /* ── Name + version, printed in black on the bottom edge of the remote body ── */
 .remote-id{display:flex;justify-content:space-between;align-items:baseline;
-  padding:0 8px;column-gap:8px;color:#000;font-size:1.2em;font-weight:700;letter-spacing:.5px;line-height:1.2;
+  padding:0 8px;column-gap:8px;color:#000;font-weight:700;letter-spacing:1px;line-height:1.2;
   white-space:nowrap}
-/* font-size matches the OLED "Head"/"CMD" readout (.oled-data, 1.2em) */
+/* Name matches the OLED "Head"/"CMD" size (.oled-data, 1.2em); version stays small */
+.remote-id .rid-name{font-size:1.2em;letter-spacing:.5px}
+.remote-id .rid-ver{font-size:.72em}
 
 /* ── Boat-name setup modal ──────────────────────────────────────────────── */
 .bnm-overlay{position:fixed;inset:0;background:rgba(0,0,0,.80);display:none;
@@ -1306,8 +1312,8 @@ body{
 
   <!-- Product name (left) and software version (right), in black on the bottom edge -->
   <div class="remote-id">
-    <span>Inno-Web-Remote</span>
-    <span id="remote-ver">$$VERSION$$</span>
+    <span class="rid-name">Inno-Web-Remote</span>
+    <span class="rid-ver" id="remote-ver">$$VERSION$$</span>
   </div>
 
 </div><!-- .remote -->
