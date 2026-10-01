@@ -52,11 +52,22 @@ ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped
     STOPPED. Reported only — nothing is written to settings.
   - Amplitude 5°–range (also clamped to `rudder_limit_*_pct`), 1–10 cycles
     (default 3). Bridge now watches `servo.current` from pypilot.
+  - **Deadband-aware** (found on Dyason's first boat run, which false-stopped with
+    "rudder not moving" while the rudder moved fine): the Nano stops anywhere within
+    its deadband (`deadband_pct` × full span — ±6° on Dyason at 10%) and drives at
+    reduced power within 4× that. The sweep now treats arriving inside that band as
+    the end of the stroke, uses its own jam check (< 0.5° progress in 2 s) instead of
+    the generic 2°/s stall detector (which trips on a healthy rudder in the slow
+    zone), times speed over the travel actually achieved, estimates lag from the
+    local speed at the start of the move, and refuses sweeps too small to clear the
+    deadband (with a plain explanation). Results show the deadband and flag speeds
+    timed partly/entirely at reduced power.
   - Verified against the real bridge `main()` with a simulated Nano/pypilot:
     complete run (speeds measured exactly), release (~120 ms), window blur
     (~120 ms), silent heartbeat loss (~1.1 s), Nano STOP, Nano B3, jam → stall,
-    remote MODE, disconnect, 60 s arm timeout, too-small sweep refused.
-    **Not yet run on a boat.**
+    remote MODE, disconnect, 60 s arm timeout, too-small sweep refused; plus a
+    Dyason-like profile (±30°, 10% deadband, 80/20 limits, slow zone) that reproduced
+    the boat's false stop with the first version and passes with the fix.
 
 ## [v3.0.2] — 2026-10-01
 

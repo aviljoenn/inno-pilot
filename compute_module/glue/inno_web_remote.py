@@ -2057,6 +2057,17 @@ function showRamResult(r) {
     }
     lines.push('');
     lines.push('Port/stbd speed difference: ' + ramFmt(r.speed_asym_pct, '%'));
+    if (r.nano_deadband_deg !== undefined) {
+      lines.push('Steering deadband: \u00b1' + r.nano_deadband_deg + '\u00b0 (rudder stops anywhere');
+      lines.push('  within it of the target \u2014 shows as End error)');
+    }
+    if (r.speed_power === 'reduced' || r.speed_power === 'mixed') {
+      lines.push('NOTE: speed was timed ' + (r.speed_power === 'reduced' ? 'entirely' : 'partly') +
+                 ' at reduced power');
+      lines.push('  (the steering slows within \u00b1' + r.slow_zone_deg + '\u00b0 of target), so');
+      lines.push('  speed and hard-over are NOT full-power figures.');
+      lines.push('  A smaller deadband setting or a wider sweep fixes this.');
+    }
     lines.push('');
     lines.push('Hard-over = est. full lock-to-lock time at the measured speed.');
     lines.push('Overshoot = worst travel past the end target.');
