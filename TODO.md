@@ -89,6 +89,42 @@ shrink by storing the sensor's ROM address instead of index lookup. Soft-float i
 ~750 B+, but converting the ADC/calibration maths to fixed-point risks the
 hand-calibrated constants — rank it last.
 
+## [MEDIUM] Web remote: rudder display still lags ~220 ms via pypilot (option 2a)
+
+**Status:** parked (2026-10-01). v3.0.2 fixed the SSE flood and stair-stepped rudder bar;
+this is the remaining display lag. Ask the user how v3.0.2 feels on their device first.
+
+The page's rudder position goes Nano `0xA7` (5 Hz) → pypilot `rudder.angle` (~220 ms later,
+measured on Dyason 2026-09-30) → bridge 200 ms telemetry tick → web remote. During a nudge
+the bar keeps moving ~0.5 s after release, which makes it hard to stop at a chosen angle.
+Raw logs: `~/dyason-webremote-2026-09-30/` on the dev laptop.
+
+Proposed fix (2a): the bridge, which already decodes every `0xA7` frame it relays, sends the
+Nano's raw rudder straight to the web remote. Guards — all required:
+- Convert raw → degrees with **pypilot's own** `rudder.scale` / `offset` / `nonlinearity`
+  (watch them like `rudder.range`); never a second, hard-coded calibration — a divergent
+  copy would show a different angle from the one pypilot steers with (cf. the Malu
+  rudder-sign runaway history).
+- Send it **only to the local (loopback) web remote**, or only on change. Remote sockets are
+  non-blocking (`inno_pilot_bridge.py` ~2119): a full send buffer makes `sendall` fail and
+  drops the client, so extra traffic would disconnect a physical ESP32 on weak WiFi.
+- Keep rudder-stall detection and the nudge limit check on pypilot's value.
+
+Rejected for now (2b): raising the Nano's `RUDDER_PERIOD_MS`. Needs a reflash + version bump,
+adds frames to pypilot's servo loop on a Pi that already logs "running too _slowly_", and
+`oled_draw()` blocking (26–56 ms) caps a steady rate anyway. Does not remove pypilot's lag.
+
+## [MEDIUM] Investigate: steering motor disturbs the compass
+
+**Status:** not started (2026-10-01). Observation only, one sample.
+
+In the 2026-09-30 Debug capture (AP IDLE, boat not turning) `imu.heading` swung
+240.2° → 244.5° during a ~2 s full-power nudge and returned after the motor stopped.
+Suggests the motor or its supply current is a magnetic disturbance near the IMU — relevant
+to Dyason's permanently latched "compass distortions" warning and wrong inclination
+(+26° vs ~−65° expected for South Africa). Repeat with longer motor runs in both directions
+and compare heading drift against motor current; check IMU placement vs motor/cabling.
+
 ## [LOW] `temp_service()` is now the second-largest loop blocker
 
 **Status:** not started (2026-09-19).
@@ -104,3 +140,22 @@ would roughly halve what remains.
 Related, cheaper: `oled_draw()` still calls `read_voltage_v()` and `read_current_a()`
 itself (~3 ms each — 3 throwaway reads × 300 µs settle + 16 conversions), duplicating
 work the 200 ms block in `loop()` already does. ~6 ms recoverable by reusing those values.
+
+## [LOW] Nano `oled_draw()` is slower while the motor runs
+
+**Status:** not started (2026-10-01).
+
+Dyason profiling during nudges (2026-09-30): `oled_draw` mean 33–44 ms, max ~56 ms, `loop`
+max ~58 ms — versus the ~26 / ~36 ms idle baseline in CLAUDE.md. Likely more rows change
+per redraw while the rudder moves (fewer row-shadow hits). Not a fault (RX high-water stayed
+≤ 36 bytes of 128), but it is the loop blackout while steering. See the `temp_service()`
+item above for the other blocker.
+
+## [LOW] Bridge debug log labels motor direction backwards
+
+**Status:** not started (2026-10-01). Cosmetic, debug log only.
+
+`inno_pilot_bridge.py` ~1967 decodes `Nano motor pins` as `[PORT]` when D3 (LPWM) is high,
+but on Dyason a NUDGE STBD drove D3 and the rudder moved to starboard (pypilot angle went
+negative). Confirm against the Nano sketch's actual Dir-A/Dir-B mapping before changing —
+it may be unit-wiring specific — then fix the label so debug captures aren't misleading.
