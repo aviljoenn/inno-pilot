@@ -3,8 +3,37 @@
 All notable changes to the Inno-Pilot system are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 Version applies to all three components (Bridge, Nano, Remote) simultaneously and the version of all components must always match regardless if a change was made in a component or not.
+Versioning is `vHARDWARE.FEATURE.FIX` (MAJOR = hardware change, MINOR = software feature change,
+PATCH = patch / bug fix), bumped on every merge of code to master. Components whose development is
+paused (currently the ESP32 remote + its OTA binary) are deliberately left on their old version.
+Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
+
+## [v3.0.2] — 2026-10-01
+
+Patch release. Bumped across all actively developed components (Nano, bridge, web
+remote) although only the web remote's code changed — a code change in any one
+component makes a bump of all of them mandatory. The paused ESP32 remote firmware
+(v1.3.3_B3) and its OTA binary are deliberately not bumped.
+
+### Fixed
+- **Web remote felt slow and jerky** (`inno_web_remote.py`; web remote only — bridge,
+  pypilot and Nano untouched). Diagnosed from a Dyason Debug capture 2026-09-30.
+  - **SSE coalescing:** every bridge telemetry line used to push a full-state
+    snapshot to every browser — ~48 events/s, ~85% identical, each a full page
+    re-render, and enough to overflow a browser's 60-event queue (→ "dropped slow
+    client") after a ~1.25 s stall. The bridge thread now parses each received
+    burst, then publishes one snapshot, and only if it changed. Measured against a
+    burst-faithful fake bridge: 51 → 3.4 events/s idle, 150 → 13 during a 2 s
+    nudge, every rudder step still delivered, command round-trip unchanged.
+    `TEST_LINE`/`TEST_DONE` bypass coalescing so no test line can be merged away.
+  - **Rudder bar / wheel glide:** marker and arrows `0.12s ease` → `0.2s linear`
+    (matches the ~200 ms telemetry interval so steps join up); the wheel gets the
+    same glide when following telemetry, and none in REMOTE mode (it follows the
+    finger). Headless-Chrome measurement during a nudge: marker stationary on 44%
+    → 11% of frames, longest pause 99 → 33 ms. Cost: the drawn marker trails the
+    reported position by ~1% of bar width more on average (the glide).
 
 ## [v3.0.1] — 2026-09-30
 

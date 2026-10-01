@@ -115,6 +115,7 @@ When asked to implement something:
 4) Run the best available checks/tests.
 5) Open PR with a high-signal description.
 6) Check all components of inno-remote that might be versioned, like the nano sketch, the bridge, updated OTA binary that also lands at /var/lib/inno-pilot/ota/ on the Pi, inno-remote and inno-web-remote. Keep the version numbers of all those components in sync and push/flash the same version number to all components.
+   **A code change in ANY one component makes a version bump of ALL actively developed components mandatory** — on every merge of code to master, even for components whose code did not change. Components whose development is paused are the one exception and are deliberately left behind. See "Version sync" below for the full rule.
 
 ---
 
@@ -323,11 +324,33 @@ is currently silent.
 
 ---
 
-## Version sync: check all THREE constants before deploying
+## Version sync: the bump rule, and the constants to check
 
-CLAUDE.md's change strategy already says keep component versions in sync. In practice
-this is easy to violate silently — four consecutive Nano bumps went unnoticed. The
-three that must agree:
+**The rule (agreed with the user 2026-10-01):**
+
+1. **All actively developed components always carry one and the same version.** A
+   code change in *any one* of them makes a bump of *all* of them mandatory — including
+   components whose code did not change (e.g. a web-remote-only fix still bumps, and
+   reflashes, the Nano). "All versions must match" is a reason **to** bump everything,
+   never a reason to skip the bump.
+2. **When:** every time code is merged into master (the bump is part of the branch/PR
+   before the merge — not per commit, not per deploy).
+3. **Which part:** the version is `vHARDWARE.FEATURE.FIX` —
+   MAJOR = hardware change, MINOR = software feature change, PATCH = patch / bug fix.
+   **Always propose the bump and ask the user** which part to increment; never decide alone.
+4. **No bump** for changes that never run on the boat: docs, CHANGELOG, CLAUDE.md,
+   README, test/diagnostic scripts.
+5. **Paused components are NOT bumped.** A component whose development the user has
+   stopped or paused stays on its old version on purpose, so the mismatch is visibly
+   obvious and flags that it needs the user's attention. It rejoins the bump when the
+   user resumes its development.
+   - **Currently paused:** the ESP32 inno-remote firmware
+     (`inno-remote/firmware/inno_remote/main/inno_remote.c`, `INNOPILOT_VERSION`, held at
+     `v1.3.3_B3`) **and** its OTA binary in `/var/lib/inno-pilot/ota/` on the Pi. Remotes
+     are offline pending development.
+
+**Actively developed components — the constants that must agree** (in practice this is
+easy to violate silently — four consecutive Nano bumps once went unnoticed):
 
 | file | constants |
 |---|---|
@@ -336,13 +359,14 @@ three that must agree:
 | `compute_module/glue/inno_web_remote.py` | `INNOPILOT_VERSION` |
 
 ```bash
-grep -rnE 'INNOPILOT_(VERSION|VERSION_CODE)\s*[=:]' --include=*.py --include=*.ino .
+grep -rnE 'INNOPILOT_(VERSION|VERSION_CODE)(\[\])?\s*[=:]|define INNOPILOT_VERSION' --include=*.py --include=*.ino --include=*.c .
 ```
+(The `.c` hit is the paused ESP32 remote — expected to differ.)
 
 **Version format (from v3.0.1):** release versions only, `vMAJOR.MINOR.PATCH` — the
 `_Bxx` beta build suffix is dropped. `INNOPILOT_VERSION_CODE` (replaces the old
 `INNOPILOT_BUILD_NUM` beta counter) is the numeric form, `major*10000 + minor*100 + patch`
-(v3.0.1 → 30001); it travels to the Nano in the uint16 `BRIDGE_VERSION_CODE` frame, so
+(v3.0.2 → 30002); it travels to the Nano in the uint16 `BRIDGE_VERSION_CODE` frame, so
 major must stay ≤ 6 and minor/patch ≤ 99. Change it together with the string.
 
 Why it matters concretely:
@@ -354,6 +378,10 @@ Why it matters concretely:
   the web remote makes it a permanent OTA candidate. **Check whether a physical ESP32 is
   connected before changing the bridge version** — a loopback client on port 8555 is the
   local web remote, not a handheld.
+  Because the paused ESP32 remote is deliberately left behind (rule 5), **every** bump
+  makes a connected ESP32 an OTA candidate for the stale binary. That is acceptable only
+  while the remotes stay offline — before any remote is powered up again, the OTA
+  downgrade risk must be resolved first.
 
 ---
 

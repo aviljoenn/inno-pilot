@@ -119,10 +119,14 @@ def ota_host() -> str:
 # Inno-Pilot version (must match Nano firmware + remote firmware )
 # ---------------------------------------------------------------------------
 # Release versions only: "vMAJOR.MINOR.PATCH" — no "_Bxx" beta build suffix (dropped at v3.0.1).
-INNOPILOT_VERSION      = "v3.0.1"
+# Meaning: MAJOR = hardware change, MINOR = software feature change, PATCH = patch / bug fix.
+# Bumped on EVERY merge of code to master, in all actively developed components at once.
+# Paused components (currently the ESP32 remote firmware + its OTA binary) are deliberately
+# NOT bumped, so the mismatch stays visible (see CLAUDE.md "Version sync").
+INNOPILOT_VERSION      = "v3.0.2"
 # Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
 # MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-INNOPILOT_VERSION_CODE = 30001
+INNOPILOT_VERSION_CODE = 30002
 
 # ---------------------------------------------------------------------------
 # Serial devices

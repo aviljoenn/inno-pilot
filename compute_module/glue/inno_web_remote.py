@@ -49,7 +49,8 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v3.0.1"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1)
+INNOPILOT_VERSION = "v3.0.2"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
+                               # MAJOR=hardware, MINOR=software feature, PATCH=fix — see CLAUDE.md "Version sync"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
 # If the file does not exist or is invalid, notifications are silently skipped.
@@ -242,25 +243,83 @@ def _snap() -> dict:
         return dict(_state)
 
 
+# ---------------------------------------------------------------------------
+# SSE coalescing
+#
+# The bridge sends ~10 telemetry lines per 200 ms cycle (AP, MODE, HDG, CMD,
+# RDR, RDR_PCT, ...).  Previously every line pushed a full-state snapshot to
+# every browser: ~48 events/s, 85% of them identical, each one a full DOM
+# re-render.  That made the page stutter and could overflow a browser's
+# 60-entry queue (→ "dropped slow client") after a ~1.25 s stall.
+#
+# Now:
+#   - the bridge thread parses a whole received burst in "batch" mode (state is
+#     updated, nothing is pushed), then publishes once at the end of the burst;
+#   - a snapshot identical to the last one published is not pushed at all.
+# Publishing at the end of the burst (not on a timer) adds no extra latency.
+# Updates from other threads (HTTP handlers, net monitor, disconnects) still
+# publish immediately.  Transient TEST_LINE/TEST_DONE events bypass this
+# (see _broadcast_transient) so no hardware-test line is ever merged away.
+# ---------------------------------------------------------------------------
+_batch = threading.local()             # .active == True while bridge parses a burst
+_last_published: Optional[dict] = None  # last snapshot pushed; guarded by _sse_lock
+
+
 def _update(**kw) -> None:
-    """Update shared state and push a snapshot to every SSE subscriber."""
+    """Update shared state and push it to every SSE subscriber.
+
+    Inside a bridge-burst batch the push is deferred until _publish() is
+    called at the end of the burst.
+    """
     with _state_lock:
         _state.update(kw)
-        snap = dict(_state)
-    _broadcast(snap)
+    if not getattr(_batch, "active", False):
+        _publish()
+
+
+def _publish() -> None:
+    """Push the current state to all SSE subscribers, unless it is unchanged
+    since the last push.
+
+    The snapshot is taken while holding _sse_lock so two threads publishing at
+    once cannot deliver an older snapshot after a newer one.
+    """
+    global _last_published
+    with _sse_lock:
+        snap = _snap()
+        if snap == _last_published:
+            return
+        _last_published = snap
+        _broadcast_locked(snap)
+
+
+def _broadcast_transient(snap: dict) -> None:
+    """Push a one-off snapshot (e.g. carrying _test_line) unconditionally.
+
+    Any batched state is published first so ordering is preserved.  Not
+    recorded as _last_published because the extra keys are not part of state.
+    """
+    _publish()
+    with _sse_lock:
+        _broadcast_locked(snap)
 
 
 def _broadcast(snap: dict) -> None:
     with _sse_lock:
-        dead = []
-        for sub in _sse_subs:
-            try:
-                sub["q"].put_nowait(snap)
-            except queue.Full:
-                dead.append(sub)
-        for sub in dead:
-            _sse_subs.remove(sub)
-            log.debug("SSE: dropped slow client")
+        _broadcast_locked(snap)
+
+
+def _broadcast_locked(snap: dict) -> None:
+    """Queue snap for every subscriber.  Caller must hold _sse_lock."""
+    dead = []
+    for sub in _sse_subs:
+        try:
+            sub["q"].put_nowait(snap)
+        except queue.Full:
+            dead.append(sub)
+    for sub in dead:
+        _sse_subs.remove(sub)
+        log.debug("SSE: dropped slow client")
 
 
 
@@ -361,13 +420,13 @@ def _parse_bridge_line(line: str) -> None:
         text = " ".join(parts[1:])
         snap = _snap()
         snap["_test_line"] = text
-        _broadcast(snap)
+        _broadcast_transient(snap)   # never coalesced/deduped — every line must arrive
 
     elif c == "TEST_DONE":
         # Bridge signals that the Nano test run is complete.
         snap = _snap()
         snap["_test_done"] = True
-        _broadcast(snap)
+        _broadcast_transient(snap)
 
     else:
         log.debug("Bridge unknown: %s", line)
@@ -427,9 +486,17 @@ def bridge_client() -> None:
                 except socket.timeout:
                     pass
 
-                while b"\n" in buf:
-                    raw, buf = buf.split(b"\n", 1)
-                    _parse_bridge_line(raw.decode(errors="replace").strip())
+                # Parse the whole received burst, then publish ONE snapshot
+                # (and only if something changed) — see "SSE coalescing" above.
+                if b"\n" in buf:
+                    _batch.active = True
+                    try:
+                        while b"\n" in buf:
+                            raw, buf = buf.split(b"\n", 1)
+                            _parse_bridge_line(raw.decode(errors="replace").strip())
+                    finally:
+                        _batch.active = False
+                    _publish()
 
         except Exception as exc:
             log.warning("Bridge lost: %s", exc)
@@ -674,7 +741,12 @@ body{
   top:50%;
   left:50%;
   transform:translate(-50%,-50%);
-  transition:left 0.12s ease;
+  /* Rudder telemetry arrives at ~5 Hz (one update per bridge cycle, ~200 ms).
+     A linear glide of the same length makes successive steps join into one
+     continuous movement; the old 0.12 s ease stopped short of each 200 ms
+     step, so the marker visibly jumped.  Do not make this much longer than
+     the update interval: the glide then shows the rudder where it WAS. */
+  transition:left 0.2s linear;
 }
 
 /* Rudder command direction triangle */
@@ -687,7 +759,7 @@ body{
   border-top:14px solid transparent;
   border-bottom:14px solid transparent;
   display:none;        /* hidden by default; shown by JS */
-  transition:left 0.12s ease;   /* match rdr-marker so arrow glides in lockstep */
+  transition:left 0.2s linear;  /* match rdr-marker so arrow glides in lockstep */
 }
 .rdr-cmd-arrow.port{
   border-right:12px solid #ff6a00;  /* orange, points left */
@@ -859,7 +931,13 @@ body{
   filter:saturate(1) brightness(1);
 }
 .wheel-wrap.active:active{cursor:grabbing}
-#wheel-svg{width:100%;height:100%;display:block}
+#wheel-svg{width:100%;height:100%;display:block;
+  /* Same 0.2 s linear glide as .rdr-marker, so the wheel follows the rudder
+     telemetry smoothly and in step with the bar. */
+  transition:transform 0.2s linear}
+/* REMOTE (MANUAL) mode: the wheel follows the skipper's finger/mouse and the
+   jog buttons — it must track instantly, so no glide while active. */
+.wheel-wrap.active #wheel-svg{transition:none}
 
 /* ── Nudge buttons (port/stbd, flank the helm wheel) ── */
 .wheel-nudge-row{
