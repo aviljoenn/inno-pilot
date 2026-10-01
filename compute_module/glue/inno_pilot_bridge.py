@@ -37,7 +37,7 @@ import threading
 import time
 import serial
 import termios
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from pypilot.client import pypilotClient
 
@@ -123,10 +123,10 @@ def ota_host() -> str:
 # Bumped on EVERY merge of code to master, in all actively developed components at once.
 # Paused components (currently the ESP32 remote firmware + its OTA binary) are deliberately
 # NOT bumped, so the mismatch stays visible (see CLAUDE.md "Version sync").
-INNOPILOT_VERSION      = "v3.0.2"
+INNOPILOT_VERSION      = "v3.0.3"
 # Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
 # MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-INNOPILOT_VERSION_CODE = 30002
+INNOPILOT_VERSION_CODE = 30003
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -195,6 +195,9 @@ BTN_EVT_TOGGLE    = 3
 BTN_EVT_PLUS10    = 4
 BTN_EVT_PLUS1     = 5
 BTN_EVT_STOP      = 6
+# Plain names for logs / RAM sweep stop reasons shown to the skipper
+BTN_EVT_NAMES = {BTN_EVT_MINUS10: "-10", BTN_EVT_MINUS1: "-1", BTN_EVT_TOGGLE: "B3",
+                 BTN_EVT_PLUS10: "+10", BTN_EVT_PLUS1: "+1", BTN_EVT_STOP: "STOP"}
 
 # Nano -> Bridge new telemetry
 BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
@@ -380,6 +383,10 @@ MODE_MANUAL  = "MANUAL"
 MODE_RAM_OFF = "RAM_OFF"   # RAM test armed, waiting for B3
 MODE_RAM_ON  = "RAM_ON"    # RAM test actively reciprocating
 
+# Plain-text hardware-test protocol ("TEST <id>" -> TEST_LINE/TEST_DONE).
+# False until a Nano sketch actually implements it — see the TEST handler.
+NANO_TEST_PROTOCOL_SUPPORTED = False
+
 # ---------------------------------------------------------------------------
 # Timing
 # ---------------------------------------------------------------------------
@@ -397,6 +404,34 @@ TELEM_PERIOD_S    = 0.2   # 5 Hz telemetry to Nano and remote
 STALL_FAIL_THRESHOLD = 5    # direction-agnostic fails to trip fault
 STALL_SUCC_THRESHOLD = 2    # successes (any direction) to clear fault
 STALL_MOVE_DEG       = 2.0  # minimum rudder travel (degrees) per cycle to count as a success
+
+# ---------------------------------------------------------------------------
+# RAM test = rudder commissioning sweep (Settings -> Hardware Tests -> 1)
+# ---------------------------------------------------------------------------
+# A short, ATTENDED measurement run: the rudder sweeps +/-N deg for a few cycles
+# while the operator holds a dead-man button.  It measures rudder speed per
+# direction, reversal lag, overshoot/settled position at each end and (if a
+# current sensor is fitted) motor current.  It is NOT an endurance test —
+# unattended running is deliberately impossible:
+#   * the browser sends "RAM HOLD" every ~200 ms while the button is held;
+#     no HOLD for RAM_HOLD_TIMEOUT_S stops the test (finger lifted, phone
+#     dropped/locked, page closed, WiFi lost all end the heartbeat);
+#   * every other exit (STOP anywhere, any helm/remote button, mode change,
+#     stall, lost rudder angle, remote gone) goes through ram_test_abort().
+# A stop never auto-centres the rudder: that would be motion with nobody
+# holding the button.  The rudder stays where it stopped and MANUAL is released.
+RAM_HOLD_TIMEOUT_S     = 1.0   # dead-man: max gap between RAM HOLD heartbeats
+RAM_ARM_TIMEOUT_S      = 60.0  # armed but never held -> disarm (releases clutch)
+RAM_STROKE_TIMEOUT_S   = 40.0  # belt-and-braces: one stroke may never take longer
+RAM_MIN_DEG            = 5     # smaller sweeps give no usable speed window
+RAM_DEFAULT_CYCLES     = 3
+RAM_MAX_CYCLES         = 10
+RAM_REACH_DEG          = 2.0   # within this of the end target -> settle phase
+RAM_SETTLE_STILL_DEG   = 0.3   # "still" = moved less than this ...
+RAM_SETTLE_STILL_S     = 0.6   # ... for this long
+RAM_SETTLE_TIMEOUT_S   = 3.0   # settle phase gives up (recorded) after this
+RAM_LAG_MOVE_DEG       = 0.5   # first movement this far = end of reversal lag
+RAM_SPEED_WINDOW_FRAC  = 0.6   # speed timed across the central +/-60% of the stroke
 
 # ---------------------------------------------------------------------------
 # Remote TCP server
@@ -438,7 +473,40 @@ class PypilotState:
     heading_cmd:  Optional[float] = None
     rudder_angle: Optional[float] = None
     rudder_range: Optional[float] = None
+    servo_current: Optional[float] = None   # servo.current (A); only meaningful with a current sensor
     connected:    bool            = False
+
+
+# ===========================================================================
+# RAM commissioning sweep: one stroke's measurements
+# ===========================================================================
+
+@dataclass
+class RamStroke:
+    """One stroke of the RAM sweep, from a reversal command to the settled end.
+
+    Sign convention: ``direction`` is the bridge's ram_test_direction
+    (+1 = driving toward STBD, -1 = toward PORT).  pypilot angles are
+    +port/-stbd, so progress along the stroke is ``-direction * angle``.
+    """
+    direction:   int             # +1 toward stbd, -1 toward port
+    target_deg:  float           # end target, pypilot convention (+port)
+    start_t:     float           # monotonic time the reversal target was sent
+    start_angle: float           # rudder angle when the stroke was commanded
+    full:        bool            # False for the first (approach) stroke — not measured
+    phase:       str   = "drive" # "drive" -> "settle"
+    move_t:      Optional[float] = None  # first RAM_LAG_MOVE_DEG of movement
+    win_enter_t: Optional[float] = None  # entered the central speed window
+    win_exit_t:  Optional[float] = None  # left the central speed window
+    settle_t:    Optional[float] = None  # entered settle phase
+    still_ref:   float = 0.0
+    still_since: float = 0.0
+    peak:        float = 0.0     # furthest progress reached (deg, in stroke direction)
+    settled:     Optional[float] = None  # final angle (pypilot convention)
+    settle_timeout: bool = False
+    i_peak:      Optional[float] = None  # motor current while driving (A)
+    i_sum:       float = 0.0
+    i_n:         int   = 0
 
 
 # ===========================================================================
@@ -464,6 +532,13 @@ class BridgeState:
     ram_test_deg:          int  = 0         # RAM test: degrees each side of centre to sweep
     ram_test_running:      bool = False      # RAM test: actively reciprocating
     ram_test_direction:    int  = 1          # RAM test: current sweep direction +1=stbd, -1=port
+    ram_cycles:            int  = RAM_DEFAULT_CYCLES  # full port+stbd cycles to measure
+    ram_armed_at:        float = 0.0        # monotonic time RAM_SETUP armed the test
+    ram_hold_last:       float = 0.0        # monotonic time of last RAM HOLD heartbeat
+    ram_rng:             float = 35.0       # rudder range (deg each side) captured at arm time
+    ram_stroke: Optional["RamStroke"] = None  # stroke currently being driven/measured
+    ram_results: list = field(default_factory=list)  # finished RamStroke records
+    ram_result_pending: Optional[str] = None  # RAM_RESULT JSON waiting to go to remotes
     # Nudge state — brief full-power motor jog without disengaging pypilot
     nudge_until:          float = 0.0       # monotonic expiry; 0 = inactive
     nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 2000=full port, 0=full stbd (conv 1)
@@ -510,6 +585,7 @@ def pypilot_worker(
             client.watch('ap.heading_command', True)
             client.watch('rudder.angle', True)
             client.watch('rudder.range', 1.0)
+            client.watch('servo.current', 0.25)   # RAM sweep current stats
             log_pp.info("Connected to pypilot")
 
             while True:
@@ -545,6 +621,11 @@ def pypilot_worker(
                     if "rudder.range" in msgs:
                         try:
                             state.rudder_range = float(msgs["rudder.range"])
+                        except Exception:
+                            pass
+                    if "servo.current" in msgs:
+                        try:
+                            state.servo_current = float(msgs["servo.current"])
                         except Exception:
                             pass
 
@@ -1091,6 +1172,224 @@ def handle_remote_disconnect(
             pstate.ap_enabled = False
         log.warning("Remote disconnected in MANUAL mode — STEER LOSS triggered")
         bstate.mode = MODE_IDLE
+    elif ram_active(bstate):
+        # No remote left means nobody can be holding the dead-man button.
+        ram_test_abort(nano, bstate, "remote disconnected")
+
+
+# ===========================================================================
+# RAM commissioning sweep helpers (see the RAM_* constants for the rules)
+# ===========================================================================
+
+def ram_active(bstate: BridgeState) -> bool:
+    """True while the RAM sweep is armed (RAM_OFF) or running (RAM_ON)."""
+    return bstate.mode in (MODE_RAM_OFF, MODE_RAM_ON)
+
+
+def ram_send_target(nano: serial.Serial, bstate: BridgeState) -> None:
+    """Send the current stroke's end target to the Nano (re-asserting MANUAL).
+
+    MANUAL is re-asserted every time because any stray COMMAND_CODE that reaches
+    the Nano (race/boot) sets ap_enabled_remote=true; this clears it within 200 ms.
+    """
+    st = bstate.ram_stroke
+    if st is None:
+        return
+    rng = bstate.ram_rng
+    # Convention: pct=100=port, pct=0=stbd. pypilot angle positive=port.
+    target_pct = (rng + st.target_deg) / (2.0 * rng) * 100.0
+    target_pct = max(0.0, min(100.0, target_pct))
+    target_0_1000 = int(round(target_pct * 10.0))
+    send_nano_frame(nano, MANUAL_MODE_CODE, 1)
+    send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
+    bstate.rct_target = target_0_1000
+
+
+def ram_stroke_begin(nano: serial.Serial, bstate: BridgeState, now: float,
+                     rudder_angle: float, direction: int, full: bool) -> None:
+    """Start a new stroke toward ``direction`` and send its target immediately
+    (immediately, not at the next 5 Hz tick, so the measured lag is real)."""
+    deg = float(bstate.ram_test_deg)
+    bstate.ram_test_direction = direction
+    bstate.ram_stroke = RamStroke(
+        direction=direction, target_deg=-direction * deg,
+        start_t=now, start_angle=rudder_angle, full=full)
+    ram_send_target(nano, bstate)
+
+
+def _mean(xs: list) -> Optional[float]:
+    return sum(xs) / len(xs) if xs else None
+
+
+def _rnd(x: Optional[float], nd: int = 1) -> Optional[float]:
+    return None if x is None else round(x, nd)
+
+
+def ram_summary(bstate: BridgeState, reason: str, completed: bool) -> dict:
+    """Build the RAM_RESULT summary from the finished full strokes."""
+    full = [r for r in bstate.ram_results if r.full]
+    deg = float(bstate.ram_test_deg)
+    dirs = {}
+    for key, d in (("port", -1), ("stbd", 1)):
+        rs = [r for r in full if r.direction == d]
+        speeds = []
+        for r in rs:
+            if r.win_enter_t is not None and r.win_exit_t is not None \
+                    and r.win_exit_t > r.win_enter_t:
+                speeds.append(2.0 * RAM_SPEED_WINDOW_FRAC * deg
+                              / (r.win_exit_t - r.win_enter_t))
+        # Overshoot: how far past the end target the rudder went (deg, >= 0).
+        overs = [max(0.0, r.peak - deg) for r in rs]
+        # End error: settled position vs target (+ = past target, - = short).
+        errs = [(-r.direction * r.settled) - deg for r in rs if r.settled is not None]
+        ipk = [r.i_peak for r in rs if r.i_peak is not None]
+        imn = [r.i_sum / r.i_n for r in rs if r.i_n]
+        spd = _mean(speeds)
+        # Reversal lag: time from target sent to first RAM_LAG_MOVE_DEG of movement,
+        # minus the time that last 0.5 deg itself takes at the measured speed, so it
+        # reflects slack/air/valve delay rather than the detection distance.
+        lag_corr = (RAM_LAG_MOVE_DEG / spd) if spd else 0.0
+        lags = [max(0.0, (r.move_t - r.start_t) - lag_corr) * 1000.0
+                for r in rs if r.move_t is not None]
+        dirs[key] = {
+            "n": len(rs),
+            "speed_dps": _rnd(spd),
+            # Extrapolated full hard-over to hard-over time at the measured speed.
+            "hard_over_s": _rnd(2.0 * bstate.ram_rng / spd) if spd else None,
+            "lag_ms": None if not lags else int(round(_mean(lags))),
+            "overshoot_max_deg": _rnd(max(overs)) if overs else None,
+            "end_err_deg": _rnd(_mean(errs)),
+            "settle_timeouts": sum(1 for r in rs if r.settle_timeout),
+            "i_peak_a": _rnd(max(ipk), 2) if ipk else None,
+            "i_mean_a": _rnd(_mean(imn), 2) if imn else None,
+        }
+    sp, ss = dirs["port"]["speed_dps"], dirs["stbd"]["speed_dps"]
+    asym = (abs(sp - ss) / ((sp + ss) / 2.0) * 100.0) if sp and ss else None
+    if completed:
+        clean = all(v["settle_timeouts"] == 0 for v in dirs.values())
+        result = "PASS" if clean else "CHECK"
+    else:
+        result = "STOPPED"
+    return {
+        "result": result, "reason": reason,
+        "deg": bstate.ram_test_deg, "range_deg": _rnd(bstate.ram_rng),
+        "cycles_req": bstate.ram_cycles,
+        "strokes": len(full), "strokes_req": 2 * bstate.ram_cycles,
+        "speed_asym_pct": _rnd(asym), "dirs": dirs,
+    }
+
+
+def ram_test_abort(nano: serial.Serial, bstate: BridgeState, reason: str,
+                   completed: bool = False) -> None:
+    """The ONE exit path for the RAM sweep (armed or running).
+
+    Stops the sweep, releases MANUAL on the Nano (motor stops, clutch released)
+    and queues a RAM_RESULT summary for the remotes.  Deliberately does NOT
+    drive the rudder back to centre: that would be motion with nobody holding
+    the dead-man button.  Safe to call when the sweep is not active (no-op).
+    """
+    if not ram_active(bstate):
+        return
+    was_running = bstate.mode == MODE_RAM_ON
+    bstate.ram_test_running = False
+    bstate.ram_stroke = None
+    send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+    bstate.mode = MODE_IDLE
+    if not was_running:
+        log.info("RAM sweep disarmed: %s", reason)
+        bstate.ram_result_pending = json.dumps(
+            {"result": "DISARMED", "reason": reason})
+        return
+    summary = ram_summary(bstate, reason, completed)
+    (log.info if completed else log.warning)(
+        "RAM sweep %s: %s — %s", summary["result"], reason, json.dumps(summary))
+    bstate.ram_result_pending = json.dumps(summary)
+
+
+def ram_service(nano: serial.Serial, bstate: BridgeState, now: float,
+                rudder_angle: Optional[float], pp_connected: bool,
+                current: Optional[float]) -> None:
+    """Per-main-loop RAM sweep supervision and measurement.
+
+    Runs every loop iteration (~10 ms) rather than at the 5 Hz telemetry tick so
+    timings are limited by pypilot's rudder.angle rate, not by the tick.
+    """
+    if bstate.mode == MODE_RAM_OFF:
+        if now - bstate.ram_armed_at > RAM_ARM_TIMEOUT_S:
+            ram_test_abort(nano, bstate, f"not started within {RAM_ARM_TIMEOUT_S:.0f} s")
+        return
+    if bstate.mode != MODE_RAM_ON:
+        return
+
+    # ---- dead-man and data-validity watchdogs ----
+    if now - bstate.ram_hold_last > RAM_HOLD_TIMEOUT_S:
+        # Heartbeat stopped without a clean RELEASE: tab frozen/closed,
+        # phone locked or WiFi dropped.
+        ram_test_abort(nano, bstate, "hold signal lost (connection or app)")
+        return
+    if not pp_connected or rudder_angle is None:
+        ram_test_abort(nano, bstate, "rudder angle unavailable")
+        return
+    st = bstate.ram_stroke
+    if st is None:
+        ram_test_abort(nano, bstate, "internal: no active stroke")
+        return
+
+    deg = float(bstate.ram_test_deg)
+    sgn = -st.direction                 # +1 when the stroke increases the angle (port)
+    prog = sgn * rudder_angle           # progress along the stroke; target at +deg
+
+    # ---- measurements ----
+    if st.move_t is None and sgn * (rudder_angle - st.start_angle) >= RAM_LAG_MOVE_DEG:
+        st.move_t = now
+    if st.full:
+        w = RAM_SPEED_WINDOW_FRAC * deg
+        if st.win_enter_t is None and prog >= -w:
+            st.win_enter_t = now
+        if st.win_exit_t is None and prog >= w:
+            st.win_exit_t = now
+    if st.phase == "drive" and current is not None:
+        st.i_peak = current if st.i_peak is None else max(st.i_peak, current)
+        st.i_sum += current
+        st.i_n += 1
+
+    # ---- phase machine ----
+    if st.phase == "drive":
+        if prog >= deg - RAM_REACH_DEG:
+            st.phase = "settle"
+            st.settle_t = st.still_since = now
+            st.still_ref = rudder_angle
+            st.peak = prog
+        elif now - st.start_t > RAM_STROKE_TIMEOUT_S:
+            ram_test_abort(nano, bstate,
+                           f"end not reached within {RAM_STROKE_TIMEOUT_S:.0f} s "
+                           f"(stopped at {rudder_angle:.1f}°)")
+        return
+
+    # settle: let the Nano finish braking/holding, record peak and final position
+    st.peak = max(st.peak, prog)
+    if abs(rudder_angle - st.still_ref) > RAM_SETTLE_STILL_DEG:
+        st.still_ref = rudder_angle
+        st.still_since = now
+    still = (now - st.still_since) >= RAM_SETTLE_STILL_S
+    timed_out = (now - st.settle_t) >= RAM_SETTLE_TIMEOUT_S
+    if not (still or timed_out):
+        return
+    st.settled = rudder_angle
+    st.settle_timeout = timed_out and not still
+    bstate.ram_results.append(st)
+    done = sum(1 for r in bstate.ram_results if r.full)
+    log.info("RAM stroke %s %s: lag=%s speed_win=%s peak=%.1f settled=%.1f%s",
+             "full" if st.full else "approach",
+             "->stbd" if st.direction == 1 else "->port",
+             None if st.move_t is None else f"{(st.move_t - st.start_t) * 1000:.0f}ms",
+             None if st.win_exit_t is None or st.win_enter_t is None
+             else f"{st.win_exit_t - st.win_enter_t:.2f}s",
+             st.peak, rudder_angle, " SETTLE-TIMEOUT" if st.settle_timeout else "")
+    if done >= 2 * bstate.ram_cycles:
+        ram_test_abort(nano, bstate, f"{bstate.ram_cycles} cycle(s) complete", completed=True)
+        return
+    ram_stroke_begin(nano, bstate, now, rudder_angle, -st.direction, full=True)
 
 
 # ===========================================================================
@@ -1119,12 +1418,23 @@ def process_remote_line(
       MODE AUTO         -> exit remote manual steering
       RUD <pct>         -> rudder target 0-100% (only in MANUAL mode)
       NUDGE PORT|STBD   -> 500 ms full-power motor jog (IDLE or AP mode only)
+      RAM_SETUP <deg> [cycles] -> arm the RAM commissioning sweep
+      RAM HOLD          -> dead-man heartbeat: starts / keeps the sweep running
+      RAM RELEASE       -> operator let go: stops the sweep
     """
     parts = line.strip().split()
     if not parts:
         return
 
     cmd = parts[0].upper()
+
+    # RAM sweep: any steering/mode/stop command from a remote ends the sweep
+    # first (single exit path).  BTN is swallowed after stopping — a button
+    # press during the sweep means "stop", never "engage AP" or "change heading".
+    if ram_active(bstate) and cmd in ("ESTOP", "BTN", "MODE", "NUDGE", "RUD", "TGT"):
+        ram_test_abort(nano, bstate, f"remote {cmd} command")
+        if cmd == "BTN":
+            return
 
     if cmd == "PING":
         remote_send(remote_sock, "PONG")
@@ -1155,12 +1465,8 @@ def process_remote_line(
         set_q.put(("ap.enabled", False))
         with plock:
             pstate.ap_enabled = False
-        if bstate.mode in (MODE_RAM_OFF, MODE_RAM_ON):
-            bstate.ram_test_running = False
-            send_nano_frame(nano, MANUAL_MODE_CODE, 0)
-            bstate.mode = MODE_IDLE
-            log.info("Remote -> ESTOP: RAM test aborted")
-        elif bstate.mode == MODE_MANUAL:
+        # (An active RAM sweep was already stopped by the guard at the top.)
+        if bstate.mode == MODE_MANUAL:
             send_nano_frame(nano, MANUAL_MODE_CODE, 0)
             bstate.mode = MODE_IDLE
         elif bstate.mode == MODE_AP:
@@ -1173,19 +1479,9 @@ def process_remote_line(
         arg = parts[1].upper()
 
         if arg == "TOGGLE":
-            # RAM test: B3 starts or stops the reciprocating motion
-            if bstate.mode in (MODE_RAM_OFF, MODE_RAM_ON):
-                bstate.ram_test_running = not bstate.ram_test_running
-                if bstate.ram_test_running:
-                    bstate.mode = MODE_RAM_ON
-                    bstate.ram_test_direction = 1  # always start sweeping stbd
-                    log.info("RAM test STARTED at ±%d°", bstate.ram_test_deg)
-                else:
-                    bstate.mode = MODE_RAM_OFF
-                    # Return rudder to centre
-                    send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, 500)
-                    log.info("RAM test STOPPED — rudder target set to centre")
-                return
+            # (B3 no longer starts/stops the RAM sweep — it is a dead-man hold
+            # now, see "RAM HOLD".  During a sweep BTN is caught by the guard
+            # at the top of this function and only stops it.)
             with plock:
                 current = pstate.ap_enabled
             target = True if current is None else (not current)
@@ -1281,11 +1577,25 @@ def process_remote_line(
         log.info("Remote TGT %.1f%% -> RCT_TARGET_CODE %d", pct, target_0_1000)
 
     elif cmd == "TEST":
-        # TEST <id> — trigger a hardware test by ID (1–8).
-        # Writes a plain-text "TEST <id>\n" to the Nano serial port.
-        # Requires pwm_test.ino to be flashed; motor_simple.ino ignores this command.
-        # The Nano should respond with plain-text "TEST_LINE: <data>\n" and "TEST_DONE\n"
-        # lines; the bridge's text-relay loop (below) forwards these to remote clients.
+        # TEST <id> — DISABLED.  Intended to trigger a pwm_test.ino hardware test
+        # by ID (2–9) by writing plain-text "TEST <id>\n" to the Nano, which would
+        # answer with "TEST_LINE: <data>\n" / "TEST_DONE\n" lines relayed below.
+        #
+        # Why disabled: no Nano sketch implements that protocol.  motor_simple.ino
+        # ignores it, and pwm_test.ino selects its mode with compile-time #defines
+        # and never emits TEST_DONE.  Accepting the command set bstate.test_mode,
+        # which then never cleared: every binary telemetry byte was fed into the
+        # text relay and any 0x0A inside a frame went to remotes as a junk
+        # TEST_LINE until the bridge restarted.  The web remote now greys these
+        # tests out; this guard covers any other client.  The relay code below is
+        # left in place, dormant, for when the bench-firmware protocol is built.
+        # (RAM Test is test 1 and uses RAM_SETUP, not this command.)
+        if not NANO_TEST_PROTOCOL_SUPPORTED:
+            log.warning("Remote TEST %s: hardware tests 2-9 are not available "
+                        "(no Nano firmware support), ignored", " ".join(parts[1:]))
+            remote_send(remote_sock, "TEST_LINE Not available: requires bench firmware (pwm_test.ino)")
+            remote_send(remote_sock, "TEST_DONE")
+            return
         if len(parts) < 2:
             log.warning("Remote TEST: missing test id, ignored")
             return
@@ -1305,28 +1615,94 @@ def process_remote_line(
             remote_send(remote_sock, f"TEST_LINE ERROR: serial write failed: {exc}")
 
     elif cmd == "RAM_SETUP":
-        # RAM_SETUP <degrees> — arm the RAM test with the given sweep amplitude.
-        # Disables AP, puts Nano in MANUAL mode, enters RAM_OFF standby.
+        # RAM_SETUP <degrees> [cycles] — arm the RAM commissioning sweep.
+        # Disables AP, puts the Nano in MANUAL (holds position, clutch in) and
+        # enters RAM_OFF.  Nothing moves until the operator holds the dead-man
+        # button (RAM HOLD); if that never happens it disarms after
+        # RAM_ARM_TIMEOUT_S.
+        def refuse(reason: str) -> None:
+            log.warning("Remote RAM_SETUP refused: %s", reason)
+            remote_send(remote_sock, "RAM_RESULT " + json.dumps(
+                {"result": "REFUSED", "reason": reason}))
+
+        if ram_active(bstate):
+            refuse("sweep already armed or running")
+            return
         if len(parts) < 2:
-            log.warning("Remote RAM_SETUP: missing degrees, ignored")
+            refuse("missing degrees")
             return
         try:
             deg = int(round(float(parts[1])))
+            cycles = int(parts[2]) if len(parts) > 2 else RAM_DEFAULT_CYCLES
         except ValueError:
-            log.warning("Remote RAM_SETUP: invalid degrees '%s', ignored", parts[1])
+            refuse(f"invalid arguments '{' '.join(parts[1:])}'")
             return
-        rng = int(_pilot_settings.get("vessel", {}).get("rudder_range_deg", 35))
-        deg = max(1, min(deg, rng))
+        cycles = max(1, min(cycles, RAM_MAX_CYCLES))
+        with plock:
+            pp_ok   = pstate.connected
+            rud     = pstate.rudder_angle
+            pp_rng  = pstate.rudder_range
+        if not pp_ok or rud is None:
+            refuse("rudder angle not available")
+            return
+        rng = float(abs(pp_rng)) if pp_rng else float(
+            _pilot_settings.get("vessel", {}).get("rudder_range_deg", 35))
+        # Respect the operator's rudder limits (pct: 100=port end, 0=stbd end).
+        ap_cfg = _pilot_settings.get("autopilot", {})
+        port_max = (float(ap_cfg.get("rudder_limit_port_pct", 100)) / 50.0 - 1.0) * rng
+        stbd_max = -(float(ap_cfg.get("rudder_limit_stbd_pct", 0)) / 50.0 - 1.0) * rng
+        lim = int(min(rng, port_max, stbd_max))
+        deg = max(1, min(deg, lim))
+        if deg < RAM_MIN_DEG:
+            refuse(f"usable sweep {deg}° is below the {RAM_MIN_DEG}° minimum "
+                   f"(check rudder range/limits)")
+            return
         # Disengage AP and enter MANUAL mode on Nano for direct position control
         set_q.put(("ap.enabled", False))
         with plock:
             pstate.ap_enabled = False
         send_nano_frame(nano, MANUAL_MODE_CODE, 1)
         bstate.ram_test_deg       = deg
+        bstate.ram_cycles         = cycles
+        bstate.ram_rng            = rng
         bstate.ram_test_running   = False
         bstate.ram_test_direction = 1
+        bstate.ram_stroke         = None
+        bstate.ram_results        = []
+        bstate.ram_armed_at       = time.monotonic()
         bstate.mode               = MODE_RAM_OFF
-        log.info("RAM test armed: ±%d° (rudder_range=%d°) — press B3 to start", deg, rng)
+        log.info("RAM sweep armed: ±%d°, %d cycles (rudder_range=%.0f°) — hold to run",
+                 deg, cycles, rng)
+
+    elif cmd == "RAM":
+        # RAM HOLD    — dead-man heartbeat, sent every ~200 ms while held.
+        #               First HOLD after arming starts the sweep.
+        # RAM RELEASE — operator let go: stop.  Releasing ENDS the test; a new
+        #               HOLD does not resume it (must re-arm from Settings).
+        arg = parts[1].upper() if len(parts) > 1 else ""
+        now_m = time.monotonic()
+        if arg == "HOLD":
+            if bstate.mode == MODE_RAM_ON:
+                bstate.ram_hold_last = now_m
+            elif bstate.mode == MODE_RAM_OFF:
+                with plock:
+                    rud = pstate.rudder_angle
+                if rud is None:
+                    ram_test_abort(nano, bstate, "rudder angle unavailable")
+                    return
+                bstate.mode             = MODE_RAM_ON
+                bstate.ram_test_running = True
+                bstate.ram_hold_last    = now_m
+                bstate.ram_results      = []
+                # Approach stroke toward stbd from wherever the rudder is; it
+                # positions the rudder and is not measured.
+                ram_stroke_begin(nano, bstate, now_m, rud, 1, full=False)
+                log.info("RAM sweep STARTED (hold) ±%d°, %d cycles",
+                         bstate.ram_test_deg, bstate.ram_cycles)
+            # else: not armed (finished/stopped) — ignore; no resume by design
+        elif arg == "RELEASE":
+            if bstate.mode == MODE_RAM_ON:
+                ram_test_abort(nano, bstate, "hold button released")
 
     elif cmd == "NUDGE":
         # NUDGE PORT | NUDGE STBD — start sustained motor jog (hold-to-run).
@@ -1546,6 +1922,22 @@ def main() -> None:
             heading      = pstate.heading
             rudder_angle = pstate.rudder_angle
             rudder_range = pstate.rudder_range
+            pp_connected = pstate.connected
+            servo_current = pstate.servo_current
+
+        # ----------------------------------------------------------------
+        # RAM commissioning sweep: dead-man/validity watchdogs, stroke
+        # measurement and reversals — every loop, not just at 5 Hz.
+        # Current is only used when a current sensor is configured.
+        # ----------------------------------------------------------------
+        if ram_active(bstate):
+            use_i = bool(_pilot_settings.get("features", {}).get("current_sensor", False))
+            ram_service(nano, bstate, now, rudder_angle, pp_connected,
+                        servo_current if use_i else None)
+        if bstate.ram_result_pending is not None:
+            if remote_clients:
+                remote_send_many(remote_clients, "RAM_RESULT " + bstate.ram_result_pending)
+            bstate.ram_result_pending = None   # already in the journal either way
 
         # ----------------------------------------------------------------
         # Fix #5c two-way sync: when pypilot publishes a new rudder.range
@@ -1598,40 +1990,20 @@ def main() -> None:
             log.debug("Telemetry -> Nano: hdg=%s cmd=%s rud=%s",
                       heading, heading_cmd, rudder_angle)
 
-            # ---- RAM test: reciprocating motion ----
-            if bstate.ram_test_running and rudder_angle is not None:
-                rng = float(abs(rudder_range)) if rudder_range else float(
-                    _pilot_settings.get("vessel", {}).get("rudder_range_deg", 35))
-                deg = min(float(bstate.ram_test_deg), rng)
-                # pypilot convention: positive rudder_angle = port, negative = stbd
-                # ram_test_direction +1=stbd → target_angle_pypilot = -deg
-                # ram_test_direction -1=port → target_angle_pypilot = +deg
-                target_angle_pypilot = -bstate.ram_test_direction * deg
-                REACH_DEG = 2.0   # reverse when within 2° of target
-                if bstate.ram_test_direction == 1:   # heading stbd
-                    if rudder_angle <= target_angle_pypilot + REACH_DEG:
-                        bstate.ram_test_direction = -1
-                        target_angle_pypilot = deg   # now heading port
-                else:                                # heading port
-                    if rudder_angle >= target_angle_pypilot - REACH_DEG:
-                        bstate.ram_test_direction = 1
-                        target_angle_pypilot = -deg  # now heading stbd
-                # Convention: pct=100=port, pct=0=stbd. pypilot angle positive=port.
-                target_pct = (rng + target_angle_pypilot) / (2.0 * rng) * 100.0
-                target_pct = max(0.0, min(100.0, target_pct))
-                target_0_1000 = int(round(target_pct * 10.0))
-                # Re-assert MANUAL mode every tick before sending the target position.
-                # Any stray COMMAND_CODE that reaches the Nano (race/boot) sets
-                # ap_enabled_remote=true; this re-assertion clears it within 200 ms.
-                send_nano_frame(nano, MANUAL_MODE_CODE, 1)
-                send_nano_frame(nano, MANUAL_RUD_TARGET_CODE, target_0_1000)
-                bstate.rct_target = target_0_1000
+            # ---- RAM sweep: re-send the current stroke target at 5 Hz ----
+            # (Reversals and measurement happen in ram_service() every loop.)
+            if bstate.mode == MODE_RAM_ON:
+                ram_send_target(nano, bstate)
 
             # ---- Remote telemetry (text lines to all TCP clients) ----
             if remote_clients:
                 failed: set[socket.socket] = set()
                 failed.update(remote_send_many(remote_clients, f"AP {1 if bstate.mode == MODE_AP else 0}"))
                 failed.update(remote_send_many(remote_clients, f"MODE {bstate.mode}"))
+                if ram_active(bstate):
+                    done = sum(1 for r in bstate.ram_results if r.full)
+                    failed.update(remote_send_many(
+                        remote_clients, f"RAM_PROG {done} {2 * bstate.ram_cycles}"))
                 if heading is not None:
                     failed.update(remote_send_many(remote_clients, f"HDG {heading:.1f}"))
                 if heading_cmd is not None:
@@ -1667,9 +2039,12 @@ def main() -> None:
                 ):
                     # Higher pct = port = increasing rudder_angle
                     commanded_dir = 1 if bstate.manual_rud_target / 10.0 > rudder_pct else -1
-                elif bstate.ram_test_running:
+                elif (bstate.ram_test_running and bstate.ram_stroke is not None
+                      and bstate.ram_stroke.phase == "drive"):
                     # ram_test_direction: +1=driving toward stbd, -1=driving toward port.
                     # Negate to get pypilot-convention direction (positive=port).
+                    # Only while driving: in the settle phase the rudder is meant
+                    # to be still, which must not count as a stall.
                     commanded_dir = -bstate.ram_test_direction
                 else:
                     commanded_dir = 0
@@ -1722,6 +2097,11 @@ def main() -> None:
                     bstate.stall_prev_dir   = 0
                     bstate.rudder_stall     = False
 
+                # A stall ends the RAM sweep — never keep pushing a jammed ram.
+                if bstate.ram_test_running and bstate.rudder_stall:
+                    ram_test_abort(nano, bstate,
+                                   f"rudder not moving (stall at {rudder_angle:.1f}°)")
+
                 # Servo command direction: only meaningful in AP mode; force 0 otherwise.
                 rdr_cmd_dir = bstate.servo_cmd_dir if bstate.mode == MODE_AP else 0
                 failed.update(remote_send_many(remote_clients, f"RDR_CMD {rdr_cmd_dir}"))
@@ -1746,7 +2126,7 @@ def main() -> None:
                     meta = remote_clients.pop(sock, {})
                     close_remote(sock)
                     log.warning("TCP remote: telemetry send failed, dropped %s", meta.get("addr", "?"))
-                if not remote_clients and bstate.mode == MODE_MANUAL:
+                if not remote_clients and (bstate.mode == MODE_MANUAL or ram_active(bstate)):
                     handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
 
         # ================================================================
@@ -1815,8 +2195,8 @@ def main() -> None:
                         # Nudge in progress: consume frame but do not forward to Nano.
                         # pypilot's frames are silently dropped for the 500 ms window.
                         log.debug("pilot->nano NUDGE_DROP  code=0x%02X", candidate[0])
-                    elif bstate.ram_test_running and candidate[0] == PYPILOT_COMMAND_CODE:
-                        # RAM test active: each COMMAND_CODE received by the Nano sets
+                    elif ram_active(bstate) and candidate[0] == PYPILOT_COMMAND_CODE:
+                        # RAM test armed or running: each COMMAND_CODE received by the Nano sets
                         # ap_enabled_remote=true and re-engages AP, which fights MANUAL
                         # mode and drives the rudder to the hard limit. Drop it.
                         log.debug("pilot->nano RAM_DROP  code=0x%02X (COMMAND suppressed during RAM test)",
@@ -1913,8 +2293,20 @@ def main() -> None:
 
                 if code == BUTTON_EVENT_CODE:
                     log.debug("Nano -> API: BUTTON_EVENT value=%d", value)
+                    # RAM sweep: ANY helm button stops it.  The Nano's STOP
+                    # previously left ram_test_running set, so the sweep loop
+                    # re-asserted MANUAL within 200 ms and carried on.  Only
+                    # STOP continues to its normal handling (AP off); other
+                    # buttons are swallowed so B3 cannot engage AP mid-sweep.
+                    ram_swallow = False
+                    if ram_active(bstate):
+                        ram_test_abort(nano, bstate,
+                                       f"helm {BTN_EVT_NAMES.get(value, value)} button pressed")
+                        ram_swallow = value != BTN_EVT_STOP
                     try:
-                        if value == BTN_EVT_TOGGLE:
+                        if ram_swallow:
+                            pass
+                        elif value == BTN_EVT_TOGGLE:
                             with plock:
                                 current = pstate.ap_enabled
                             target = True if current is None else (not current)
@@ -2143,13 +2535,13 @@ def main() -> None:
                         meta = remote_clients.pop(s, {})
                         close_remote(s)
                         log.info("TCP remote: disconnected %s (clients=%d)", meta.get("addr", "?"), len(remote_clients))
-                        if not remote_clients and bstate.mode == MODE_MANUAL:
+                        if not remote_clients and (bstate.mode == MODE_MANUAL or ram_active(bstate)):
                             handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
                 except OSError as exc:
                     meta = remote_clients.pop(s, {})
                     log.warning("TCP remote: socket error (%s), disconnecting %s", exc, meta.get("addr", "?"))
                     close_remote(s)
-                    if not remote_clients and bstate.mode == MODE_MANUAL:
+                    if not remote_clients and (bstate.mode == MODE_MANUAL or ram_active(bstate)):
                         handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
 
         # Check for per-client timeout
@@ -2158,7 +2550,7 @@ def main() -> None:
                 log.warning("TCP remote: timeout %s — disconnecting", meta.get("addr", "?"))
                 remote_clients.pop(sock, None)
                 close_remote(sock)
-                if not remote_clients and bstate.mode == MODE_MANUAL:
+                if not remote_clients and (bstate.mode == MODE_MANUAL or ram_active(bstate)):
                     handle_remote_disconnect(nano, bstate, set_q, pstate, plock)
 
         time.sleep(0.01)

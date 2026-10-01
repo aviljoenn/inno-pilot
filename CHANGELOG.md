@@ -10,6 +10,54 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.0.3] — 2026-10-01
+
+Patch release. Bumped across all actively developed components (Nano, bridge, web
+remote); the Nano's code is unchanged apart from the version constants. The paused
+ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped.
+
+### Fixed
+- **Hardware tests 2–9 could never run, and pressing RUN broke the bridge's text
+  relay** (`inno_web_remote.py`, `inno_pilot_bridge.py`). They send `TEST <id>` to
+  the Nano, but no sketch implements that protocol (`motor_simple` ignores it;
+  `pwm_test.ino` picks its mode with compile-time `#define`s and never sends
+  `TEST_DONE`). The bridge set `test_mode` and never cleared it, so every telemetry
+  byte went through the text relay and any `0x0A` inside a frame reached the
+  remotes as a junk `TEST_LINE` until restart. Tests 2–9 are now greyed out
+  ("BENCH FIRMWARE / NOT AVAILABLE") and the bridge refuses `TEST` behind
+  `NANO_TEST_PROTOCOL_SUPPORTED = False`. Also fixed: duplicate ID 2 (Speed Sweep
+  is 3), and the test list staying visible behind the detail/config screens.
+- **RAM test: the Nano's physical STOP did not stop it** (safety). STOP set the
+  bridge mode to IDLE but left `ram_test_running` set; the sweep loop re-asserted
+  MANUAL within 200 ms and carried on. The Nano's B3 could also engage AP mid-sweep.
+- **RAM test kept sweeping with nobody watching**: a remote disconnect only
+  handled MANUAL mode; stall detection flagged but did not stop it; `MODE`/`RUD`/
+  `NUDGE` from any client left it running.
+
+### Changed
+- **RAM test → "Rudder Sweep (commissioning)", attended only, with measurements.**
+  - **Dead-man hold:** after arming, the operator must HOLD B3 for the whole run.
+    The browser sends `RAM HOLD` every 200 ms; the bridge stops after 1 s without
+    one, so lifting the finger, dropping/locking the phone, switching apps,
+    closing the page or losing WiFi all stop it. Release ends the test (no resume;
+    re-arm from Settings). Arming never held disarms after 60 s.
+  - **One exit path** (`ram_test_abort()`): hold lost/released, any Nano button,
+    any remote STOP/BTN/MODE/RUD/NUDGE/TGT, stall, rudder angle unavailable,
+    stroke timeout, remote disconnect, cycles complete. A stop never auto-centres
+    (that would be unattended motion); MANUAL is released where the rudder stands.
+  - **Measures** per direction: rudder speed (°/s, central 60% of the stroke),
+    estimated hard-over time, reversal lag, overshoot, settled end error, settle
+    timeouts, motor current (if `current_sensor` is on), port/stbd speed
+    difference. Results show on the remote and go to the journal. PASS / CHECK /
+    STOPPED. Reported only — nothing is written to settings.
+  - Amplitude 5°–range (also clamped to `rudder_limit_*_pct`), 1–10 cycles
+    (default 3). Bridge now watches `servo.current` from pypilot.
+  - Verified against the real bridge `main()` with a simulated Nano/pypilot:
+    complete run (speeds measured exactly), release (~120 ms), window blur
+    (~120 ms), silent heartbeat loss (~1.1 s), Nano STOP, Nano B3, jam → stall,
+    remote MODE, disconnect, 60 s arm timeout, too-small sweep refused.
+    **Not yet run on a boat.**
+
 ## [v3.0.2] — 2026-10-01
 
 Patch release. Bumped across all actively developed components (Nano, bridge, web

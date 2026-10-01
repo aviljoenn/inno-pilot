@@ -30,11 +30,11 @@ enum ButtonID : uint8_t;
 // Meaning: MAJOR = hardware change, MINOR = software feature change, PATCH = patch / bug fix.
 // Bumped on EVERY merge of code to master, in all actively developed components at once
 // (see CLAUDE.md "Version sync").
-const char INNOPILOT_VERSION[] = "v3.0.2";
+const char INNOPILOT_VERSION[] = "v3.0.3";
 // Numeric form of INNOPILOT_VERSION: major*10000 + minor*100 + patch (v3.0.2 -> 30002).
 // Sent by the bridge in BRIDGE_VERSION_CODE (uint16) and compared for !VER MISMATCH!.
 // MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-const uint16_t INNOPILOT_VERSION_CODE = 30002;
+const uint16_t INNOPILOT_VERSION_CODE = 30003;
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
