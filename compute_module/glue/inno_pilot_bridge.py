@@ -439,9 +439,10 @@ RAM_SETTLE_TIMEOUT_S   = 3.0   # settle phase gives up (recorded) after this
 RAM_LAG_MOVE_DEG       = 0.5   # first movement this far = end of reversal lag
 RAM_JAM_MOVE_DEG       = 0.5   # sweep's own jam check: less progress than this ...
 RAM_JAM_S              = 2.0   # ... for this long while driving = rudder stuck.
-                               # Deliberately NOT the generic 2 deg/s stall detector: in
-                               # the Nano's reduced-power slow zone a healthy rudder can
-                               # move slower than that (false stall on Dyason 2026-10-01).
+                               # Deliberately NOT the generic 2 deg/s stall detector: it
+                               # is a speed criterion, and a sweep must not depend on how
+                               # fast a particular ram is (false stall on Dyason
+                               # 2026-10-01).  0.5 deg / 2 s still catches a jam quickly.
 RAM_SPEED_WINDOW_FRAC  = 0.6   # speed timed across the central 60% of the distance
                                # each stroke ACTUALLY travelled (20%..80%)
 
@@ -1208,8 +1209,7 @@ def ram_nano_deadband_deg(rng: float) -> float:
 
     Mirrors motor_simple.ino: REMOTE_DEADBAND = span_deg10 * g_deadband / 1000
     with span = 2*range and g_deadband = deadband_pct*10, floored at 0.8 deg.
-    The Nano stops ANYWHERE inside this band of the target.  Inside it the
-    Nano also drives at reduced power within 4x this distance (slow zone).
+    The Nano stops ANYWHERE inside this band of the target.
     """
     pct = float(_pilot_settings.get("autopilot", {}).get("deadband_pct", 3.0))
     return max(0.8, 2.0 * rng * pct / 100.0)
@@ -1296,30 +1296,6 @@ def ram_stroke_lag(st: RamStroke) -> Optional[float]:
     return max(0.0, raw - RAM_LAG_MOVE_DEG / v_local)
 
 
-def ram_speed_power(strokes: list, deg: float, db_deg: float) -> Optional[str]:
-    """Was the speed-timing window driven at full or reduced Nano power?
-
-    The Nano drops to RM_SLOW_PWM within 4x its deadband of the target.  For
-    each stroke the timing window is the central RAM_SPEED_WINDOW_FRAC of the
-    actual travel; compare it with where the slow zone begins.
-    Returns "full", "mixed" or "reduced" (worst over the strokes), or None.
-    """
-    slow_start = deg - 4.0 * db_deg     # progress where reduced power begins
-    edge = (1.0 - RAM_SPEED_WINDOW_FRAC) / 2.0
-    rank = {"full": 0, "mixed": 1, "reduced": 2}
-    worst = None
-    for r in strokes:
-        if not r.samples:
-            continue
-        p0 = r.samples[0][1]
-        travel = r.peak - p0
-        ws, we = p0 + edge * travel, p0 + (1.0 - edge) * travel
-        kind = "full" if we <= slow_start else ("reduced" if ws >= slow_start else "mixed")
-        if worst is None or rank[kind] > rank[worst]:
-            worst = kind
-    return worst
-
-
 def ram_summary(bstate: BridgeState, reason: str, completed: bool) -> dict:
     """Build the RAM_RESULT summary from the finished full strokes."""
     full = [r for r in bstate.ram_results if r.full]
@@ -1362,12 +1338,11 @@ def ram_summary(bstate: BridgeState, reason: str, completed: bool) -> dict:
         "strokes": len(full), "strokes_req": 2 * bstate.ram_cycles,
         "speed_asym_pct": _rnd(asym), "dirs": dirs,
         # Context the numbers depend on: the Nano stops anywhere within
-        # nano_deadband_deg of the target, and drives at reduced power
-        # (PWM 160) within slow_zone_deg — so with a large deadband_pct the
-        # measured speed is NOT full-power speed.
+        # nano_deadband_deg of the target (shows up as end error).
+        # (Until 2026-10-02 the Nano also dropped to PWM 160 within 4x the
+        # deadband and the summary flagged speeds timed at reduced power; the
+        # Nano now drives at full duty throughout, so that flag was removed.)
         "nano_deadband_deg": _rnd(bstate.ram_db_deg),
-        "slow_zone_deg": _rnd(4.0 * bstate.ram_db_deg),
-        "speed_power": ram_speed_power(full, deg, bstate.ram_db_deg),
     }
 
 
@@ -2153,9 +2128,8 @@ def main() -> None:
                 ):
                     # Higher pct = port = increasing rudder_angle
                     commanded_dir = 1 if bstate.manual_rud_target / 10.0 > rudder_pct else -1
-                # (RAM sweep deliberately not included: it has its own jam check in
-                # ram_service(), because this 2 deg/s criterion false-trips on a
-                # healthy rudder in the Nano's reduced-power slow zone.)
+                # (RAM sweep deliberately not included: it has its own speed-
+                # independent jam check in ram_service() — see RAM_JAM_S.)
                 else:
                     commanded_dir = 0
 

@@ -13,10 +13,21 @@ Full rule: CLAUDE.md "Version sync".
 ## [v3.0.3] — 2026-10-01
 
 Patch release. Bumped across all actively developed components (Nano, bridge, web
-remote); the Nano's code is unchanged apart from the version constants. The paused
+remote). The paused
 ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped.
 
 ### Fixed
+- **Nano: REMOTE steering and the rudder sweep could not start the motor near the
+  target** (`motor_simple.ino`; hardware impact — motor drive). Within 4 × deadband of
+  the target (24° on Dyason) remote-manual mode wrote `analogWrite(D9, 160)`, but the
+  pin-state telemetry called `digitalRead(D9)` every loop, and on AVR `digitalRead()`
+  turns PWM off on that pin — the duty never reached the motor. Found when Dyason's
+  second sweep stopped "stuck" without moving at all. Fix: all EN writes go through
+  `motor_pwm()`, which records the duty, and the telemetry reports EN from that value
+  (no `digitalRead(D9)`); and the slow zone now drives at full duty (255), matching the
+  AP path — the hydraulic pump is on/off and the firmware's own note requires ≥ 180 for
+  any PWM. Stopping is left to the existing reverse brake pulse + deadband, so overshoot
+  near the target may rise slightly; the sweep measures it.
 - **Hardware tests 2–9 could never run, and pressing RUN broke the bridge's text
   relay** (`inno_web_remote.py`, `inno_pilot_bridge.py`). They send `TEST <id>` to
   the Nano, but no sketch implements that protocol (`motor_simple` ignores it;
@@ -54,20 +65,19 @@ ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped
     (default 3). Bridge now watches `servo.current` from pypilot.
   - **Deadband-aware** (found on Dyason's first boat run, which false-stopped with
     "rudder not moving" while the rudder moved fine): the Nano stops anywhere within
-    its deadband (`deadband_pct` × full span — ±6° on Dyason at 10%) and drives at
-    reduced power within 4× that. The sweep now treats arriving inside that band as
-    the end of the stroke, uses its own jam check (< 0.5° progress in 2 s) instead of
-    the generic 2°/s stall detector (which trips on a healthy rudder in the slow
-    zone), times speed over the travel actually achieved, estimates lag from the
-    local speed at the start of the move, and refuses sweeps too small to clear the
-    deadband (with a plain explanation). Results show the deadband and flag speeds
-    timed partly/entirely at reduced power.
+    its deadband (`deadband_pct` × full span — ±6° on Dyason at 10%). The sweep now
+    treats arriving inside that band as the end of the stroke, uses its own
+    speed-independent jam check (< 0.5° progress in 2 s) instead of the generic 2°/s
+    stall detector, times speed over the travel actually achieved, estimates lag from
+    the local speed at the start of the move, and refuses sweeps too small to clear
+    the deadband (with a plain explanation). Results show the deadband.
   - Verified against the real bridge `main()` with a simulated Nano/pypilot:
     complete run (speeds measured exactly), release (~120 ms), window blur
     (~120 ms), silent heartbeat loss (~1.1 s), Nano STOP, Nano B3, jam → stall,
     remote MODE, disconnect, 60 s arm timeout, too-small sweep refused; plus a
-    Dyason-like profile (±30°, 10% deadband, 80/20 limits, slow zone) that reproduced
-    the boat's false stop with the first version and passes with the fix.
+    Dyason-like profile (±30°, 10% deadband, 80/20 limits) that reproduced both boat
+    failures (false stop; motor never starting inside the old PWM-160 zone) and passes
+    with the fixes. Nano: 91% flash / 70% RAM, `Serial` 221 bytes (128-byte RX buffer).
 
 ## [v3.0.2] — 2026-10-01
 

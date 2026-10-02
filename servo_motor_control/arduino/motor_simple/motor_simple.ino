@@ -189,6 +189,17 @@ const uint8_t HBRIDGE_RPWM_PIN = 2;   // RPWM
 const uint8_t HBRIDGE_LPWM_PIN = 3;   // LPWM
 const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN (R_EN + L_EN tied together)
 
+// Last duty written to the EN pin.  ALL motor-duty writes go through motor_pwm()
+// so the pin-state telemetry can report EN from this value instead of calling
+// digitalRead(D9): on AVR, digitalRead() calls turnOffPWM() on a PWM pin, which
+// silently cancelled any duty other than 0/255 (found 2026-10-02 — the remote-
+// manual slow zone's 160 never reached the motor, so the rudder did not move).
+uint8_t g_motor_duty = 0;
+inline void motor_pwm(uint8_t duty) {
+  analogWrite(HBRIDGE_PWM_PIN, duty);
+  g_motor_duty = duty;
+}
+
 // Clutch pin. Default active-HIGH: HIGH = engaged, LOW = disengaged.
 // Set FEATURE_INVERT_CLUTCH to reverse for active-LOW relay wiring.
 const uint8_t CLUTCH_PIN       = 11;
@@ -1515,7 +1526,7 @@ void update_motor_from_command() {
 
   // If in a fault state, don't drive the motor at all
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1654,7 +1665,7 @@ void update_motor_from_command() {
     // not drive blind, so the motor is held off.  This means remote-manual steering
     // now depends on pypilot publishing rudder.angle (it always runs as a service).
     if (!pilot_limits_ok) {
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       last_drive_dir = 0;
@@ -1691,10 +1702,18 @@ void update_motor_from_command() {
     int16_t REMOTE_DEADBAND = (int16_t)(span_deg10 * (int32_t)g_deadband / 1000);
     if (REMOTE_DEADBAND < 8) REMOTE_DEADBAND = 8;   // ~0.8 deg floor: avoid hunting
 
+    // Slow zone: originally reduced PWM within this band of target to limit
+    // overshoot.  Since 2026-10-02 RM_SLOW_PWM == 255, so it no longer changes
+    // the duty (kept so a tested reduced duty >= 180 could be reinstated).  Was:
     // Reduce PWM within this band of target to limit overshoot between the
     // ~5 Hz pilot position updates.
     int16_t SLOW_ZONE_DEG10 = (int16_t)(REMOTE_DEADBAND * 4);
-    const uint8_t RM_SLOW_PWM = 160;
+    // Full duty in the slow zone too (2026-10-02).  The hydraulic pump is ON/OFF
+    // only — the AP path uses MIN_DUTY == MAX_DUTY == 255 and notes any PWM
+    // experiment needs >= 180.  The old 160 was below that, and was also being
+    // cancelled by digitalRead(D9) (see motor_pwm()).  Stopping is handled by the
+    // reverse brake pulse + REMOTE_DEADBAND below, not by reduced duty.
+    const uint8_t RM_SLOW_PWM = 255;
 
     bool invert_motor = (feature_flags_2 & FEATURE2_INVERT_MOTOR) != 0;
 
@@ -1717,7 +1736,7 @@ void update_motor_from_command() {
         // Timed reverse pulse in progress — hold until duration expires
         if (now - rm_brake_start_ms >= rm_brake_dur_ms) {
           // Brake pulse complete — cut motor
-          analogWrite(HBRIDGE_PWM_PIN, 0);
+          motor_pwm(0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1735,7 +1754,7 @@ void update_motor_from_command() {
           // fall through to DRIVING below
         } else {
           // Motor off, hold position via hydraulic lock
-          analogWrite(HBRIDGE_PWM_PIN, 0);
+          motor_pwm(0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1764,7 +1783,7 @@ void update_motor_from_command() {
 
         if (dir == 0) {
           // Within deadband or at a limit — stop and hold.
-          analogWrite(HBRIDGE_PWM_PIN, 0);
+          motor_pwm(0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1780,7 +1799,7 @@ void update_motor_from_command() {
           bool rpwm_high = brake_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
           int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
           if (dd != last_drive_dir && last_drive_dir != 0) {
-            analogWrite(HBRIDGE_PWM_PIN, 0);                   // EN off before direction change
+            motor_pwm(0);                   // EN off before direction change
           }
           digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
@@ -1789,7 +1808,7 @@ void update_motor_from_command() {
           rm_brake_start_ms = now;
           rm_state          = RM_BRAKING;
           SET_MOTOR_REASON(MRSN_RM_BRAKE);                    // B26: record activation reason
-          analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? 255 : 0);
+          motor_pwm(clutch_settled ? 255 : 0);
           break;
         }
 
@@ -1800,14 +1819,14 @@ void update_motor_from_command() {
           bool rpwm_high = drive_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
           int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
           if (dd != last_drive_dir && last_drive_dir != 0) {
-            analogWrite(HBRIDGE_PWM_PIN, 0);                   // EN off before direction change
+            motor_pwm(0);                   // EN off before direction change
           }
           digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
           last_drive_dir = dd;
           SET_MOTOR_REASON(MRSN_RM_DRIVE);                    // B26: record activation reason
           uint8_t pwm = (abs_error <= SLOW_ZONE_DEG10) ? RM_SLOW_PWM : 255;
-          analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? pwm : 0);
+          motor_pwm(clutch_settled ? pwm : 0);
         }
         break;
       }
@@ -1823,7 +1842,7 @@ void update_motor_from_command() {
     // Respect limits
     if (manual_jog_dir < 0 && (at_dirb_end || at_dirb_pilot)) {
       // Trying to jog further to Dir-B, but at/near Dir-B end → stop
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1831,7 +1850,7 @@ void update_motor_from_command() {
     }
     if (manual_jog_dir > 0 && (at_dira_end || at_dira_pilot)) {
       // Trying to jog further to Dir-A, but at/near Dir-A end → stop
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1844,27 +1863,27 @@ void update_motor_from_command() {
       // Dir-A: increase ADC
       // Record activation reason: distinguish physical-button from delta-jog
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
-      if (last_drive_dir == -1) analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+      if (last_drive_dir == -1) motor_pwm(0);  // EN off before direction change
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
       last_drive_dir = +1;
     } else if (manual_jog_dir < 0) {
       // Dir-B: decrease ADC
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
-      if (last_drive_dir == +1) analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+      if (last_drive_dir == +1) motor_pwm(0);  // EN off before direction change
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
       last_drive_dir = -1;
     } else {
       // No direction -> stop
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
 
-    analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? duty : 0);
+    motor_pwm(clutch_settled ? duty : 0);
     return;  // do not fall through to autopilot logic
   }
 
@@ -1872,7 +1891,7 @@ void update_motor_from_command() {
 
   // If AP is not active (remote ap.enabled false or Pi offline), don't drive motor
   if (!ap_active) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1883,7 +1902,7 @@ void update_motor_from_command() {
   // last_command_val: 0..2000, 1000 = stop
   // Deadband around neutral
   if (delta > -db && delta < db) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1893,14 +1912,14 @@ void update_motor_from_command() {
   // Don't drive further into soft limits.
   // Conv 1: delta > 0 = port (Dir-B); delta < 0 = stbd (Dir-A).
   if (delta > 0 && (at_dirb_end || at_dirb_pilot)) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
   if (delta < 0 && (at_dira_end || at_dira_pilot)) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1932,7 +1951,7 @@ void update_motor_from_command() {
   {
     int8_t ap_new_dir = (delta > 0) ? -1 : +1;
     if (ap_new_dir != last_drive_dir && last_drive_dir != 0) {
-      analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+      motor_pwm(0);  // EN off before direction change
     }
     if (delta > 0) {
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1944,7 +1963,7 @@ void update_motor_from_command() {
     last_drive_dir = ap_new_dir;
   }
 
-  analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? duty : 0);
+  motor_pwm(clutch_settled ? duty : 0);
 }
 
 // Process one CRC-valid frame
@@ -2158,7 +2177,7 @@ void setup() {
   pinMode(HBRIDGE_PWM_PIN, OUTPUT);
   digitalWrite(HBRIDGE_RPWM_PIN, LOW);
   digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-  analogWrite(HBRIDGE_PWM_PIN, 0);   // motor off
+  motor_pwm(0);   // motor off
 
   // Clutch — pre-load PORT latch with the disengaged level BEFORE enabling the
   // output driver so the pin never glitches to the engaged state even for one
@@ -2687,12 +2706,14 @@ if (!ap_engaged && !remote_manual_active) {
   // ---- H-bridge pin-state telemetry (on-change, debug diagnostics) ----
   // Sent whenever D2/D3/D9 change — lets the bridge log exact motor on/off
   // transitions and direction without needing external instrumentation.
-  // digitalRead() on D9 works correctly here because we only ever write
-  // analogWrite(D9, 0) or analogWrite(D9, 255) (MIN_DUTY == MAX_DUTY == 255).
+  // EN (D9) is reported from g_motor_duty, NOT digitalRead(D9): digitalRead()
+  // turns PWM off on a PWM pin, which cancelled every duty other than 0/255.
+  // (The old comment here assumed only 0/255 was ever written; the remote-
+  // manual slow zone later wrote 160.)  D2/D3 are plain digital outputs.
   // B26: also send MOTOR_REASON_CODE once when D9 transitions LOW->HIGH.
   {
     static uint8_t last_pin_state = 0xFF;  // 0xFF = invalid sentinel, forces first send
-    uint8_t ps = (uint8_t)((digitalRead(HBRIDGE_PWM_PIN)  ? 0x04 : 0)
+    uint8_t ps = (uint8_t)((g_motor_duty != 0              ? 0x04 : 0)
                           | (digitalRead(HBRIDGE_LPWM_PIN) ? 0x02 : 0)
                           | (digitalRead(HBRIDGE_RPWM_PIN) ? 0x01 : 0));
     if (ps != last_pin_state) {
