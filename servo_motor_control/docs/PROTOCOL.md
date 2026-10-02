@@ -175,6 +175,14 @@ Notes:
 | `MODE MANUAL` | Enter MANUAL steering mode |
 | `MODE AUTO` | Exit MANUAL, return to AP/IDLE |
 | `RUD xx.x` | Rudder target 0.0–100.0% (only valid in MANUAL) |
+| `RAM_SETUP <deg> [cycles]` | Arm the rudder sweep (Hardware Test 1). Disables AP, enters MANUAL on the Nano, mode `RAM_OFF`. Refused (reply `RAM_RESULT {"result":"REFUSED",...}`) if the sweep is too small for the rudder range/limits/deadband. Disarms after 60 s if never held (v3.0.3) |
+| `RAM HOLD` | Dead-man heartbeat, sent every ~200 ms while the operator holds B3. First HOLD starts the sweep (`RAM_ON`); no HOLD for 1 s stops it (v3.0.3) |
+| `RAM RELEASE` | Operator let go — stops the sweep immediately. Releasing ends the test; a later HOLD does not resume it (v3.0.3) |
+| `TEST <id>` | Disabled since v3.0.3 (no Nano sketch implements it). Bridge replies `TEST_LINE Not available...` + `TEST_DONE` |
+
+While the sweep is armed or running, any `ESTOP`, `BTN`, `MODE`, `NUDGE`, `RUD` or `TGT`
+stops it first (single exit path `ram_test_abort()`); `BTN` is then swallowed, the others
+proceed normally. Any Nano button and a remote disconnect also stop it.
 
 ### Bridge → Remote (telemetry, ~1Hz)
 
@@ -186,7 +194,9 @@ Notes:
 | `RDR xxx.x` | Rudder angle (signed degrees) |
 | `RDR_PCT xxx.x` | Rudder percentage (0–100) |
 | `FLAGS xxxx` | Nano fault flags (bitmask, decimal) |
-| `MODE IDLE` / `MODE AP` / `MODE MANUAL` | Bridge mode state |
+| `MODE IDLE` / `MODE AP` / `MODE MANUAL` / `MODE RAM_OFF` / `MODE RAM_ON` | Bridge mode state (`RAM_*` = rudder sweep armed / running) |
+| `RAM_PROG <done> <total>` | Rudder sweep progress in full strokes (only while armed/running) |
+| `RAM_RESULT <json>` | Rudder sweep outcome, once, at the end: `result` = PASS / CHECK / STOPPED / DISARMED / REFUSED, `reason`, per-direction `dirs.port`/`dirs.stbd` (speed_dps, hard_over_s, lag_ms, overshoot_max_deg, end_err_deg, settle_timeouts, i_peak_a, i_mean_a), `speed_asym_pct`, `nano_deadband_deg`, `slow_zone_deg`, `speed_power` (full / mixed / reduced) |
 | `WARN AP_PRESSED` | AP toggle was rejected (remote shows warning) |
 | `PONG` | Keepalive reply |
 
