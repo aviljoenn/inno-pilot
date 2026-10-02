@@ -202,6 +202,11 @@ RCAL_STATUS_NAMES = {0: "none (steering on pypilot angle)",
                      1: "ACTIVE (steering on local angle)",
                      2: "REJECTED by cross-check (steering on pypilot angle)"}
 RCAL_RESEND_S    = 10.0   # re-send period (Nano reset recovery); same values are a no-op
+RCAL_SETTLE_S    = 1.0    # values must be unchanged this long before a NEW set is sent:
+                          # at start-up pypilot publishes scale/offset, then re-adjusts
+                          # them once rudder.range loads (seen on Dyason: offset 8.14 ->
+                          # 0.25 within 0.3 s); sending the in-between set gave the Nano
+                          # a calibration ~8 deg off for a moment.
 # reason field (bits [3:0] of value):
 _MRSN = {1: "manual_phys(btn)", 2: "delta_jog(stale_cmd)", 3: "ap_active",
          4: "rm_driving", 5: "rm_braking"}
@@ -581,6 +586,8 @@ class BridgeState:
     rcal_sent_words: Optional[tuple] = None   # last six words sent
     rcal_last_send:  float = 0.0
     rcal_status:     Optional[int] = None     # last RCAL_STATUS from the Nano
+    rcal_cand_words: Optional[tuple] = None   # candidate set waiting to settle
+    rcal_cand_since: float = 0.0
     # Nudge state — brief full-power motor jog without disengaging pypilot
     nudge_until:          float = 0.0       # monotonic expiry; 0 = inactive
     nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 2000=full port, 0=full stbd (conv 1)
@@ -2124,8 +2131,13 @@ def main() -> None:
         coeffs = rudder_cal_coeffs(*rcal_in, rudder_range) if rudder_range else None
         if coeffs is not None:
             words = rcal_words(coeffs)
+            if words != bstate.rcal_cand_words:          # new candidate: start settling
+                bstate.rcal_cand_words = words
+                bstate.rcal_cand_since = now
+            settled = (now - bstate.rcal_cand_since) >= RCAL_SETTLE_S
             changed = words != bstate.rcal_sent_words
-            if changed or (now - bstate.rcal_last_send) >= RCAL_RESEND_S:
+            if (changed and settled) or (not changed and
+                                         (now - bstate.rcal_last_send) >= RCAL_RESEND_S):
                 send_rudder_cal(nano, words)
                 bstate.rcal_last_send = now
                 if changed:
