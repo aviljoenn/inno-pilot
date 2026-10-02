@@ -97,9 +97,9 @@ at least deadband + 5° and refuses smaller sweeps with that explanation.
 | Current A | peak / mean while driving (only with a current sensor) | future max-current setting |
 | Speed difference % | port vs stbd speed | unbalanced ram, leak, air |
 
-If the results say speed was timed **partly/entirely at reduced power**, the Nano was
-inside its slow zone (4 × deadband of the target) — speed and hard-over then understate
-full-power performance. A smaller deadband or wider sweep fixes that.
+The Nano drives the motor at full duty all the way to its brake/deadband point (since
+v3.0.3 — the earlier reduced-power "slow zone" never actually reached the motor), so the
+speeds are full-power figures.
 
 PASS = all cycles completed and every stroke settled; CHECK = completed but some
 strokes did not settle; STOPPED = ended early (reason shown).

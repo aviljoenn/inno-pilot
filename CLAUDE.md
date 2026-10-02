@@ -340,11 +340,23 @@ testing, ever** — no endurance tests. Keep all of these true:
   `ram_test_running`.)
 - **Never auto-centre on stop** — that is motion with nobody holding the button.
 - **Release ends the test**; a later HOLD must not resume it (re-arm from Settings).
-- **Do not put the sweep back on the generic stall detector.** Its 2°/s criterion
-  false-trips on a healthy rudder in the Nano's reduced-power slow zone (4 × deadband).
-  The sweep has its own jam check (< 0.5° progress in 2 s while driving). Its "arrived"
-  band must include the Nano's deadband (`ram_nano_deadband_deg()`), which is
-  `deadband_pct` × full span — ±6° on Dyason. Both were found on the first boat run.
+- **Do not put the sweep back on the generic stall detector.** Its 2°/s criterion is
+  a speed rule; the sweep has its own speed-independent jam check (< 0.5° progress in
+  2 s while driving). Its "arrived" band must include the Nano's deadband
+  (`ram_nano_deadband_deg()`), which is `deadband_pct` × full span — ±6° on Dyason.
+  Found on the first boat run.
+
+## Nano: never `digitalRead()` a PWM pin — use `motor_pwm()` for D9
+
+On AVR, `digitalRead()` calls `turnOffPWM()` on a PWM-capable pin. The pin-state
+telemetry used to `digitalRead(D9)` every loop, which silently cancelled any EN duty
+other than 0/255 — the remote-manual slow zone's `analogWrite(D9, 160)` never reached
+the motor, so REMOTE steering and the sweep could not start the rudder near a target
+(found on Dyason's second sweep, 2026-10-02). Since then every EN write goes through
+`motor_pwm()`, which records `g_motor_duty`, and telemetry reports EN from that.
+**Never write `analogWrite(HBRIDGE_PWM_PIN, …)` directly and never `digitalRead` D9.**
+The pump is on/off: all paths now drive 255; any future reduced duty must be ≥ 180
+(firmware note) and tested on the boat.
 - Every test must have a stated purpose: a setting/metric it feeds, or a safety/
   reliability check (see `TODO.md` "Settings & commissioning redesign").
 
