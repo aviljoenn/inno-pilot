@@ -97,6 +97,10 @@ _DEFAULT_SETTINGS: dict = {
         "invert_clutch":          False,
         "invert_motor":           False,
         "remote_helm":            False,  # Enables REMOTE button on main screen; OFF by default
+        # REMOTE helm wheel travel: on-screen wheel degrees each way for full rudder.
+        # Smaller = less wheel turn per rudder degree (the deadband shows as less
+        # "play"), coarser control.  Was hard-coded ±150 until v3.0.3.
+        "helm_wheel_deg":         90,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -1556,6 +1560,10 @@ body{
           <button class="sf-bb" data-boolid="remote_helm" data-bval="false">OFF</button>
         </div>
       </div>
+      <div class="sf-row" data-sfid="helm_wheel_deg">
+        <span class="sf-lbl" title="How far the on-screen helm wheel turns each way for full rudder. Smaller: less wheel turn per degree of rudder (less play, coarser). Larger: finer, but more wheel play. Default 90.">Helm Wheel Turn (&#177;&#176;) &#9432;</span>
+        <input class="sf-inp" type="number" id="sf-helm_wheel_deg" min="30" max="360" step="10">
+      </div>
 
       <div class="ss-title">AUTOPILOT</div>
       <div class="sf-row" data-sfid="deadband_pct">
@@ -1736,7 +1744,11 @@ var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DE
 var isDragging = false;
 var prevPtrAngle = null;
 var lastRudSend  = 0;
-var MAX_DEG = 150;       // ±150° maps 0..100% rudder
+var lastRudSentPct = null;  // last RUD value actually sent
+var rudTrailTimer  = null;  // pending trailing send (A: never drop the final position)
+var MAX_DEG = 90;        // ±MAX_DEG of wheel maps 0..100% rudder; set from the
+                         // "Helm Wheel Turn" setting (features.helm_wheel_deg)
+var HELM_WHEEL_DEFAULT = 90, HELM_WHEEL_MIN = 30, HELM_WHEEL_MAX = 360;
 var gManualRudPct = 50.0;  // commanded rudder % in MANUAL mode (0–100%)
 var gRdrPct       = null;  // latest rdr_pct from bridge telemetry
 var gJogTimer     = null;  // setInterval handle for hold-jog repeat
@@ -2057,6 +2069,7 @@ function showRamResult(r) {
     }
     lines.push('');
     lines.push('Port/stbd speed difference: ' + ramFmt(r.speed_asym_pct, '%'));
+    if (r.nano_angle) lines.push('Nano steered on: ' + r.nano_angle + ' rudder angle');
     if (r.nano_deadband_deg !== undefined) {
       lines.push('Steering deadband: \u00b1' + r.nano_deadband_deg + '\u00b0 (rudder stops anywhere');
       lines.push('  within it of the target \u2014 shows as End error)');
@@ -2406,6 +2419,7 @@ function jogRudder(deltaPct) {
   wheelAngle = -((gManualRudPct - 50) / 50 * MAX_DEG);
   wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
   sendCmd('RUD ' + gManualRudPct.toFixed(1));
+  lastRudSentPct = gManualRudPct.toFixed(1);
 }
 
 // startJog: immediate first jog, then after 300 ms hold delay repeat at intervalMs.
@@ -2457,6 +2471,7 @@ function stopJog() {
           wheelAngle    = 0;
           wheelSvg.style.transform = 'rotate(0deg)';
           sendCmd('RUD 50.0');
+          lastRudSentPct = '50.0';
         } else {
           startJog(cfg.delta, cfg.interval);
         }
@@ -2594,6 +2609,7 @@ function handleToggleAction(action) {
       // ADC on MANUAL_MODE_CODE receipt, so any RUD at this point would override
       // that correct seed with a potentially sign-inverted value.
       gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
+      lastRudSentPct = null;   // new REMOTE session: first wheel move always sends
       // Same sign as telemetry sync: gManualRudPct=100 (port) → CCW.
       wheelAngle = -(gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
@@ -2635,15 +2651,31 @@ function wheelMove(cx, cy) {
   var pct = (-wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;
   gManualRudPct = pct;  // keep button jog state in sync with wheel drag
 
-  // Send RUD at max 5 Hz
+  // Send RUD at max 5 Hz.  A (2026-10-02): a move inside the 200 ms window used
+  // to be dropped outright, so the rudder went to where the finger was up to
+  // 200 ms BEFORE it stopped.  Now the latest value is sent as soon as the
+  // window allows (trailing send), and again on release (wheelEnd).
   var now = Date.now();
   if (now - lastRudSend >= 200) {
-    sendCmd('RUD ' + pct.toFixed(1));
-    lastRudSend = now;
+    rudSendNow();
+  } else if (rudTrailTimer === null) {
+    rudTrailTimer = setTimeout(rudSendNow, 200 - (now - lastRudSend));
   }
 }
 
+// Send gManualRudPct now if it differs from what the rudder was last told.
+function rudSendNow() {
+  if (rudTrailTimer !== null) { clearTimeout(rudTrailTimer); rudTrailTimer = null; }
+  if (gMode !== 'MANUAL') return;
+  var v = gManualRudPct.toFixed(1);
+  if (v === lastRudSentPct) return;
+  sendCmd('RUD ' + v);
+  lastRudSentPct = v;
+  lastRudSend = Date.now();
+}
+
 function wheelEnd() {
+  if (isDragging) rudSendNow();   // final position on finger lift
   isDragging   = false;
   prevPtrAngle = null;
 }
@@ -2669,6 +2701,7 @@ window.addEventListener('touchend', function() { wheelEnd(); });
 // type: 'text'|'password'|'number'|'bool'|'enum'
 // onVal/offVal: stored value toggled by tapping the enum field.
 // dep: {id, val} — field hidden unless named field equals val.
+// def: value shown (and saved) when the stored settings do not have the field yet.
 var SF = [
   // Network
   {id:'ip_mode', sec:'network', type:'enum',     onVal:'static', offVal:'dhcp'},
@@ -2695,6 +2728,7 @@ var SF = [
   {id:'invert_clutch',          sec:'features', type:'bool'},
   {id:'invert_motor',           sec:'features', type:'bool'},
   {id:'remote_helm',            sec:'features', type:'bool'},
+  {id:'helm_wheel_deg',         sec:'features', type:'number', def:90, dep:{id:'remote_helm', val:'true'}},
   // Autopilot
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
   {id:'pgain',                  sec:'autopilot', type:'number'},
@@ -2749,6 +2783,8 @@ function sfBoolRender(fid, isOn) {
 function sfApplyToUI() {
   SF.forEach(function(f) {
     var v = sfGet(f);
+    // Field default (f.def) when the stored settings predate the field.
+    if ((v === undefined || v === null) && f.def !== undefined) { v = f.def; sfSet(f, v); }
     if (v === undefined || v === null) return;
     if (f.type === 'bool') {
       sfBoolRender(f.id, !!v);
@@ -2768,6 +2804,22 @@ function applyRemoteHelmSetting() {
   var enabled = !!(gSettings && gSettings.features && gSettings.features.remote_helm);
   var remBtn = document.querySelector('.mode-radio[data-action="remote"]');
   if (remBtn) remBtn.classList.toggle('disabled', !enabled);
+  applyHelmWheelSetting();
+}
+
+// Wheel travel for full rudder (±deg).  Missing/invalid -> default; clamped.
+// The wheel is re-drawn at the same RUDDER position, so changing the setting
+// never moves the rudder — it only changes how far the wheel turns per degree.
+function applyHelmWheelSetting() {
+  var v = parseFloat(gSettings && gSettings.features && gSettings.features.helm_wheel_deg);
+  if (!(v > 0)) v = HELM_WHEEL_DEFAULT;
+  v = Math.max(HELM_WHEEL_MIN, Math.min(HELM_WHEEL_MAX, v));
+  if (v === MAX_DEG) return;
+  var pct = (-wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;   // current rudder pct shown
+  MAX_DEG = v;
+  wheelAngle = -(pct - 50) / 50 * MAX_DEG;
+  var ws = document.getElementById('wheel-svg');
+  if (ws) ws.style.transform = 'rotate(' + wheelAngle + 'deg)';
 }
 
 // Read text/number/password inputs back into gSettings.
@@ -2896,7 +2948,7 @@ document.querySelectorAll('.sf-bb').forEach(function(b) {
     var fid = b.dataset.boolid;
     var val = b.dataset.bval === 'true';
     var f = SF.find(function(x) { return x.id === fid; });
-    if (f) { sfSet(f, val); sfBoolRender(fid, val); }
+    if (f) { sfSet(f, val); sfBoolRender(fid, val); sfSyncVisibility(); }  // bool may gate dep rows
   });
 });
 

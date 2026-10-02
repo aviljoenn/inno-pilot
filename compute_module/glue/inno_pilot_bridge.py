@@ -33,6 +33,7 @@ import queue
 import select
 import signal
 import socket
+import struct
 import threading
 import time
 import serial
@@ -186,6 +187,21 @@ PI_VOLTAGE_CODE   = 0xB4  # Nano -> Bridge: 5V logic-rail voltage *100 (shared P
 
 # B26: motor activation reason diagnostic — sent once when D9 goes LOW→HIGH
 MOTOR_REASON_CODE = 0xEE
+
+# Local calibrated rudder angle on the Nano ("B", 2026-10-02) — see
+# rudder_cal_coeffs() and the RCAL block in motor_simple.ino.
+RCAL_K2_LO_CODE  = 0xC0   # Bridge -> Nano: coefficient words (float32 as LO/HI uint16)
+RCAL_K2_HI_CODE  = 0xC1
+RCAL_K1_LO_CODE  = 0xC2
+RCAL_K1_HI_CODE  = 0xC3
+RCAL_K0_LO_CODE  = 0xC4
+RCAL_K0_HI_CODE  = 0xC5
+RCAL_COMMIT_CODE = 0xC6   # value = uint16 sum of the six words; applies atomically
+RCAL_STATUS_CODE = 0xC8   # Nano -> Bridge: 0 none, 1 active, 2 rejected by cross-check
+RCAL_STATUS_NAMES = {0: "none (steering on pypilot angle)",
+                     1: "ACTIVE (steering on local angle)",
+                     2: "REJECTED by cross-check (steering on pypilot angle)"}
+RCAL_RESEND_S    = 10.0   # re-send period (Nano reset recovery); same values are a no-op
 # reason field (bits [3:0] of value):
 _MRSN = {1: "manual_phys(btn)", 2: "delta_jog(stale_cmd)", 3: "ap_active",
          4: "rm_driving", 5: "rm_braking"}
@@ -487,6 +503,10 @@ class PypilotState:
     rudder_angle: Optional[float] = None
     rudder_range: Optional[float] = None
     servo_current: Optional[float] = None   # servo.current (A); only meaningful with a current sensor
+    # pypilot rudder calibration (rudder.py): angle = scale*u + offset + nl*(m0-u)*(m1-u)
+    rudder_scale:  Optional[float] = None
+    rudder_offset: Optional[float] = None
+    rudder_nonlin: Optional[float] = None
     connected:    bool            = False
 
 
@@ -557,6 +577,10 @@ class BridgeState:
     ram_stroke: Optional["RamStroke"] = None  # stroke currently being driven/measured
     ram_results: list = field(default_factory=list)  # finished RamStroke records
     ram_result_pending: Optional[str] = None  # RAM_RESULT JSON waiting to go to remotes
+    # Nano local calibrated angle ("B")
+    rcal_sent_words: Optional[tuple] = None   # last six words sent
+    rcal_last_send:  float = 0.0
+    rcal_status:     Optional[int] = None     # last RCAL_STATUS from the Nano
     # Nudge state — brief full-power motor jog without disengaging pypilot
     nudge_until:          float = 0.0       # monotonic expiry; 0 = inactive
     nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 2000=full port, 0=full stbd (conv 1)
@@ -604,6 +628,9 @@ def pypilot_worker(
             client.watch('rudder.angle', True)
             client.watch('rudder.range', 1.0)
             client.watch('servo.current', 0.25)   # RAM sweep current stats
+            client.watch('rudder.scale', True)    # calibration -> Nano local angle
+            client.watch('rudder.offset', True)
+            client.watch('rudder.nonlinearity', True)
             log_pp.info("Connected to pypilot")
 
             while True:
@@ -646,6 +673,14 @@ def pypilot_worker(
                             state.servo_current = float(msgs["servo.current"])
                         except Exception:
                             pass
+                    for key, attr in (("rudder.scale", "rudder_scale"),
+                                      ("rudder.offset", "rudder_offset"),
+                                      ("rudder.nonlinearity", "rudder_nonlin")):
+                        if key in msgs:
+                            try:
+                                setattr(state, attr, float(msgs[key]))
+                            except Exception:
+                                pass
 
         except Exception as exc:
             log_pp.warning("Connection lost: %s — retrying in %ds", exc, PYPILOT_RECONNECT_DELAY_S)
@@ -1196,6 +1231,54 @@ def handle_remote_disconnect(
 
 
 # ===========================================================================
+# Nano local calibrated rudder angle ("B")
+# ===========================================================================
+
+def rudder_cal_coeffs(scale: float, offset: float, nonlin: float,
+                      rng: float) -> Optional[tuple]:
+    """pypilot's rudder calibration as a quadratic for the Nano, or None.
+
+    pypilot (arduino_servo.cpp + rudder.py), with value = adc*64 from the Nano:
+        u     = value/65472 - 0.5 = adc/1023 - 0.5
+        m0,m1 = (-range - offset)/scale, (range - offset)/scale
+        angle = scale*u + offset + nonlin*(m0 - u)*(m1 - u)      (+ = port)
+    Expanded: angle = nl*u^2 + (scale - nl*(m0+m1))*u + (offset + nl*m0*m1).
+    The Nano's axis is -angle in tenths (PILOT_RUDDER_CODE convention), so every
+    coefficient is multiplied by -10.  Returns (k2, k1, k0) for
+    local_deg10 = (k2*u + k1)*u + k0.
+    """
+    if scale is None or offset is None or nonlin is None or not rng:
+        return None
+    if abs(scale) <= 0.01:          # pypilot's own "bad calibration" threshold
+        return None
+    rng = abs(float(rng))
+    m0 = (-rng - offset) / scale
+    m1 = (rng - offset) / scale
+    a2 = nonlin
+    a1 = scale - nonlin * (m0 + m1)
+    a0 = offset + nonlin * m0 * m1
+    return (-10.0 * a2, -10.0 * a1, -10.0 * a0)
+
+
+def rcal_words(coeffs: tuple) -> tuple:
+    """Six uint16 words (LO, HI per float32, little-endian) for the RCAL frames."""
+    words = []
+    for k in coeffs:
+        lo, hi = struct.unpack("<HH", struct.pack("<f", float(k)))
+        words += [lo, hi]
+    return tuple(words)
+
+
+def send_rudder_cal(nano: "serial.Serial", words: tuple) -> None:
+    """Send the six coefficient words, then COMMIT with their uint16 sum."""
+    codes = (RCAL_K2_LO_CODE, RCAL_K2_HI_CODE, RCAL_K1_LO_CODE,
+             RCAL_K1_HI_CODE, RCAL_K0_LO_CODE, RCAL_K0_HI_CODE)
+    for code, w in zip(codes, words):
+        send_nano_frame(nano, code, w)
+    send_nano_frame(nano, RCAL_COMMIT_CODE, sum(words) & 0xFFFF)
+
+
+# ===========================================================================
 # RAM commissioning sweep helpers (see the RAM_* constants for the rules)
 # ===========================================================================
 
@@ -1343,6 +1426,12 @@ def ram_summary(bstate: BridgeState, reason: str, completed: bool) -> dict:
         # deadband and the summary flagged speeds timed at reduced power; the
         # Nano now drives at full duty throughout, so that flag was removed.)
         "nano_deadband_deg": _rnd(bstate.ram_db_deg),
+        # Which angle the Nano steered on: "local" = its own fresh calibrated
+        # angle (B), "pypilot" = the ~0.3 s-stale relayed angle.  Note the
+        # bridge still MEASURES with pypilot's angle, so lag_ms includes
+        # pypilot's ~0.2 s conversion delay either way.
+        "nano_angle": {1: "local", 2: "pypilot (local rejected)"}.get(
+            bstate.rcal_status, "pypilot"),
     }
 
 
@@ -1600,8 +1689,19 @@ def process_remote_line(
             # the opposite side due to a sign-convention mismatch in the pct formula.
             send_nano_frame(nano, MANUAL_MODE_CODE, 1)
             bstate.mode = MODE_MANUAL
-            bstate.manual_rud_target = 500  # bridge placeholder; Nano seeds from its ADC
-            log.info("Remote -> MODE MANUAL: manual steering active")
+            # C: track the Nano's seed (= where the rudder is now) instead of the old
+            # fixed 500 placeholder.  The stall check compares this target with the
+            # actual rudder; with 500 it saw a "commanded" move that never happened
+            # and raised a false RUDDER STALL whenever REMOTE was entered off-centre.
+            with plock:
+                ra, rr = pstate.rudder_angle, pstate.rudder_range
+            if ra is not None and rr:
+                pct = (abs(rr) + ra) / (2.0 * abs(rr)) * 100.0
+                bstate.manual_rud_target = int(round(max(0.0, min(100.0, pct)) * 10.0))
+            else:
+                bstate.manual_rud_target = 500
+            log.info("Remote -> MODE MANUAL: manual steering active (target seeded %d)",
+                     bstate.manual_rud_target)
 
         elif arg == "AUTO":
             if bstate.mode == MODE_MANUAL:
@@ -2013,6 +2113,26 @@ def main() -> None:
             rudder_range = pstate.rudder_range
             pp_connected = pstate.connected
             servo_current = pstate.servo_current
+            rcal_in = (pstate.rudder_scale, pstate.rudder_offset, pstate.rudder_nonlin)
+
+        # ----------------------------------------------------------------
+        # B: keep the Nano's copy of pypilot's rudder calibration current.
+        # Sent on change (e.g. after a recalibration or a range change) and
+        # re-sent every RCAL_RESEND_S so a Nano reset recovers by itself; the
+        # Nano ignores an identical set it has already rejected.
+        # ----------------------------------------------------------------
+        coeffs = rudder_cal_coeffs(*rcal_in, rudder_range) if rudder_range else None
+        if coeffs is not None:
+            words = rcal_words(coeffs)
+            changed = words != bstate.rcal_sent_words
+            if changed or (now - bstate.rcal_last_send) >= RCAL_RESEND_S:
+                send_rudder_cal(nano, words)
+                bstate.rcal_last_send = now
+                if changed:
+                    bstate.rcal_sent_words = words
+                    log.info("Rudder calibration -> Nano: scale=%.4f offset=%.4f nl=%.4f "
+                             "range=%.1f  (k2=%.4f k1=%.4f k0=%.4f deg10)",
+                             rcal_in[0], rcal_in[1], rcal_in[2], rudder_range, *coeffs)
 
         # ----------------------------------------------------------------
         # RAM commissioning sweep: dead-man/validity watchdogs, stroke
@@ -2446,6 +2566,13 @@ def main() -> None:
                         "Nano motor pins: D2(RPWM)=%d D3(LPWM)=%d D9(EN)=%d  [%s]",
                         d2, d3, d9, direction,
                     )
+
+                elif code == RCAL_STATUS_CODE:
+                    if value != bstate.rcal_status:
+                        (log.warning if value == 2 else log.info)(
+                            "Nano local rudder angle: %s",
+                            RCAL_STATUS_NAMES.get(value, f"unknown({value})"))
+                        bstate.rcal_status = value
 
                 elif code == MOTOR_REASON_CODE:
                     # B26: one-shot diagnostic sent when D9 goes LOW→HIGH.

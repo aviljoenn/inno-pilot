@@ -17,6 +17,40 @@ remote). The paused
 ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped.
 
 ### Fixed
+- **REMOTE helm: "play" between the finger and the rudder** (found on Dyason after the
+  deadband tuning; four stacked causes, fixed together):
+  - **A — final finger position dropped** (`inno_web_remote.py`): RUD was rate-limited
+    to 5 Hz and anything inside the 200 ms window was discarded, with nothing sent on
+    release, so the rudder went to where the finger was up to 200 ms before it
+    stopped. Now a trailing send delivers the latest value as soon as the window
+    allows, and the final value is sent on finger lift.
+  - **B — Nano steered on a ~0.3 s-stale angle** (`motor_simple.ino`,
+    `inno_pilot_bridge.py`; hardware impact — position control). The remote-manual
+    loop used pypilot's angle, computed from the Nano's own ADC but sent out at 5 Hz,
+    converted ~220 ms later and relayed back at 5 Hz (~2° late at 6°/s). The bridge
+    now watches pypilot's rudder calibration (scale, offset, nonlinearity, range) and
+    sends it to the Nano as a quadratic (new frames 0xC0–0xC6, status 0xC8); the Nano
+    evaluates it on its fresh ADC every loop. pypilot stays the calibration truth.
+    Safety: cross-check against pypilot's angle (> 5° for > 1 s → rejected, falls
+    back to the old behaviour, latched until the calibration changes); end-stop
+    backstop checks both angles; AP steering unchanged. Host unit test: Nano maths
+    matches pypilot's formula within 0.05° over 300 random calibrations × 1024 ADC
+    values. **Changes the right deadband:** with fresh feedback the Nano stops at the
+    deadband edge (4% → ~2° short), and overshoot shrinks to the coast, so a smaller
+    deadband (~1.5%) now settles without correction moves (simulator: 1.5% → end
+    error −0.5°, overshoot 0; old firmware at 1.5% overshot 1.3° and corrected).
+  - **C — offset starting target on entering REMOTE** (`motor_simple.ino`): the Nano
+    seeded its target from the raw ADC scaled to 1..1022 but interprets targets on the
+    calibrated axis, so the first wheel move jumped. It now re-seeds from the
+    calibrated angle (unless the bridge sends a target first). Bridge side: the stall
+    check's fixed 500 placeholder target is replaced by the actual rudder position, which
+    removes the false "RUDDER: NOT MOVING" alert when REMOTE is entered off-centre.
+  - **D — wheel gearing now a setting** (`inno_web_remote.py`): "Helm Wheel Turn (±°)"
+    (Settings, shown with Remote Helm ON), default ±90° (was fixed ±150°) — 3° of wheel
+    per rudder degree on a ±30° rudder instead of 5°. Changing it re-draws the wheel at
+    the same rudder position. Also: ON/OFF settings now show/hide their dependent rows,
+    and fields can carry a default for settings saved before they existed.
+  - Nano flash 96% (29508 / 30720) after B — little headroom left.
 - **Nano: REMOTE steering and the rudder sweep could not start the motor near the
   target** (`motor_simple.ino`; hardware impact — motor drive). Within 4 × deadband of
   the target (24° on Dyason) remote-manual mode wrote `analogWrite(D9, 160)`, but the
