@@ -10,6 +10,109 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.0.3] — 2026-10-01
+
+Patch release. Bumped across all actively developed components (Nano, bridge, web
+remote). The paused
+ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped.
+
+### Fixed
+- **REMOTE helm: "play" between the finger and the rudder** (found on Dyason after the
+  deadband tuning; four stacked causes, fixed together):
+  - **A — final finger position dropped** (`inno_web_remote.py`): RUD was rate-limited
+    to 5 Hz and anything inside the 200 ms window was discarded, with nothing sent on
+    release, so the rudder went to where the finger was up to 200 ms before it
+    stopped. Now a trailing send delivers the latest value as soon as the window
+    allows, and the final value is sent on finger lift.
+  - **B — Nano steered on a ~0.3 s-stale angle** (`motor_simple.ino`,
+    `inno_pilot_bridge.py`; hardware impact — position control). The remote-manual
+    loop used pypilot's angle, computed from the Nano's own ADC but sent out at 5 Hz,
+    converted ~220 ms later and relayed back at 5 Hz (~2° late at 6°/s). The bridge
+    now watches pypilot's rudder calibration (scale, offset, nonlinearity, range) and
+    sends it to the Nano as a quadratic (new frames 0xC0–0xC6, status 0xC8); the Nano
+    evaluates it on its fresh ADC every loop. pypilot stays the calibration truth.
+    Safety: cross-check against pypilot's angle (> 5° for > 1 s → rejected, falls
+    back to the old behaviour, latched until the calibration changes); end-stop
+    backstop checks both angles; AP steering unchanged. Host unit test: Nano maths
+    matches pypilot's formula within 0.05° over 300 random calibrations × 1024 ADC
+    values. **Changes the right deadband:** with fresh feedback the Nano stops at the
+    deadband edge (4% → ~2° short), and overshoot shrinks to the coast, so a smaller
+    deadband (~1.5%) now settles without correction moves (simulator: 1.5% → end
+    error −0.5°, overshoot 0; old firmware at 1.5% overshot 1.3° and corrected).
+  - **C — offset starting target on entering REMOTE** (`motor_simple.ino`): the Nano
+    seeded its target from the raw ADC scaled to 1..1022 but interprets targets on the
+    calibrated axis, so the first wheel move jumped. It now re-seeds from the
+    calibrated angle (unless the bridge sends a target first). Bridge side: the stall
+    check's fixed 500 placeholder target is replaced by the actual rudder position, which
+    removes the false "RUDDER: NOT MOVING" alert when REMOTE is entered off-centre.
+  - **D — wheel gearing now a setting** (`inno_web_remote.py`): "Helm Wheel Turn (±°)"
+    (Settings, shown with Remote Helm ON), default ±90° (was fixed ±150°) — 3° of wheel
+    per rudder degree on a ±30° rudder instead of 5°. Changing it re-draws the wheel at
+    the same rudder position. Also: ON/OFF settings now show/hide their dependent rows,
+    and fields can carry a default for settings saved before they existed.
+  - Nano flash 96% (29508 / 30720) after B — little headroom left.
+- **Nano: REMOTE steering and the rudder sweep could not start the motor near the
+  target** (`motor_simple.ino`; hardware impact — motor drive). Within 4 × deadband of
+  the target (24° on Dyason) remote-manual mode wrote `analogWrite(D9, 160)`, but the
+  pin-state telemetry called `digitalRead(D9)` every loop, and on AVR `digitalRead()`
+  turns PWM off on that pin — the duty never reached the motor. Found when Dyason's
+  second sweep stopped "stuck" without moving at all. Fix: all EN writes go through
+  `motor_pwm()`, which records the duty, and the telemetry reports EN from that value
+  (no `digitalRead(D9)`); and the slow zone now drives at full duty (255), matching the
+  AP path — the hydraulic pump is on/off and the firmware's own note requires ≥ 180 for
+  any PWM. Stopping is left to the existing reverse brake pulse + deadband, so overshoot
+  near the target may rise slightly; the sweep measures it.
+- **Hardware tests 2–9 could never run, and pressing RUN broke the bridge's text
+  relay** (`inno_web_remote.py`, `inno_pilot_bridge.py`). They send `TEST <id>` to
+  the Nano, but no sketch implements that protocol (`motor_simple` ignores it;
+  `pwm_test.ino` picks its mode with compile-time `#define`s and never sends
+  `TEST_DONE`). The bridge set `test_mode` and never cleared it, so every telemetry
+  byte went through the text relay and any `0x0A` inside a frame reached the
+  remotes as a junk `TEST_LINE` until restart. Tests 2–9 are now greyed out
+  ("BENCH FIRMWARE / NOT AVAILABLE") and the bridge refuses `TEST` behind
+  `NANO_TEST_PROTOCOL_SUPPORTED = False`. Also fixed: duplicate ID 2 (Speed Sweep
+  is 3), and the test list staying visible behind the detail/config screens.
+- **RAM test: the Nano's physical STOP did not stop it** (safety). STOP set the
+  bridge mode to IDLE but left `ram_test_running` set; the sweep loop re-asserted
+  MANUAL within 200 ms and carried on. The Nano's B3 could also engage AP mid-sweep.
+- **RAM test kept sweeping with nobody watching**: a remote disconnect only
+  handled MANUAL mode; stall detection flagged but did not stop it; `MODE`/`RUD`/
+  `NUDGE` from any client left it running.
+
+### Changed
+- **RAM test → "Rudder Sweep (commissioning)", attended only, with measurements.**
+  - **Dead-man hold:** after arming, the operator must HOLD B3 for the whole run.
+    The browser sends `RAM HOLD` every 200 ms; the bridge stops after 1 s without
+    one, so lifting the finger, dropping/locking the phone, switching apps,
+    closing the page or losing WiFi all stop it. Release ends the test (no resume;
+    re-arm from Settings). Arming never held disarms after 60 s.
+  - **One exit path** (`ram_test_abort()`): hold lost/released, any Nano button,
+    any remote STOP/BTN/MODE/RUD/NUDGE/TGT, stall, rudder angle unavailable,
+    stroke timeout, remote disconnect, cycles complete. A stop never auto-centres
+    (that would be unattended motion); MANUAL is released where the rudder stands.
+  - **Measures** per direction: rudder speed (°/s, central 60% of the stroke),
+    estimated hard-over time, reversal lag, overshoot, settled end error, settle
+    timeouts, motor current (if `current_sensor` is on), port/stbd speed
+    difference. Results show on the remote and go to the journal. PASS / CHECK /
+    STOPPED. Reported only — nothing is written to settings.
+  - Amplitude 5°–range (also clamped to `rudder_limit_*_pct`), 1–10 cycles
+    (default 3). Bridge now watches `servo.current` from pypilot.
+  - **Deadband-aware** (found on Dyason's first boat run, which false-stopped with
+    "rudder not moving" while the rudder moved fine): the Nano stops anywhere within
+    its deadband (`deadband_pct` × full span — ±6° on Dyason at 10%). The sweep now
+    treats arriving inside that band as the end of the stroke, uses its own
+    speed-independent jam check (< 0.5° progress in 2 s) instead of the generic 2°/s
+    stall detector, times speed over the travel actually achieved, estimates lag from
+    the local speed at the start of the move, and refuses sweeps too small to clear
+    the deadband (with a plain explanation). Results show the deadband.
+  - Verified against the real bridge `main()` with a simulated Nano/pypilot:
+    complete run (speeds measured exactly), release (~120 ms), window blur
+    (~120 ms), silent heartbeat loss (~1.1 s), Nano STOP, Nano B3, jam → stall,
+    remote MODE, disconnect, 60 s arm timeout, too-small sweep refused; plus a
+    Dyason-like profile (±30°, 10% deadband, 80/20 limits) that reproduced both boat
+    failures (false stop; motor never starting inside the old PWM-160 zone) and passes
+    with the fixes. Nano: 91% flash / 70% RAM, `Serial` 221 bytes (128-byte RX buffer).
+
 ## [v3.0.2] — 2026-10-01
 
 Patch release. Bumped across all actively developed components (Nano, bridge, web

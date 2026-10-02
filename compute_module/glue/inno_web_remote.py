@@ -49,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v3.0.2"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
+INNOPILOT_VERSION = "v3.0.3"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
                                # MAJOR=hardware, MINOR=software feature, PATCH=fix — see CLAUDE.md "Version sync"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
@@ -97,6 +97,10 @@ _DEFAULT_SETTINGS: dict = {
         "invert_clutch":          False,
         "invert_motor":           False,
         "remote_helm":            False,  # Enables REMOTE button on main screen; OFF by default
+        # REMOTE helm wheel travel: on-screen wheel degrees each way for full rudder.
+        # Smaller = less wheel turn per rudder degree (the deadband shows as less
+        # "play"), coarser control.  Was hard-coded ±150 until v3.0.3.
+        "helm_wheel_deg":         90,
     },
     "autopilot": {
         "deadband_pct":           3.0,
@@ -174,6 +178,7 @@ _state: dict = {
     "pypilot_ok":   True,     # False when pypilot process has lost its connection
     "debug":        False,    # True when bridge is in DEBUG log level
     "net_pi":       None,     # Pi->router link from inno-health-notify: {state, loss_pct, avg_ms} or None
+    "ram_prog":     None,     # RAM sweep progress "done/total" strokes while armed/running, else None
 }
 _state_lock = threading.Lock()
 
@@ -352,7 +357,10 @@ def _parse_bridge_line(line: str) -> None:
         # Bridge sends MODE IDLE|AP|MANUAL every telemetry cycle
         if len(parts) > 1:
             mode = parts[1].upper()
-            _update(mode=mode)
+            if mode in ("RAM_OFF", "RAM_ON"):
+                _update(mode=mode)
+            else:
+                _update(mode=mode, ram_prog=None)   # sweep over: drop stale progress
 
     elif c in ("HDG", "CMD", "RDR", "DB"):
         try:
@@ -413,6 +421,24 @@ def _parse_bridge_line(line: str) -> None:
         # Bridge sends PYPILOT OK|DEAD every telemetry cycle.
         if len(parts) > 1:
             _update(pypilot_ok=(parts[1].upper() == "OK"))
+
+    elif c == "RAM_PROG":
+        # RAM sweep progress: RAM_PROG <full strokes done> <total>
+        if len(parts) >= 3:
+            _update(ram_prog=f"{parts[1]}/{parts[2]}")
+
+    elif c == "RAM_RESULT":
+        # RAM sweep summary JSON (end of sweep, disarm or refusal).  Transient:
+        # shown once, never replayed to a browser that connects later.
+        try:
+            result = json.loads(line.split(None, 1)[1])
+        except (IndexError, ValueError):
+            log.warning("Bad RAM_RESULT from bridge: %s", line)
+            return
+        log.info("RAM sweep result: %s", json.dumps(result))
+        snap = _snap()
+        snap["_ram_result"] = result
+        _broadcast_transient(snap)
 
     elif c == "TEST_LINE":
         # Bridge relays a plain-text result line from the Nano test firmware.
@@ -1159,6 +1185,10 @@ body{
 }
 .tcat-name{color:#c0a060;font-size:.76em;line-height:1.35;flex:1}
 .tcat-arrow{color:#504030;font-size:1.0em;flex-shrink:0}
+/* Unavailable test (needs bench firmware): greyed out, not selectable */
+.tcat-item.tcat-off{cursor:default;opacity:.45;filter:grayscale(1)}
+.tcat-item.tcat-off:active,.tcat-item.tcat-off:hover{background:none;border-color:#1a1200}
+.tcat-na{color:#605848;font-size:.6em;letter-spacing:.5px;flex-shrink:0;text-align:right;line-height:1.3}
 
 /* Detail view */
 .tdet-view{display:none}
@@ -1530,6 +1560,10 @@ body{
           <button class="sf-bb" data-boolid="remote_helm" data-bval="false">OFF</button>
         </div>
       </div>
+      <div class="sf-row" data-sfid="helm_wheel_deg">
+        <span class="sf-lbl" title="How far the on-screen helm wheel turns each way for full rudder. Smaller: less wheel turn per degree of rudder (less play, coarser). Larger: finer, but more wheel play. Default 90.">Helm Wheel Turn (&#177;&#176;) &#9432;</span>
+        <input class="sf-inp" type="number" id="sf-helm_wheel_deg" min="30" max="360" step="10">
+      </div>
 
       <div class="ss-title">AUTOPILOT</div>
       <div class="sf-row" data-sfid="deadband_pct">
@@ -1610,7 +1644,7 @@ body{
     <div class="tbody" id="tbody">
 
       <!-- View 1: Test catalogue list (populated by JS) -->
-      <div id="tcat-view"></div>
+      <div class="tcat-view" id="tcat-view"></div>
 
       <!-- View 2: Test detail + YES/NO confirm -->
       <div class="tdet-view" id="tdet-view">
@@ -1629,16 +1663,24 @@ body{
         </div>
       </div>
 
-      <!-- View 2b: RAM Test config -->
+      <!-- View 2b: Rudder Sweep (RAM test) config -->
       <div class="tdet-view" id="tram-view">
-        <div class="tdet-name">1. RAM Test</div>
+        <div class="tdet-name">1. Rudder Sweep (commissioning)</div>
         <div class="tdet-section">What it does</div>
-        <div class="tdet-text">Sweeps the rudder continuously left and right between &#177;N&#176; of centre to stress-test the hydraulic ram. Uses the standard motor_simple firmware &#8212; no reflashing needed.</div>
+        <div class="tdet-text">Sweeps the rudder left and right between &#177;N&#176; of centre for a few cycles and measures how the steering responds. Uses the standard motor_simple firmware &#8212; no reflashing needed.</div>
+        <div class="tdet-section">You must hold the button</div>
+        <div class="tdet-text">After PROCEED, press and <b>HOLD</b> the B3 button on the remote for the whole run. Let go, drop the phone or lose the connection and the rudder stops where it is. The test cannot run unattended. Keep clear of the steering gear.</div>
         <div class="tdet-section">Sweep amplitude</div>
-        <div style="display:flex;align-items:center;gap:10px;padding:6px 0 10px">
-          <input type="number" id="ram-deg-inp" min="1" max="35" value="10"
+        <div style="display:flex;align-items:center;gap:10px;padding:6px 0 4px">
+          <input type="number" id="ram-deg-inp" min="5" max="35" value="20"
                  style="width:64px;background:#080f20;border:1px solid #1e3450;border-radius:4px;color:#00d4ff;font-family:'Courier New',monospace;font-size:.95em;padding:4px 6px;outline:none;text-align:center">
           <span style="color:#90a8c0;font-size:.78em">degrees each side of centre<br><span id="ram-deg-hint" style="color:#354860"></span></span>
+        </div>
+        <div class="tdet-section">Cycles</div>
+        <div style="display:flex;align-items:center;gap:10px;padding:6px 0 10px">
+          <input type="number" id="ram-cyc-inp" min="1" max="10" value="3"
+                 style="width:64px;background:#080f20;border:1px solid #1e3450;border-radius:4px;color:#00d4ff;font-family:'Courier New',monospace;font-size:.95em;padding:4px 6px;outline:none;text-align:center">
+          <span style="color:#90a8c0;font-size:.78em">full port + stbd cycles (1&#8211;10)</span>
         </div>
         <div class="tdet-confirm">
           <button class="tdet-btn yes" id="tram-yes">PROCEED</button>
@@ -1702,7 +1744,11 @@ var wheelAngle = 0;      // accumulated rotation in degrees, clamped to ±MAX_DE
 var isDragging = false;
 var prevPtrAngle = null;
 var lastRudSend  = 0;
-var MAX_DEG = 150;       // ±150° maps 0..100% rudder
+var lastRudSentPct = null;  // last RUD value actually sent
+var rudTrailTimer  = null;  // pending trailing send (A: never drop the final position)
+var MAX_DEG = 90;        // ±MAX_DEG of wheel maps 0..100% rudder; set from the
+                         // "Helm Wheel Turn" setting (features.helm_wheel_deg)
+var HELM_WHEEL_DEFAULT = 90, HELM_WHEEL_MIN = 30, HELM_WHEEL_MAX = 360;
 var gManualRudPct = 50.0;  // commanded rudder % in MANUAL mode (0–100%)
 var gRdrPct       = null;  // latest rdr_pct from bridge telemetry
 var gJogTimer     = null;  // setInterval handle for hold-jog repeat
@@ -1715,7 +1761,9 @@ var gSettingsOpen = false; // true while settings panel is visible
 var gTestOpen     = false; // true while test modal is visible
 var gSelectedTest = null;  // id of test currently shown in detail/results view
 var gTestRunning  = false; // true while a test is streaming results
-var gRamTestDeg   = 10;    // last configured RAM test amplitude (degrees)
+var gRamTestDeg   = 20;    // last configured rudder sweep amplitude (degrees)
+var gRamCycles    = 3;     // last configured rudder sweep cycle count
+var gRamHoldTimer = null;  // dead-man heartbeat interval while B3 is held
 
 // ── Command sender ────────────────────────────────────────────────────────
 function sendCmd(cmd) {
@@ -1734,14 +1782,20 @@ function sendCmd(cmd) {
 
 
 // ── Hardware test catalogue ───────────────────────────────────────────────
+// Only entries with available:true can be selected and run.  Tests 2-9 need
+// the bench firmware pwm_test.ino, which has no run-time "TEST <id>" dispatcher
+// and never emits TEST_LINE/TEST_DONE, so on the boat (motor_simple flashed)
+// they could never run.  They stay listed, greyed out, as a reference until
+// the bench-firmware integration is built (see TODO.md).
 var TESTS = [
   { id: 1,
-    name: 'RAM Test',
-    desc: 'Sweeps the rudder continuously between \u00b1N\u00b0 of centre to stress-test the hydraulic ram. Runs on the standard motor_simple firmware \u2014 no reflashing needed.',
-    purpose: 'Verify the ram moves freely and reliably across its full working range under continuous load.',
-    output: 'Live rudder position on the bar. Start/stop with B3. Emergency stop with STOP button.',
+    available: true,
+    name: 'Rudder Sweep (commissioning)',
+    desc: 'Sweeps the rudder between \u00b1N\u00b0 of centre for a few cycles while you HOLD the B3 button. Let go and it stops. Runs on the standard motor_simple firmware \u2014 no reflashing needed.',
+    purpose: 'Check the steering is fit for autopilot use, and measure it: rudder speed each way, reversal lag, overshoot and end position, motor current (if a sensor is fitted).',
+    output: 'Results table at the end: speed and est. hard-over time per side, lag, overshoot, end error, current, port/stbd speed difference. PASS / CHECK / STOPPED.',
     fw: 'motor_simple.ino (standard firmware \u2014 already flashed)',
-    trigger: 'B3 to start / stop'
+    trigger: 'Hold B3 for the whole run (dead-man)'
   },
   { id: 2,
     name: 'Binary Search \u2014 Min Starting PWM',
@@ -1751,7 +1805,7 @@ var TESTS = [
     fw: 'pwm_test.ino  (default compile \u2014 no extra #define)',
     trigger: 'Automatic on power-up'
   },
-  { id: 2,
+  { id: 3,
     name: 'Speed Sweep',
     desc: 'Drives the rudder at fixed PWM steps (100 \u2192 255, \u223c15 per step) for 600 ms each. Records counts/second and motor current at each step.',
     purpose: 'Map motor speed as a function of PWM. Used to build the braking-time lookup table and characterise the full actuator range.',
@@ -1851,6 +1905,16 @@ function showTestCatalogue() {
   catView.innerHTML = '';
   TESTS.forEach(function(t) {
     var item = document.createElement('div');
+    if (!t.available) {
+      // Greyed out: shown for reference only, no click/touch handlers.
+      item.className = 'tcat-item tcat-off';
+      item.innerHTML =
+        '<span class="tcat-num">' + t.id + '</span>' +
+        '<span class="tcat-name">' + t.name + '</span>' +
+        '<span class="tcat-na">BENCH FIRMWARE<br>NOT AVAILABLE</span>';
+      catView.appendChild(item);
+      return;
+    }
     item.className = 'tcat-item';
     item.innerHTML =
       '<span class="tcat-num">' + t.id + '</span>' +
@@ -1874,9 +1938,10 @@ function showRamTestConfig() {
             ? gSettings.vessel.rudder_range_deg : 35;
   document.getElementById('ram-deg-inp').max   = rng;
   document.getElementById('ram-deg-inp').value = Math.min(gRamTestDeg, rng);
-  document.getElementById('ram-deg-hint').textContent = 'max ' + rng + '° (travel limit)';
-  document.getElementById('tov-title').textContent = 'RAM Test';
-  document.getElementById('tov-hint').textContent  = 'Set sweep amplitude then press PROCEED';
+  document.getElementById('ram-cyc-inp').value = gRamCycles;
+  document.getElementById('ram-deg-hint').textContent = 'min 5°, max ' + rng + '° (travel limit)';
+  document.getElementById('tov-title').textContent = 'Rudder Sweep';
+  document.getElementById('tov-hint').textContent  = 'Set amplitude and cycles, then PROCEED';
   document.getElementById('tcat-view').classList.add('hidden');
   document.getElementById('tdet-view').classList.remove('active');
   document.getElementById('tres-view').classList.remove('active');
@@ -1887,7 +1952,7 @@ function showRamTestConfig() {
 function selectTest(id) {
   if (id === 1) { showRamTestConfig(); return; }
   var t = TESTS.find(function(x) { return x.id === id; });
-  if (!t) return;
+  if (!t || !t.available) return;   // greyed-out tests cannot be opened
   gSelectedTest = id;
   document.getElementById('tdet-name').textContent    = t.id + '.  ' + t.name;
   document.getElementById('tdet-desc').textContent    = t.desc;
@@ -1904,7 +1969,7 @@ function selectTest(id) {
 
 function runTest(id) {
   var t = TESTS.find(function(x) { return x.id === id; });
-  if (!t) return;
+  if (!t || !t.available) return;   // never send TEST <id> for an unavailable test
   gTestRunning = true;
   document.getElementById('tres-name').textContent   = t.id + '.  ' + t.name;
   document.getElementById('tres-log').textContent    = '';
@@ -1936,6 +2001,100 @@ function testDone() {
   document.getElementById('tov-back').style.display = '';
 }
 
+// ── Rudder sweep (RAM test): dead-man hold + results ─────────────────────
+// While B3 is held in a sweep mode the browser sends "RAM HOLD" every 200 ms.
+// The bridge stops the sweep if no HOLD arrives for 1 s, so ANY way the
+// heartbeat stops (finger lifted, phone dropped/locked, tab hidden, page
+// closed, WiFi lost) ends the test.  RAM RELEASE just makes a clean lift-off
+// stop immediately instead of after the timeout.  The heartbeat must come from
+// the browser: the web remote server stays connected to the bridge even when
+// the phone is gone, so the bridge connection alone cannot detect that.
+var RAM_HOLD_PERIOD_MS = 200;
+
+function isRamMode() { return gMode === 'RAM_OFF' || gMode === 'RAM_ON'; }
+
+function ramHoldStart() {
+  if (gRamHoldTimer !== null) return;          // already holding
+  sendCmd('RAM HOLD');
+  gRamHoldTimer = setInterval(function() {
+    if (!isRamMode()) { ramHoldStop(); return; }  // sweep ended on the bridge
+    sendCmd('RAM HOLD');
+  }, RAM_HOLD_PERIOD_MS);
+}
+
+function ramHoldStop() {
+  if (gRamHoldTimer === null) return;
+  clearInterval(gRamHoldTimer);
+  gRamHoldTimer = null;
+  sendCmd('RAM RELEASE');
+}
+
+// Losing the page's attention is the same as letting go.
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) ramHoldStop();
+});
+window.addEventListener('pagehide', ramHoldStop);
+window.addEventListener('blur', ramHoldStop);
+
+function ramFmt(v, unit) { return (v === null || v === undefined) ? '  --' : String(v) + (unit || ''); }
+
+function showRamResult(r) {
+  ramHoldStop();
+  var lines = [];
+  var res = r.result || '?';
+  if (res === 'REFUSED' || res === 'DISARMED') {
+    lines.push((res === 'REFUSED' ? 'Not started: ' : 'Disarmed: ') + (r.reason || ''));
+  } else {
+    var P = (r.dirs && r.dirs.port) || {}, S = (r.dirs && r.dirs.stbd) || {};
+    var pad = function(t, n) { t = String(t); while (t.length < n) t = ' ' + t; return t; };
+    var row = function(lbl, k, unit) {
+      var l = lbl; while (l.length < 14) l += ' ';
+      return l + pad(ramFmt(P[k], unit), 9) + pad(ramFmt(S[k], unit), 9);
+    };
+    var finished = (res === 'PASS' || res === 'CHECK');
+    lines.push((finished ? 'Finished: ' : 'Stopped because: ') + (r.reason || '?'));
+    lines.push('Sweep \u00b1' + r.deg + '\u00b0 of \u00b1' + r.range_deg + '\u00b0  strokes ' +
+               r.strokes + '/' + r.strokes_req);
+    lines.push('');
+    lines.push('              TO PORT  TO STBD');
+    lines.push(row('Speed \u00b0/s',    'speed_dps'));
+    lines.push(row('Hard-over s',   'hard_over_s'));
+    lines.push(row('Lag ms',        'lag_ms'));
+    lines.push(row('Overshoot \u00b0',  'overshoot_max_deg'));
+    lines.push(row('End error \u00b0',  'end_err_deg'));
+    lines.push(row('Settle t/o',    'settle_timeouts'));
+    if (P.i_peak_a !== null && P.i_peak_a !== undefined) {
+      lines.push(row('Current pk A', 'i_peak_a'));
+      lines.push(row('Current avg A','i_mean_a'));
+    }
+    lines.push('');
+    lines.push('Port/stbd speed difference: ' + ramFmt(r.speed_asym_pct, '%'));
+    if (r.nano_angle) lines.push('Nano steered on: ' + r.nano_angle + ' rudder angle');
+    if (r.nano_deadband_deg !== undefined) {
+      lines.push('Steering deadband: \u00b1' + r.nano_deadband_deg + '\u00b0 (rudder stops anywhere');
+      lines.push('  within it of the target \u2014 shows as End error)');
+    }
+    lines.push('');
+    lines.push('Hard-over = est. full lock-to-lock time at the measured speed.');
+    lines.push('Overshoot = worst travel past the end target.');
+    lines.push('End error = average final position vs target (- = short).');
+  }
+  gTestOpen = true;
+  gTestRunning = false;
+  document.getElementById('tov').classList.remove('hidden');
+  document.getElementById('tov-title').textContent = 'Rudder Sweep';
+  document.getElementById('tov-hint').textContent  = 'Results (also written to the event log)';
+  document.getElementById('tcat-view').classList.add('hidden');
+  document.getElementById('tdet-view').classList.remove('active');
+  document.getElementById('tram-view').classList.remove('active');
+  document.getElementById('tres-view').classList.add('active');
+  document.getElementById('tres-b3').classList.remove('visible');
+  document.getElementById('tres-name').textContent = '1.  Rudder Sweep (commissioning)';
+  document.getElementById('tres-log').textContent = lines.join('\\n');
+  document.getElementById('tres-status').textContent = res;
+  document.getElementById('tov-back').style.display = '';
+}
+
 // Test button and modal event wiring
 document.getElementById('dbg-btn').addEventListener('click', toggleDebug);
 document.getElementById('dbg-btn').addEventListener('touchstart', function(e) {
@@ -1954,13 +2113,22 @@ document.getElementById('tram-no').addEventListener('click', showTestCatalogue);
 document.getElementById('tram-yes').addEventListener('click', function() {
   var rng = (gSettings && gSettings.vessel && gSettings.vessel.rudder_range_deg)
             ? gSettings.vessel.rudder_range_deg : 35;
-  var deg = parseInt(document.getElementById('ram-deg-inp').value, 10) || 10;
-  deg = Math.max(1, Math.min(deg, rng));
+  var deg = parseInt(document.getElementById('ram-deg-inp').value, 10) || 20;
+  deg = Math.max(5, Math.min(deg, rng));
+  var cyc = parseInt(document.getElementById('ram-cyc-inp').value, 10) || 3;
+  cyc = Math.max(1, Math.min(cyc, 10));
   gRamTestDeg = deg;
+  gRamCycles  = cyc;
   closeTestMenu();
-  // Switch toggle to auto position so B3 is labelled correctly
-  if (gTogglePos !== 'auto') handleToggleAction('auto');
-  sendCmd('RAM_SETUP ' + deg);
+  // Switch toggle to auto (reconnects if Settings left us OFF).  RAM_SETUP is
+  // chained AFTER MODE AUTO: two parallel fetches may arrive in either order,
+  // and a MODE command reaching the bridge after arming would disarm it.
+  var arm = function() { sendCmd('RAM_SETUP ' + deg + ' ' + cyc); };
+  if (gTogglePos !== 'auto') {
+    Promise.resolve(handleToggleAction('auto')).then(arm);
+  } else {
+    arm();
+  }
 });
 document.getElementById('tres-b3').addEventListener('click', function() {
   // Send B3 (BTN TOGGLE) — trigger for tests 5, 6, 7
@@ -2133,11 +2301,11 @@ function updateUI(d) {
   var modeRow = document.getElementById('oled-mode-row');
   var b3btn   = document.querySelector('.hw-btn.b3');
   if (gMode === 'RAM_ON') {
-    modeRow.innerHTML = '<b style="color:#ff6a00">RAM Test ON</b>';
-    if (b3btn) b3btn.textContent = 'Stop';
+    modeRow.innerHTML = '<b id="o-mode">SWEEP ' + (d.ram_prog || '') + '</b>';
+    if (b3btn) b3btn.textContent = 'HOLD';
   } else if (gMode === 'RAM_OFF') {
-    modeRow.innerHTML = '<b style="color:#e09000">RAM Test OFF</b>';
-    if (b3btn) b3btn.textContent = 'Run';
+    modeRow.innerHTML = '<b id="o-mode">HOLD B3</b>';
+    if (b3btn) b3btn.textContent = 'HOLD';
   } else if (gMode === 'AP' && gApOn) {
     modeRow.innerHTML = '<span class="ap-label">AP</span>\u00a0ON';
     if (b3btn) b3btn.textContent = 'Off';  // AP is engaged; pressing will disengage
@@ -2199,6 +2367,7 @@ function updateUI(d) {
   // Test result streaming — bridge relays TEST_LINE / TEST_DONE from Nano
   if (d._test_line) appendTestLine(d._test_line);
   if (d._test_done) testDone();
+  if (d._ram_result) showRamResult(d._ram_result);
 }
 
 function setConnected(ok) {
@@ -2227,7 +2396,8 @@ function setToggle(m) {
   if (m === 'auto') {
     btns[0].textContent = '-10';
     btns[1].textContent = '-1';
-    btns[2].textContent = gApOn ? 'Off' : 'On';  // reflect live AP state
+    // reflect live AP state; during a rudder sweep B3 is the dead-man HOLD button
+    btns[2].textContent = isRamMode() ? 'HOLD' : (gApOn ? 'Off' : 'On');
     btns[3].textContent = '+1';
     btns[4].textContent = '+10';
   } else if (m === 'remote') {
@@ -2249,6 +2419,7 @@ function jogRudder(deltaPct) {
   wheelAngle = -((gManualRudPct - 50) / 50 * MAX_DEG);
   wheelSvg.style.transform = 'rotate(' + wheelAngle + 'deg)';
   sendCmd('RUD ' + gManualRudPct.toFixed(1));
+  lastRudSentPct = gManualRudPct.toFixed(1);
 }
 
 // startJog: immediate first jog, then after 300 ms hold delay repeat at intervalMs.
@@ -2290,6 +2461,8 @@ function stopJog() {
     if (!el) return;
 
     function onPress() {
+      // Rudder sweep: B3 is the dead-man button (press = start/keep running).
+      if (cfg.cls === 'b3' && isRamMode()) { ramHoldStart(); return; }
       if (gMode === 'MANUAL') {
         if (cfg.delta === null) {
           // B3: centre rudder immediately
@@ -2298,6 +2471,7 @@ function stopJog() {
           wheelAngle    = 0;
           wheelSvg.style.transform = 'rotate(0deg)';
           sendCmd('RUD 50.0');
+          lastRudSentPct = '50.0';
         } else {
           startJog(cfg.delta, cfg.interval);
         }
@@ -2315,6 +2489,8 @@ function stopJog() {
     }
 
     function onRelease() {
+      // Rudder sweep dead-man: letting go of B3 stops the sweep (no-op otherwise).
+      if (cfg.cls === 'b3') ramHoldStop();
       // Only stop jog for directional buttons; centre has no hold behaviour
       if (gMode === 'MANUAL' && cfg.delta !== null) stopJog();
     }
@@ -2399,7 +2575,8 @@ function handleToggleAction(action) {
   if (action === 'auto') {
     // Enter AUTO-ready state; AP starts OFF.  User presses Go to engage/disengage AP.
     gTogglePos = 'auto';
-    if (gMode !== 'AP') sendCmd('MODE AUTO');
+    // Returns the fetch promise so callers can sequence after it (rudder sweep).
+    if (gMode !== 'AP') return sendCmd('MODE AUTO');
 
   } else if (action === 'off') {
     if (gApOn)                    sendCmd('BTN TOGGLE');  // disengage AP before disconnect
@@ -2432,6 +2609,7 @@ function handleToggleAction(action) {
       // ADC on MANUAL_MODE_CODE receipt, so any RUD at this point would override
       // that correct seed with a potentially sign-inverted value.
       gManualRudPct = gRdrPct !== null ? gRdrPct : 50.0;
+      lastRudSentPct = null;   // new REMOTE session: first wheel move always sends
       // Same sign as telemetry sync: gManualRudPct=100 (port) → CCW.
       wheelAngle = -(gManualRudPct - 50) / 50 * MAX_DEG;
       document.getElementById('wheel-svg').style.transform = 'rotate(' + wheelAngle + 'deg)';
@@ -2473,15 +2651,31 @@ function wheelMove(cx, cy) {
   var pct = (-wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;
   gManualRudPct = pct;  // keep button jog state in sync with wheel drag
 
-  // Send RUD at max 5 Hz
+  // Send RUD at max 5 Hz.  A (2026-10-02): a move inside the 200 ms window used
+  // to be dropped outright, so the rudder went to where the finger was up to
+  // 200 ms BEFORE it stopped.  Now the latest value is sent as soon as the
+  // window allows (trailing send), and again on release (wheelEnd).
   var now = Date.now();
   if (now - lastRudSend >= 200) {
-    sendCmd('RUD ' + pct.toFixed(1));
-    lastRudSend = now;
+    rudSendNow();
+  } else if (rudTrailTimer === null) {
+    rudTrailTimer = setTimeout(rudSendNow, 200 - (now - lastRudSend));
   }
 }
 
+// Send gManualRudPct now if it differs from what the rudder was last told.
+function rudSendNow() {
+  if (rudTrailTimer !== null) { clearTimeout(rudTrailTimer); rudTrailTimer = null; }
+  if (gMode !== 'MANUAL') return;
+  var v = gManualRudPct.toFixed(1);
+  if (v === lastRudSentPct) return;
+  sendCmd('RUD ' + v);
+  lastRudSentPct = v;
+  lastRudSend = Date.now();
+}
+
 function wheelEnd() {
+  if (isDragging) rudSendNow();   // final position on finger lift
   isDragging   = false;
   prevPtrAngle = null;
 }
@@ -2507,6 +2701,7 @@ window.addEventListener('touchend', function() { wheelEnd(); });
 // type: 'text'|'password'|'number'|'bool'|'enum'
 // onVal/offVal: stored value toggled by tapping the enum field.
 // dep: {id, val} — field hidden unless named field equals val.
+// def: value shown (and saved) when the stored settings do not have the field yet.
 var SF = [
   // Network
   {id:'ip_mode', sec:'network', type:'enum',     onVal:'static', offVal:'dhcp'},
@@ -2533,6 +2728,7 @@ var SF = [
   {id:'invert_clutch',          sec:'features', type:'bool'},
   {id:'invert_motor',           sec:'features', type:'bool'},
   {id:'remote_helm',            sec:'features', type:'bool'},
+  {id:'helm_wheel_deg',         sec:'features', type:'number', def:90, dep:{id:'remote_helm', val:'true'}},
   // Autopilot
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
   {id:'pgain',                  sec:'autopilot', type:'number'},
@@ -2587,6 +2783,8 @@ function sfBoolRender(fid, isOn) {
 function sfApplyToUI() {
   SF.forEach(function(f) {
     var v = sfGet(f);
+    // Field default (f.def) when the stored settings predate the field.
+    if ((v === undefined || v === null) && f.def !== undefined) { v = f.def; sfSet(f, v); }
     if (v === undefined || v === null) return;
     if (f.type === 'bool') {
       sfBoolRender(f.id, !!v);
@@ -2606,6 +2804,22 @@ function applyRemoteHelmSetting() {
   var enabled = !!(gSettings && gSettings.features && gSettings.features.remote_helm);
   var remBtn = document.querySelector('.mode-radio[data-action="remote"]');
   if (remBtn) remBtn.classList.toggle('disabled', !enabled);
+  applyHelmWheelSetting();
+}
+
+// Wheel travel for full rudder (±deg).  Missing/invalid -> default; clamped.
+// The wheel is re-drawn at the same RUDDER position, so changing the setting
+// never moves the rudder — it only changes how far the wheel turns per degree.
+function applyHelmWheelSetting() {
+  var v = parseFloat(gSettings && gSettings.features && gSettings.features.helm_wheel_deg);
+  if (!(v > 0)) v = HELM_WHEEL_DEFAULT;
+  v = Math.max(HELM_WHEEL_MIN, Math.min(HELM_WHEEL_MAX, v));
+  if (v === MAX_DEG) return;
+  var pct = (-wheelAngle + MAX_DEG) / (2 * MAX_DEG) * 100;   // current rudder pct shown
+  MAX_DEG = v;
+  wheelAngle = -(pct - 50) / 50 * MAX_DEG;
+  var ws = document.getElementById('wheel-svg');
+  if (ws) ws.style.transform = 'rotate(' + wheelAngle + 'deg)';
 }
 
 // Read text/number/password inputs back into gSettings.
@@ -2734,7 +2948,7 @@ document.querySelectorAll('.sf-bb').forEach(function(b) {
     var fid = b.dataset.boolid;
     var val = b.dataset.bval === 'true';
     var f = SF.find(function(x) { return x.id === fid; });
-    if (f) { sfSet(f, val); sfBoolRender(fid, val); }
+    if (f) { sfSet(f, val); sfBoolRender(fid, val); sfSyncVisibility(); }  // bool may gate dep rows
   });
 });
 

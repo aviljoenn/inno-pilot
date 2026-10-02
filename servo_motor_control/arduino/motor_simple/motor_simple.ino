@@ -30,11 +30,11 @@ enum ButtonID : uint8_t;
 // Meaning: MAJOR = hardware change, MINOR = software feature change, PATCH = patch / bug fix.
 // Bumped on EVERY merge of code to master, in all actively developed components at once
 // (see CLAUDE.md "Version sync").
-const char INNOPILOT_VERSION[] = "v3.0.2";
+const char INNOPILOT_VERSION[] = "v3.0.3";
 // Numeric form of INNOPILOT_VERSION: major*10000 + minor*100 + patch (v3.0.2 -> 30002).
 // Sent by the bridge in BRIDGE_VERSION_CODE (uint16) and compared for !VER MISMATCH!.
 // MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-const uint16_t INNOPILOT_VERSION_CODE = 30002;
+const uint16_t INNOPILOT_VERSION_CODE = 30003;
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -189,6 +189,17 @@ const uint8_t HBRIDGE_RPWM_PIN = 2;   // RPWM
 const uint8_t HBRIDGE_LPWM_PIN = 3;   // LPWM
 const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN (R_EN + L_EN tied together)
 
+// Last duty written to the EN pin.  ALL motor-duty writes go through motor_pwm()
+// so the pin-state telemetry can report EN from this value instead of calling
+// digitalRead(D9): on AVR, digitalRead() calls turnOffPWM() on a PWM pin, which
+// silently cancelled any duty other than 0/255 (found 2026-10-02 — the remote-
+// manual slow zone's 160 never reached the motor, so the rudder did not move).
+uint8_t g_motor_duty = 0;
+inline void motor_pwm(uint8_t duty) {
+  analogWrite(HBRIDGE_PWM_PIN, duty);
+  g_motor_duty = duty;
+}
+
 // Clutch pin. Default active-HIGH: HIGH = engaged, LOW = disengaged.
 // Set FEATURE_INVERT_CLUTCH to reverse for active-LOW relay wiring.
 const uint8_t CLUTCH_PIN       = 11;
@@ -227,6 +238,53 @@ int8_t manual_dir     = 0;      // -1 = Dir-B, +1 = Dir-A, 0 = none
 
 // Remote manual mode state (from Bridge via TCP)
 bool     remote_manual_active     = false;  // true when Bridge is in MANUAL mode
+bool     rm_seed_pending          = false;  // C: re-seed the target from the calibrated
+                                            // angle on MANUAL entry (cleared by any
+                                            // MANUAL_RUD_TARGET_CODE from the bridge)
+
+// ---- Local calibrated rudder angle ("B", 2026-10-02) ----
+// The remote-manual position loop used to steer on pilot_rudder_deg10: pypilot's
+// angle, computed from this Nano's own ADC but sent out at 5 Hz, converted by
+// pypilot (~220 ms behind) and relayed back at 5 Hz — ~0.3 s stale, i.e. ~2 deg
+// late at 6 deg/s, which caused the overshoot and forced a large deadband.
+// Now the bridge sends pypilot's OWN calibration as a quadratic and the Nano
+// evaluates it on its fresh ADC every loop.  pypilot remains the calibration
+// truth (CALIBRATION.md: the Nano does not invent rudder angles).
+//   pypilot:  u = adc/1023 - 0.5 ;  angle = scale*u + offset + nl*(m0-u)*(m1-u)
+//   bridge sends k2,k1,k0 already negated and x10 for this Nano axis (+ = stbd):
+//   local_deg10 = (k2*u + k1)*u + k0
+// Each float travels as two 16-bit words (LO, HI); COMMIT carries the uint16 sum
+// of the six words and applies them atomically.
+const uint8_t RCAL_K2_LO_CODE  = 0xC0;   // Bridge -> Nano
+const uint8_t RCAL_K2_HI_CODE  = 0xC1;
+const uint8_t RCAL_K1_LO_CODE  = 0xC2;
+const uint8_t RCAL_K1_HI_CODE  = 0xC3;
+const uint8_t RCAL_K0_LO_CODE  = 0xC4;
+const uint8_t RCAL_K0_HI_CODE  = 0xC5;
+const uint8_t RCAL_COMMIT_CODE = 0xC6;
+const uint8_t RCAL_STATUS_CODE = 0xC8;   // Nano -> Bridge: 0 none, 1 active, 2 rejected
+const uint8_t RCAL_ST_NONE = 0, RCAL_ST_ACTIVE = 1, RCAL_ST_REJECTED = 2;
+// Cross-check against pypilot's (lagged) angle: lag alone is ~0.4 s x 6 deg/s
+// = 2.4 deg, so > 5 deg for > 1 s means the local conversion is wrong (sign,
+// stale calibration) -> reject and fall back to pypilot's angle (old behaviour).
+const int16_t       RCAL_XCHECK_DEG10 = 50;
+const unsigned long RCAL_XCHECK_MS    = 1000UL;
+uint16_t rcal_words[6]     = {0, 0, 0, 0, 0, 0};  // staging (LO/HI per coefficient)
+uint16_t rcal_applied[6]   = {0, 0, 0, 0, 0, 0};  // words of the active calibration
+float    rcal_k[3]         = {0.0f, 0.0f, 0.0f};  // k2, k1, k0
+uint8_t  rcal_status       = RCAL_ST_NONE;
+unsigned long rcal_bad_since = 0;
+int16_t  local_rudder_deg10 = 0;                  // valid only when rcal_status == ACTIVE
+
+// RCAL_EVAL_BEGIN (extracted verbatim by the host-side unit test)
+int16_t rcal_eval_deg10(const float k[3], int adc) {
+  float u = (float)adc * (1.0f / 1023.0f) - 0.5f;   // multiply: avoids linking float divide
+  float d = (k[0] * u + k[1]) * u + k[2];
+  if (d >  32000.0f) d =  32000.0f;
+  if (d < -32000.0f) d = -32000.0f;
+  return (int16_t)(d >= 0.0f ? d + 0.5f : d - 0.5f);
+}
+// RCAL_EVAL_END
 uint16_t manual_rud_target_0_1000 = 500;    // remote rudder target 0=full Dir-A, 1000=full Dir-B
                                             // (canonical convention: 1000=port end, 0=stbd end;
                                             // matches web/bridge pct=100=port)
@@ -1515,7 +1573,7 @@ void update_motor_from_command() {
 
   // If in a fault state, don't drive the motor at all
   if (pi_fault || (flags & OVERTEMP_FAULT)) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1654,7 +1712,7 @@ void update_motor_from_command() {
     // not drive blind, so the motor is held off.  This means remote-manual steering
     // now depends on pypilot publishing rudder.angle (it always runs as a service).
     if (!pilot_limits_ok) {
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       last_drive_dir = 0;
@@ -1681,9 +1739,24 @@ void update_motor_from_command() {
     int16_t target_deg10 = (int16_t)(stbd_end_deg10 -
         span_deg10 * (int32_t)manual_rud_target_0_1000 / 1000);
 
-    // Position error (tenths deg): >0 => move toward STBD (increase pilot_rudder_deg10),
-    //                              <0 => move toward PORT (decrease pilot_rudder_deg10).
-    int16_t error     = target_deg10 - pilot_rudder_deg10;
+    // B: steer on the fresh local calibrated angle when it is active, else on
+    // pypilot's relayed angle (the pre-2026-10-02 behaviour).  Same axis/units.
+    int16_t rm_angle_deg10 = (rcal_status == RCAL_ST_ACTIVE) ? local_rudder_deg10
+                                                             : pilot_rudder_deg10;
+
+    // C: calibrated seed on MANUAL entry — target = where the rudder is now.
+    if (rm_seed_pending) {
+      int32_t t = ((int32_t)stbd_end_deg10 - rm_angle_deg10) * 1000L / span_deg10;
+      if (t < 0)    t = 0;
+      if (t > 1000) t = 1000;
+      manual_rud_target_0_1000 = (uint16_t)t;
+      target_deg10 = (int16_t)(stbd_end_deg10 - span_deg10 * t / 1000);
+      rm_seed_pending = false;
+    }
+
+    // Position error (tenths deg): >0 => move toward STBD (increase angle),
+    //                              <0 => move toward PORT (decrease angle).
+    int16_t error     = target_deg10 - rm_angle_deg10;
     int16_t abs_error = (error >= 0) ? error : -error;
 
     // Angle deadband from the operator deadband_pct (g_deadband = pct*10):
@@ -1691,10 +1764,18 @@ void update_motor_from_command() {
     int16_t REMOTE_DEADBAND = (int16_t)(span_deg10 * (int32_t)g_deadband / 1000);
     if (REMOTE_DEADBAND < 8) REMOTE_DEADBAND = 8;   // ~0.8 deg floor: avoid hunting
 
+    // Slow zone: originally reduced PWM within this band of target to limit
+    // overshoot.  Since 2026-10-02 RM_SLOW_PWM == 255, so it no longer changes
+    // the duty (kept so a tested reduced duty >= 180 could be reinstated).  Was:
     // Reduce PWM within this band of target to limit overshoot between the
     // ~5 Hz pilot position updates.
     int16_t SLOW_ZONE_DEG10 = (int16_t)(REMOTE_DEADBAND * 4);
-    const uint8_t RM_SLOW_PWM = 160;
+    // Full duty in the slow zone too (2026-10-02).  The hydraulic pump is ON/OFF
+    // only — the AP path uses MIN_DUTY == MAX_DUTY == 255 and notes any PWM
+    // experiment needs >= 180.  The old 160 was below that, and was also being
+    // cancelled by digitalRead(D9) (see motor_pwm()).  Stopping is handled by the
+    // reverse brake pulse + REMOTE_DEADBAND below, not by reduced duty.
+    const uint8_t RM_SLOW_PWM = 255;
 
     bool invert_motor = (feature_flags_2 & FEATURE2_INVERT_MOTOR) != 0;
 
@@ -1717,7 +1798,7 @@ void update_motor_from_command() {
         // Timed reverse pulse in progress — hold until duration expires
         if (now - rm_brake_start_ms >= rm_brake_dur_ms) {
           // Brake pulse complete — cut motor
-          analogWrite(HBRIDGE_PWM_PIN, 0);
+          motor_pwm(0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1735,7 +1816,7 @@ void update_motor_from_command() {
           // fall through to DRIVING below
         } else {
           // Motor off, hold position via hydraulic lock
-          analogWrite(HBRIDGE_PWM_PIN, 0);
+          motor_pwm(0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1755,8 +1836,12 @@ void update_motor_from_command() {
         // would drive into (axis: + = stbd = dira, - = port = dirb).  The over_*_end
         // terms are a convention-independent ABSOLUTE backstop: even if the steering
         // sign were wrong again, the motor can never be driven past a calibrated end.
-        bool over_stbd_end = (pilot_rudder_deg10 >= pilot_dira_lim_deg10);  // at/over + end
-        bool over_port_end = (pilot_rudder_deg10 <= pilot_dirb_lim_deg10);  // at/over - end
+        // Checked on BOTH angles (pypilot's and the local one): a wrong local
+        // conversion can never drive past an end pypilot says is reached.
+        bool over_stbd_end = (pilot_rudder_deg10 >= pilot_dira_lim_deg10) ||
+                             (rm_angle_deg10     >= pilot_dira_lim_deg10);  // at/over + end
+        bool over_port_end = (pilot_rudder_deg10 <= pilot_dirb_lim_deg10) ||
+                             (rm_angle_deg10     <= pilot_dirb_lim_deg10);  // at/over - end
         bool blocked_stbd = at_dira_pilot || over_stbd_end || dira_limit_switch_hit();
         bool blocked_port = at_dirb_pilot || over_port_end || dirb_limit_switch_hit();
         if (dir > 0 && blocked_stbd) dir = 0;
@@ -1764,7 +1849,7 @@ void update_motor_from_command() {
 
         if (dir == 0) {
           // Within deadband or at a limit — stop and hold.
-          analogWrite(HBRIDGE_PWM_PIN, 0);
+          motor_pwm(0);
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1780,7 +1865,7 @@ void update_motor_from_command() {
           bool rpwm_high = brake_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
           int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
           if (dd != last_drive_dir && last_drive_dir != 0) {
-            analogWrite(HBRIDGE_PWM_PIN, 0);                   // EN off before direction change
+            motor_pwm(0);                   // EN off before direction change
           }
           digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
@@ -1789,7 +1874,7 @@ void update_motor_from_command() {
           rm_brake_start_ms = now;
           rm_state          = RM_BRAKING;
           SET_MOTOR_REASON(MRSN_RM_BRAKE);                    // B26: record activation reason
-          analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? 255 : 0);
+          motor_pwm(clutch_settled ? 255 : 0);
           break;
         }
 
@@ -1800,14 +1885,14 @@ void update_motor_from_command() {
           bool rpwm_high = drive_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
           int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
           if (dd != last_drive_dir && last_drive_dir != 0) {
-            analogWrite(HBRIDGE_PWM_PIN, 0);                   // EN off before direction change
+            motor_pwm(0);                   // EN off before direction change
           }
           digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
           last_drive_dir = dd;
           SET_MOTOR_REASON(MRSN_RM_DRIVE);                    // B26: record activation reason
           uint8_t pwm = (abs_error <= SLOW_ZONE_DEG10) ? RM_SLOW_PWM : 255;
-          analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? pwm : 0);
+          motor_pwm(clutch_settled ? pwm : 0);
         }
         break;
       }
@@ -1823,7 +1908,7 @@ void update_motor_from_command() {
     // Respect limits
     if (manual_jog_dir < 0 && (at_dirb_end || at_dirb_pilot)) {
       // Trying to jog further to Dir-B, but at/near Dir-B end → stop
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1831,7 +1916,7 @@ void update_motor_from_command() {
     }
     if (manual_jog_dir > 0 && (at_dira_end || at_dira_pilot)) {
       // Trying to jog further to Dir-A, but at/near Dir-A end → stop
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1844,27 +1929,27 @@ void update_motor_from_command() {
       // Dir-A: increase ADC
       // Record activation reason: distinguish physical-button from delta-jog
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
-      if (last_drive_dir == -1) analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+      if (last_drive_dir == -1) motor_pwm(0);  // EN off before direction change
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, HIGH);
       last_drive_dir = +1;
     } else if (manual_jog_dir < 0) {
       // Dir-B: decrease ADC
       SET_MOTOR_REASON(manual_override ? MRSN_MANUAL_PHYS : MRSN_DELTA_JOG);  // B26
-      if (last_drive_dir == +1) analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+      if (last_drive_dir == +1) motor_pwm(0);  // EN off before direction change
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       digitalWrite(HBRIDGE_RPWM_PIN, HIGH);
       last_drive_dir = -1;
     } else {
       // No direction -> stop
-      analogWrite(HBRIDGE_PWM_PIN, 0);
+      motor_pwm(0);
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       return;
     }
 
-    analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? duty : 0);
+    motor_pwm(clutch_settled ? duty : 0);
     return;  // do not fall through to autopilot logic
   }
 
@@ -1872,7 +1957,7 @@ void update_motor_from_command() {
 
   // If AP is not active (remote ap.enabled false or Pi offline), don't drive motor
   if (!ap_active) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1883,7 +1968,7 @@ void update_motor_from_command() {
   // last_command_val: 0..2000, 1000 = stop
   // Deadband around neutral
   if (delta > -db && delta < db) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1893,14 +1978,14 @@ void update_motor_from_command() {
   // Don't drive further into soft limits.
   // Conv 1: delta > 0 = port (Dir-B); delta < 0 = stbd (Dir-A).
   if (delta > 0 && (at_dirb_end || at_dirb_pilot)) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
     return;
   }
   if (delta < 0 && (at_dira_end || at_dira_pilot)) {
-    analogWrite(HBRIDGE_PWM_PIN, 0);
+    motor_pwm(0);
     last_drive_dir = 0;
     digitalWrite(HBRIDGE_RPWM_PIN, LOW);
     digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1932,7 +2017,7 @@ void update_motor_from_command() {
   {
     int8_t ap_new_dir = (delta > 0) ? -1 : +1;
     if (ap_new_dir != last_drive_dir && last_drive_dir != 0) {
-      analogWrite(HBRIDGE_PWM_PIN, 0);  // EN off before direction change
+      motor_pwm(0);  // EN off before direction change
     }
     if (delta > 0) {
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
@@ -1944,7 +2029,7 @@ void update_motor_from_command() {
     last_drive_dir = ap_new_dir;
   }
 
-  analogWrite(HBRIDGE_PWM_PIN, clutch_settled ? duty : 0);
+  motor_pwm(clutch_settled ? duty : 0);
 }
 
 // Process one CRC-valid frame
@@ -2033,6 +2118,37 @@ void process_packet() {
       pilot_dira_lim_valid = true;
       break;
 
+    case RCAL_K2_LO_CODE: rcal_words[0] = value; break;
+    case RCAL_K2_HI_CODE: rcal_words[1] = value; break;
+    case RCAL_K1_LO_CODE: rcal_words[2] = value; break;
+    case RCAL_K1_HI_CODE: rcal_words[3] = value; break;
+    case RCAL_K0_LO_CODE: rcal_words[4] = value; break;
+    case RCAL_K0_HI_CODE: rcal_words[5] = value; break;
+    case RCAL_COMMIT_CODE: {
+      uint16_t sum = 0;
+      for (uint8_t i = 0; i < 6; i++) sum += rcal_words[i];
+      if (sum != value) break;                       // torn/corrupt set: ignore
+      bool same = true;
+      for (uint8_t i = 0; i < 6; i++) if (rcal_words[i] != rcal_applied[i]) same = false;
+      // A rejected calibration stays rejected when the SAME numbers are re-sent
+      // (the bridge re-sends periodically); only a changed calibration retries.
+      if (same && rcal_status == RCAL_ST_REJECTED) break;
+      float k[3];
+      memcpy(&k[0], &rcal_words[0], 4);
+      memcpy(&k[1], &rcal_words[2], 4);
+      memcpy(&k[2], &rcal_words[4], 4);
+      // NaN fails x == x; the range test also rejects +/-inf.
+      bool finite = true;
+      for (uint8_t i = 0; i < 3; i++)
+        if (!(k[i] == k[i]) || k[i] > 1.0e6f || k[i] < -1.0e6f) finite = false;
+      if (!finite) { rcal_status = RCAL_ST_NONE; break; }
+      memcpy(rcal_k, k, sizeof(rcal_k));
+      memcpy(rcal_applied, rcal_words, sizeof(rcal_applied));
+      rcal_status    = RCAL_ST_ACTIVE;
+      rcal_bad_since = 0;
+      break;
+    }
+
     case MANUAL_MODE_CODE:
       if (value != 0 && !remote_manual_active) {
         // Entering MANUAL: initialise speed estimator and brake state machine
@@ -2051,6 +2167,13 @@ void process_packet() {
           if (pos > 1000) pos = 1000;
           manual_rud_target_0_1000 = (uint16_t)pos;
         }
+        // C: the raw-ADC seed above assumes the pot spans the whole ADC (1..1022);
+        // the target is interpreted on the CALIBRATED axis, so unless the pot
+        // really spans the full ADC the seed is offset and the first wheel move
+        // jumps.  The position loop replaces it with a calibrated seed as soon as
+        // it has a trustworthy angle (rm_seed_pending), unless the bridge sends a
+        // target first.  The raw seed stays as the fallback.
+        rm_seed_pending = true;
       }
       remote_manual_active = (value != 0);
       if (!remote_manual_active) {
@@ -2062,6 +2185,7 @@ void process_packet() {
 
     case MANUAL_RUD_TARGET_CODE:
       manual_rud_target_0_1000 = value;
+      rm_seed_pending = false;            // an explicit target wins over the C seed
       break;
 
     case WARNING_CODE:
@@ -2158,7 +2282,7 @@ void setup() {
   pinMode(HBRIDGE_PWM_PIN, OUTPUT);
   digitalWrite(HBRIDGE_RPWM_PIN, LOW);
   digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-  analogWrite(HBRIDGE_PWM_PIN, 0);   // motor off
+  motor_pwm(0);   // motor off
 
   // Clutch — pre-load PORT latch with the disengaged level BEFORE enabling the
   // output driver so the pin never glitches to the engaged state even for one
@@ -2687,12 +2811,14 @@ if (!ap_engaged && !remote_manual_active) {
   // ---- H-bridge pin-state telemetry (on-change, debug diagnostics) ----
   // Sent whenever D2/D3/D9 change — lets the bridge log exact motor on/off
   // transitions and direction without needing external instrumentation.
-  // digitalRead() on D9 works correctly here because we only ever write
-  // analogWrite(D9, 0) or analogWrite(D9, 255) (MIN_DUTY == MAX_DUTY == 255).
+  // EN (D9) is reported from g_motor_duty, NOT digitalRead(D9): digitalRead()
+  // turns PWM off on a PWM pin, which cancelled every duty other than 0/255.
+  // (The old comment here assumed only 0/255 was ever written; the remote-
+  // manual slow zone later wrote 160.)  D2/D3 are plain digital outputs.
   // B26: also send MOTOR_REASON_CODE once when D9 transitions LOW->HIGH.
   {
     static uint8_t last_pin_state = 0xFF;  // 0xFF = invalid sentinel, forces first send
-    uint8_t ps = (uint8_t)((digitalRead(HBRIDGE_PWM_PIN)  ? 0x04 : 0)
+    uint8_t ps = (uint8_t)((g_motor_duty != 0              ? 0x04 : 0)
                           | (digitalRead(HBRIDGE_LPWM_PIN) ? 0x02 : 0)
                           | (digitalRead(HBRIDGE_RPWM_PIN) ? 0x01 : 0));
     if (ps != last_pin_state) {
@@ -2716,6 +2842,29 @@ if (!ap_engaged && !remote_manual_active) {
     unsigned long prof_t0 = micros();
     service_rudder_adc();
     prof_max(prof_rudder_max_us, micros() - prof_t0);
+  }
+
+  // B: local calibrated angle from the fresh ADC, cross-checked against
+  // pypilot's relayed angle while that is fresh.  Status changes go to the bridge.
+  {
+    if (rcal_status == RCAL_ST_ACTIVE) {
+      local_rudder_deg10 = rcal_eval_deg10(rcal_k, rudder_adc_smoothed);
+      unsigned long tnow = millis();
+      bool pp_fresh = pi_ever_online && pilot_rudder_valid &&
+                      (tnow - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
+      int16_t diff = local_rudder_deg10 - pilot_rudder_deg10;
+      if (pp_fresh && (diff > RCAL_XCHECK_DEG10 || diff < -RCAL_XCHECK_DEG10)) {
+        if (rcal_bad_since == 0) rcal_bad_since = tnow ? tnow : 1;
+        else if (tnow - rcal_bad_since >= RCAL_XCHECK_MS) rcal_status = RCAL_ST_REJECTED;
+      } else {
+        rcal_bad_since = 0;
+      }
+    }
+    static uint8_t rcal_status_sent = 0xFF;   // 0xFF forces the first report
+    if (rcal_status != rcal_status_sent) {
+      send_frame(RCAL_STATUS_CODE, rcal_status);
+      rcal_status_sent = rcal_status;
+    }
   }
 
   static unsigned long last_draw = 0;

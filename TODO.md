@@ -89,6 +89,27 @@ shrink by storing the sensor's ROM address instead of index lookup. Soft-float i
 ~750 B+, but converting the ADC/calibration maths to fixed-point risks the
 hand-calibrated constants — rank it last.
 
+## [MEDIUM] Bridge flags a false RUDDER STALL on entering REMOTE with the rudder off-centre
+
+`MODE MANUAL` sets `bstate.manual_rud_target = 500` as a placeholder (the Nano seeds
+its real target from its own ADC and holds still). Until the first `RUD` arrives,
+the bridge's stall check compares that placeholder with the actual rudder position,
+sees a "commanded" move that never happens, and after ~1 s raises RUDDER_STALL
+("RUDDER: NOT MOVING" on the remote). Reproduced in the v3.0.3 simulator
+(`MODE MANUAL` with rudder at −9.6°). Pre-existing; found while testing the rudder
+sweep. Fix direction: seed `manual_rud_target` from the current rudder_pct on entry,
+or skip stall checks in MANUAL until the first `RUD`.
+
+## [LOW] Hardware tests 2–9: bench-firmware integration (greyed out since v3.0.3)
+
+They need `pwm_test.ino` plus a run-time protocol it does not have: a `TEST <id>`
+dispatcher and `TEST_LINE`/`TEST_DONE` output, instead of compile-time `#define`
+mode selection. Flip `NANO_TEST_PROTOCOL_SUPPORTED` in the bridge and set
+`available: true` in the web remote's `TESTS` list once it exists. Before reviving
+any of them, each must name the setting or metric it feeds (or be dropped) —
+several overlap (overshoot, burst, fine-pulse all characterise Nano braking).
+Also add a `test_mode` timeout so a missing `TEST_DONE` cannot latch the relay.
+
 ## [MEDIUM] Web remote: rudder display still lags ~220 ms via pypilot (option 2a)
 
 **Status:** parked (2026-10-01). v3.0.2 fixed the SSE flood and stair-stepped rudder bar;
