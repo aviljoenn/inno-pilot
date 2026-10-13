@@ -62,6 +62,53 @@ When tripped:
 
 ---
 
+## 2b) Rudder sweep — commissioning measurement (v3.0.3+)
+Web remote: switch to **OFF** → Settings → Hardware Tests → **1. Rudder Sweep**.
+
+**Prerequisites (do these first):** rudder calibration (section 2) and the port/stbd
+rudder limits in Settings. The sweep uses pypilot's calibrated angle and stays inside
+the limits; with a wrong calibration it measures nonsense.
+
+**Purpose:** confirm the steering is fit for autopilot use and measure it. Not an
+endurance test — it cannot run unattended.
+
+**Running it**
+1. Choose amplitude (± degrees each side of centre) and cycles (1–10), press PROCEED.
+   The OLED shows `HOLD B3`.
+2. Press and **hold B3** for the whole run (dead-man). Letting go, locking/dropping the
+   phone, switching apps, closing the page or losing WiFi stops it where it is (it never
+   drives back to centre by itself). The Nano's STOP or any helm button also stops it.
+3. The results screen appears at the end; the same summary is in the bridge journal
+   (`journalctl -u inno-pilot-bridge | grep "RAM sweep"`).
+
+**Minimum amplitude depends on the deadband setting.** The Nano stops anywhere within
+`deadband_pct` × full span of a target (10% on a ±30° rudder = ±6°), so the sweep needs
+at least deadband + 5° and refuses smaller sweeps with that explanation.
+
+**Reading the results** (per direction, to port / to stbd)
+| Field | Meaning | Feeds |
+|---|---|---|
+| Speed °/s | timed over the central 60% of the travel actually achieved | autopilot expectations; port/stbd balance |
+| Hard-over s | estimated full lock-to-lock time at that speed | compare with your drive's spec |
+| Lag ms | target sent → rudder starts moving | play / air in the hydraulics |
+| Overshoot ° | worst travel past the target | braking, position tolerance |
+| End error ° | average final position vs target (− = short) | position tolerance (`deadband_pct`) |
+| Settle t/o | strokes that never came to rest | hunting — tolerance too small |
+| Current A | peak / mean while driving (only with a current sensor) | future max-current setting |
+| Speed difference % | port vs stbd speed | unbalanced ram, leak, air |
+
+The Nano drives the motor at full duty all the way to its brake/deadband point (since
+v3.0.3 — the earlier reduced-power "slow zone" never actually reached the motor), so the
+speeds are full-power figures.
+
+PASS = all cycles completed and every stroke settled; CHECK = completed but some
+strokes did not settle; STOPPED = ended early (reason shown).
+
+Hardware Tests 2–9 are greyed out: they need the bench firmware `pwm_test.ino` and a
+protocol it does not have yet (see `TODO.md`).
+
+---
+
 ## 3) Voltage calibration
 ### A0: main supply voltage
 - adjust `VOLTAGE_SCALE` so OLED Vin matches multimeter at the supply input

@@ -324,6 +324,48 @@ is currently silent.
 
 ---
 
+## Rudder sweep (Hardware Test 1): attended-only INVARIANTS
+
+The sweep (`RAM_SETUP` / `RAM HOLD` / `RAM RELEASE`, bridge `ram_*` functions) moves the
+rudder under software control. Agreed with the user 2026-10-01: **no unattended motor
+testing, ever** — no endurance tests. Keep all of these true:
+
+- **Dead-man from the browser.** The page sends `RAM HOLD` every 200 ms while B3 is held;
+  the bridge stops after `RAM_HOLD_TIMEOUT_S` (1 s) without one. The heartbeat must
+  originate in the browser — the web remote server stays connected to the bridge when
+  the phone is gone, so the bridge connection alone cannot detect a dropped phone.
+- **One exit path:** every stop goes through `ram_test_abort()`. Adding a new way for a
+  remote/Nano/mode to take control? Make it call that first. (The Nano's STOP used to be
+  silently overridden within 200 ms because one path cleared `mode` but not
+  `ram_test_running`.)
+- **Never auto-centre on stop** — that is motion with nobody holding the button.
+- **Release ends the test**; a later HOLD must not resume it (re-arm from Settings).
+- **Do not put the sweep back on the generic stall detector.** Its 2°/s criterion is
+  a speed rule; the sweep has its own speed-independent jam check (< 0.5° progress in
+  2 s while driving). Its "arrived" band must include the Nano's deadband
+  (`ram_nano_deadband_deg()`), which is `deadband_pct` × full span — ±6° on Dyason.
+  Found on the first boat run.
+
+## Nano: never `digitalRead()` a PWM pin — use `motor_pwm()` for D9
+
+On AVR, `digitalRead()` calls `turnOffPWM()` on a PWM-capable pin. The pin-state
+telemetry used to `digitalRead(D9)` every loop, which silently cancelled any EN duty
+other than 0/255 — the remote-manual slow zone's `analogWrite(D9, 160)` never reached
+the motor, so REMOTE steering and the sweep could not start the rudder near a target
+(found on Dyason's second sweep, 2026-10-02). Since then every EN write goes through
+`motor_pwm()`, which records `g_motor_duty`, and telemetry reports EN from that.
+**Never write `analogWrite(HBRIDGE_PWM_PIN, …)` directly and never `digitalRead` D9.**
+The pump is on/off: all paths now drive 255; any future reduced duty must be ≥ 180
+(firmware note) and tested on the boat.
+- Every test must have a stated purpose: a setting/metric it feeds, or a safety/
+  reliability check (see `TODO.md` "Settings & commissioning redesign").
+
+Testing changes here: a simulator that runs the real bridge `main()` against a
+simulated Nano (deadband, slow zone, lag) + stub pypilot lives outside the repo at
+`~/inno-pilot-sweep-sim-2026-10-02/` (README inside), including a Dyason profile.
+
+---
+
 ## Version sync: the bump rule, and the constants to check
 
 **The rule (agreed with the user 2026-10-01):**

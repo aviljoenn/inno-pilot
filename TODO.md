@@ -1,5 +1,56 @@
 # TODO / Backlog
 
+## [HIGH PRIORITY] Rudder limits are not enforced while AP or REMOTE is steering (safety)
+
+**Status:** found 2026-10-02 during the settings review, not started.
+
+`rudder_limit_port_pct` / `rudder_limit_stbd_pct` (Settings) are only honoured by the
+bridge's NUDGE and the rudder sweep. In AP and REMOTE the Nano stops only at
+±`rudder_range` (`pilot_dira_lim_deg10` / `pilot_dirb_lim_deg10` come from pypilot's
+`rudder.range`), and the Nano never reads the limit bytes the bridge writes into its
+EEPROM. So e.g. Dyason's 80/20 limits protect nothing when pypilot drives.
+Fix direction: enforce the soft limits on the Nano in every mode (it already has the
+limit/hysteresis machinery for the pilot range), and send them in degrees.
+
+## [MEDIUM] Settings & commissioning redesign
+
+**Status:** discussed with the user 2026-10-02, not started. Two purposes for every
+test: (1) find the right setting values for this installation, (2) prove hardware +
+settings work reliably and safely. Every test must name the setting or check it feeds.
+
+Findings (verified in code):
+- `pgain` and `off_course_alarm_deg` are stored and written to the Nano EEPROM but
+  **never read anywhere** — dead settings. The real heading gains are pypilot's
+  (`ap.pilot.*`), not exposed in Inno-Pilot's UI.
+- `deadband_pct` does three jobs in different units: Nano command threshold (% of
+  command range), REMOTE/sweep position tolerance (% of full span — ±6° on Dyason at
+  10%), and the bridge stall check. One value cannot suit all three.
+- Rudder limits not enforced in AP/REMOTE (see HIGH item above).
+- Rudder calibration (offset/scale/nonlinearity/range) lives only in pypilot's web UI
+  (port 8000); `rudder_range` is stored twice (Inno-Pilot settings + pypilot) and synced.
+
+Proposed commissioning order (each step depends on the ones before):
+0. Wiring declarations (sensors present, invert_motor, invert_clutch, limit switches) —
+   check: jog moves the way the button says; clutch engages/releases.
+1. Rudder sensor calibration — check: 0° at centre, correct sign both ways.
+2. End stops + soft limits a few degrees inside them — check: limit holds in EVERY mode.
+3. Motor protection: max current from the sweep's measured peak (needs current sensor).
+4. Position tolerance tuned with the rudder sweep (end error, overshoot, no hunting).
+5. Rudder speed / hard-over at full power (needs a full-power drive mode — the sweep's
+   position mode slows near target and can only flag it).
+6. Compass calibration; re-check with the motor running.
+7. Heading gains at sea (pypilot); then the off-course alarm.
+Then reliability/safety verification: STOP from every source, limits in AP, loss of
+remote / pypilot (open gap, see memory/bridge failsafe) / Nano, sea trial.
+
+Proposed settings changes: soft limits in degrees and enforced everywhere; split
+`deadband_pct` into a position tolerance (°) and a command threshold; replace `pgain`
+with one or two real pypilot gains in plain words; implement or remove the off-course
+alarm; add max motor current; move comms thresholds / ping interval to Advanced; bring
+rudder calibration into Inno-Pilot; add a "commissioned" state so AP will not engage
+until steps 0–4 have passed. The rudder sweep should then also refuse to run before
+steps 1–2 are done. Its deadband lookup is isolated in `ram_nano_deadband_deg()`.
+
 ## [HIGH PRIORITY] Proper SignalK integration design — two operating scenarios
 
 **Status:** parked, not started (2026-09-17).
@@ -88,6 +139,27 @@ Lower down: `OneWire::search` (256 B) + `DallasTemperature::isConnected` (228 B)
 shrink by storing the sensor's ROM address instead of index lookup. Soft-float is
 ~750 B+, but converting the ADC/calibration maths to fixed-point risks the
 hand-calibrated constants — rank it last.
+
+## [MEDIUM] Bridge flags a false RUDDER STALL on entering REMOTE with the rudder off-centre
+
+`MODE MANUAL` sets `bstate.manual_rud_target = 500` as a placeholder (the Nano seeds
+its real target from its own ADC and holds still). Until the first `RUD` arrives,
+the bridge's stall check compares that placeholder with the actual rudder position,
+sees a "commanded" move that never happens, and after ~1 s raises RUDDER_STALL
+("RUDDER: NOT MOVING" on the remote). Reproduced in the v3.0.3 simulator
+(`MODE MANUAL` with rudder at −9.6°). Pre-existing; found while testing the rudder
+sweep. Fix direction: seed `manual_rud_target` from the current rudder_pct on entry,
+or skip stall checks in MANUAL until the first `RUD`.
+
+## [LOW] Hardware tests 2–9: bench-firmware integration (greyed out since v3.0.3)
+
+They need `pwm_test.ino` plus a run-time protocol it does not have: a `TEST <id>`
+dispatcher and `TEST_LINE`/`TEST_DONE` output, instead of compile-time `#define`
+mode selection. Flip `NANO_TEST_PROTOCOL_SUPPORTED` in the bridge and set
+`available: true` in the web remote's `TESTS` list once it exists. Before reviving
+any of them, each must name the setting or metric it feeds (or be dropped) —
+several overlap (overshoot, burst, fine-pulse all characterise Nano braking).
+Also add a `test_mode` timeout so a missing `TEST_DONE` cannot latch the relay.
 
 ## [MEDIUM] Web remote: rudder display still lags ~220 ms via pypilot (option 2a)
 
