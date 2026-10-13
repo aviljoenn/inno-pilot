@@ -10,6 +10,19 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.1.0] — 2026-10-13
+
+Minor (feature) release. Bumped across all actively developed components (Nano, bridge,
+web remote). The paused ESP32 remote firmware (v1.3.3_B3) and its OTA binary are
+deliberately not bumped.
+
+### Added
+- Attended rudder sweep with measurements (Hardware Test 1); Hardware tests 2-9 greyed out
+  (PR #85, first shipped on Dyason as v3.0.3 from the PR branch).
+
+### Fixed
+- Latent `NameError` in vendored pypilot `gps_filter.py` (missing `import datetime`, PR #80).
+
 ## [v3.0.3] — 2026-10-01
 
 Patch release. Bumped across all actively developed components (Nano, bridge, web
