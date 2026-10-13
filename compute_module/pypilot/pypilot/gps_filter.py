@@ -15,6 +15,11 @@
 import os
 import multiprocessing
 import math
+# Required by the world-magnetic-model declination path below (datetime.date.today().year).
+# Upstream omitted this; the NameError was dormant only because that path needs wmm2020
+# installed AND gps.filtered.enabled true. Neither `from values import *` nor
+# `from resolv import *` supplies the name, so do not rely on them for it.
+import datetime
 
 from values import *
 from resolv import *
