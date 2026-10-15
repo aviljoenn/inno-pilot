@@ -10,6 +10,22 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.2.0] — 2026-10-15
+
+Minor (feature) release. Bumped across all actively developed components (Nano, bridge,
+web remote); the Nano and bridge have no code change. The paused ESP32 remote firmware
+(v1.3.3_B3) and its OTA binary are deliberately not bumped. First release for
+Inno-Pilot-Rosa (the unit formerly called Dyason).
+
+### Changed
+- Web remote Settings split into **SETUP WIZARDS** (Startup, Dock-Side, Sea Trial —
+  placeholders, "COMING SOON") and **ADVANCED SETTINGS** (all existing settings,
+  collapsed by default). Saving is unchanged.
+- 14 settings that are stored but not acted on by the Pi or the Nano are greyed out,
+  locked and labelled "(NOT USED)": network block, Wi-Fi SSID/key, vessel type, P-Gain,
+  off-course alarm, auto-disengage, comms WARN/CRIT. See the dead settings register
+  in TODO.md.
+
 ## [v3.1.0] — 2026-10-13
 
 Minor (feature) release. Bumped across all actively developed components (Nano, bridge,
