@@ -65,6 +65,7 @@ const uint8_t WARNING_CODE           = 0xEA; // warning subtype
 const uint8_t WARN_NONE              = 0;
 const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote not in MANUAL
 const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
+const uint8_t WARN_SILENCE           = 3;    // remote STOP: silence every alarm (v3.3.0)
 // Nano->Bridge: buzzer state reporting
 const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
 
@@ -148,6 +149,7 @@ bool     pilot_command_valid = false;
 uint16_t pilot_command_deg10 = 0;
 
 bool     pilot_rudder_valid  = false;
+unsigned long pilot_rudder_ms = 0;   // when PILOT_RUDDER_CODE last arrived (cross-check freshness)
 int16_t  pilot_rudder_deg10  = 0;
 
 // Rudder limits from pypilot (tenths of degrees)
@@ -2170,6 +2172,7 @@ void process_packet() {
     case PILOT_RUDDER_CODE:
       pilot_rudder_deg10 = (int16_t)value; // interpret two's complement
       pilot_rudder_valid = true;
+      pilot_rudder_ms    = millis();
       break;
 
     case PILOT_RUDDER_DIRB_LIM_CODE:
@@ -2274,6 +2277,17 @@ void process_packet() {
         steer_loss_active      = false;
         steer_loss_silenced    = false;
         ap_pressed_warn_active = false;
+      } else if ((uint8_t)value == WARN_SILENCE) {
+        // Remote STOP (web page) = the silence half of the physical STOP button.
+        // Units without helm buttons (e.g. Inno-Pilot-Rosa) had no other way to
+        // silence an alarm: found on the 2026-10-15 bench test (STEER LOSS buzzer).
+        // Same flags as the PTM edge below; pi_fault_alarm_silenced resets itself
+        // once all hardware faults have cleared.
+        steer_loss_active       = false;
+        steer_loss_silenced     = false;
+        comms_fault_silenced    = true;
+        pi_fault_alarm_silenced = true;
+        ap_pressed_warn_active  = false;
       }
       break;
 
@@ -2925,8 +2939,13 @@ if (!ap_engaged && !remote_manual_active) {
     if (rcal_status == RCAL_ST_ACTIVE) {
       local_rudder_deg10 = rcal_eval_deg10(rcal_k, rudder_adc_smoothed);
       unsigned long tnow = millis();
+      // Fresh = the relayed angle ITSELF is recent.  Any Pi frame (HELLO) used to
+      // count, so a frozen pypilot angle kept "fresh" and the check latched a
+      // rejection (bench test 2026-10-15).  The bridge sends it at 5 Hz and stops
+      // when pypilot's stream goes quiet.
       bool pp_fresh = pi_ever_online && pilot_rudder_valid &&
-                      (tnow - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
+                      (tnow - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS) &&
+                      (tnow - pilot_rudder_ms <= 600UL);
       int16_t diff = local_rudder_deg10 - pilot_rudder_deg10;
       if (pp_fresh && (diff > RCAL_XCHECK_DEG10 || diff < -RCAL_XCHECK_DEG10)) {
         if (rcal_bad_since == 0) rcal_bad_since = tnow ? tnow : 1;

@@ -44,6 +44,20 @@ deliberately not bumped.
 - Not yet: the soft limits are not enforced while AP or REMOTE steer (TODO.md HIGH item);
   "limits set" is a precondition for motion, not yet a bound in every mode.
 
+### Fixed after the Inno-Pilot-Rosa bench test (2026-10-15)
+- **Web STOP silences the Nano's alarms** (new `WARNING_CODE` value 3), like the Nano's STOP
+  button — units without helm buttons could not stop a STEER LOSS buzzer. Web STOP also
+  ends a running jog.
+- **Bridge now detects pypilot dying.** pypilot's client never raises on disconnect, so the
+  immediate "pypilot connection lost" stop never fired on hardware (the Nano's 1.5 s
+  watchdog caught it instead). The connection state now comes from the client.
+- **Jog stops before the soft limit, not after**: it allows for its speed × 0.5 s (pypilot
+  angle lag + coast). Measured overshoot before: up to 2.2° at detection, 0.8° short of the
+  stop. The log reports where the rudder settled, for tuning.
+- **No stale rudder angle to the Nano**: when pypilot hangs, the bridge stops relaying its
+  frozen angle, and the Nano's cross-check only trusts a relayed angle under 0.6 s old —
+  a hang no longer latches the Nano off its local angle.
+
 ### Safety (stop latch, dead-men, failsafe)
 - **Nano STOP is now one press, always a full stop, and latched** (`motor_simple.ino`). It
   used to be two-press while an alarm sounded (first press only silenced and left the AP

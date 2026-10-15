@@ -177,6 +177,7 @@ WARNING_CODE               = 0xEA  # warning type to display/beep on Nano
 # Warning subtypes sent with WARNING_CODE
 WARN_NONE        = 0
 WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
+WARN_SILENCE     = 3   # remote STOP: Nano silences every alarm (like its own STOP button)
 
 # Nano -> Bridge telemetry / events
 PIN_STATE_CODE    = 0xE1  # H-bridge pin state change: bits [2]=D9/EN, [1]=D3/LPWM, [0]=D2/RPWM
@@ -238,6 +239,20 @@ BTN_EVT_NAMES = {BTN_EVT_MINUS10: "-10", BTN_EVT_MINUS1: "-1", BTN_EVT_TOGGLE: "
 # ---------------------------------------------------------------------------
 REMOTE_ALIVE_TIMEOUT_S = 1.5   # page sends ALIVE every 0.4 s while in REMOTE
 NUDGE_ALIVE_TIMEOUT_S  = 0.8   # page sends NUDGE HOLD every 0.2 s while held
+
+# Jog soft-limit lead (bench test 2026-10-15): the bridge sees pypilot's rudder angle
+# ~0.2-0.4 s late (5 Hz updates + filtering) and the rudder coasts after the motor
+# stops, so stopping AT the limit ran 2.2 deg past it (0.8 deg short of the stop).
+# The jog now stops when angle + speed * lead reaches the limit.  Tune on the boat:
+# "NUDGE ... settled at" in the log shows where the rudder actually came to rest.
+NUDGE_LIMIT_LEAD_S     = 0.5
+NUDGE_SETTLE_LOG_S     = 1.5   # log the resting angle this long after a limit stop
+
+# pypilot's servo stream (COMMAND/DISENGAGE frames on the PTY) runs at >= 5 Hz in
+# every mode.  Silent for this long = pypilot hung: its rudder angle is stale and is
+# no longer relayed to the Nano (whose cross-check would otherwise latch a rejection
+# against a frozen angle — bench test 2026-10-15).
+PP_STREAM_STALE_S      = 1.0
 
 # Skipper alerts the bridge raises itself (telemetry "WARN <code>"; bare "WARN" = none).
 ALERT_STEER_LOSS = "STEER_LOSS"   # REMOTE steering stopped: phone/link lost
@@ -668,6 +683,12 @@ class BridgeState:
     nudge_was_idle:        bool = False      # True if mode was IDLE when nudge was triggered
     nudge_last_sent:      float = 0.0       # monotonic time of last synthetic COMMAND frame sent
     nudge_alive_last:     float = 0.0       # monotonic time of the last NUDGE start/HOLD from the page
+    nudge_prev_angle: Optional[float] = None  # jog speed estimate (soft-limit lead)
+    nudge_prev_t:         float = 0.0
+    nudge_speed:          float = 0.0       # deg/s, + = port (pypilot convention)
+    nudge_settle_at:      float = 0.0       # when to log the resting angle after a limit stop
+    nudge_settle_lim:     float = 0.0
+    pp_frame_last:        float = 0.0       # monotonic time of the last valid frame FROM pypilot's servo
     # REMOTE dead-man (see REMOTE_ALIVE_TIMEOUT_S)
     manual_alive_last:    float = 0.0       # monotonic time of the last ALIVE in REMOTE
     manual_hb_seen:        bool = False     # client sent ALIVE this REMOTE session -> enforce
@@ -745,7 +766,7 @@ def pypilot_worker(
             client.watch('rudder.scale', True)    # calibration -> Nano local angle
             client.watch('rudder.offset', True)
             client.watch('rudder.nonlinearity', True)
-            log_pp.info("Connected to pypilot")
+            log_pp.info("pypilot client started (127.0.0.1) — connects on first poll")
 
             while True:
                 # Drain outbound set() queue before blocking on receive()
@@ -760,8 +781,23 @@ def pypilot_worker(
                 # Sleep to yield CPU back to main thread on single-core Pi Zero
                 time.sleep(0.01)
 
+                # Connection state from the client itself.  pypilotClient never
+                # raises when pypilot goes away: it closes the socket
+                # (client.connection = False) and quietly reconnects on later
+                # polls, re-sending our watches.  This used to be "connected = True"
+                # on every pass, so a dead pypilot looked alive and the bridge's
+                # "pypilot connection lost" stop never fired (only the Nano's 1.5 s
+                # watchdog caught it — bench test on Inno-Pilot-Rosa, 2026-10-15).
+                conn_now = bool(client.connection)
                 with lock:
-                    state.connected = True
+                    was = state.connected
+                    state.connected = conn_now
+                if was and not conn_now:
+                    log_pp.warning("Connection lost: pypilot closed the connection — reconnecting")
+                elif conn_now and not was:
+                    log_pp.info("pypilot connection up")
+
+                with lock:
                     if "ap.heading_command" in msgs:
                         try:
                             state.heading_cmd = float(msgs["ap.heading_command"])
@@ -1988,6 +2024,11 @@ def process_remote_line(
             log.info("OTA offered to remote at %s", ota_url)
 
     elif cmd == "ESTOP":
+        # Remote STOP = the Nano's STOP button: full stop AND silence every alarm.
+        # Units without helm buttons have no other way to silence the Nano buzzer
+        # (bench test 2026-10-15: STEER LOSS alarm could not be stopped).
+        send_nano_frame(nano, WARNING_CODE, WARN_SILENCE)
+        nudge_stop(nano, bstate, "remote ESTOP")   # STOP is unconditional: ends a jog too
         set_q.put(("ap.enabled", False))
         with plock:
             pstate.ap_enabled = False
@@ -2330,6 +2371,8 @@ def process_remote_line(
         bstate.nudge_last_sent  = 0.0  # force immediate first frame
         bstate.nudge_alive_last = now_m
         bstate.nudge_until      = now_m + 10.0  # last-resort cap
+        bstate.nudge_prev_angle = None          # fresh speed estimate for the limit lead
+        bstate.nudge_speed      = 0.0
         log.info("NUDGE %s started: cmd_val=%d, was_idle=%s, dead-man %.1f s, cap 10 s",
                  direction, cmd_val, bstate.nudge_was_idle, NUDGE_ALIVE_TIMEOUT_S)
 
@@ -2765,7 +2808,8 @@ def main() -> None:
                 send_nano_frame(nano, PILOT_HEADING_CODE, enc_deg10_u16(heading))
             if heading_cmd is not None:
                 send_nano_frame(nano, PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd))
-            if rudder_angle is not None:
+            pp_angle_fresh = pp_connected and (now - bstate.pp_frame_last) <= PP_STREAM_STALE_S
+            if rudder_angle is not None and pp_angle_fresh:
                 # Coord-system bridge (see PILOT_RUDDER_CODE comment): negate to
                 # translate pypilot's canonical positive=port into the Nano's
                 # internal positive=Dir-A (high ADC) degree axis.
@@ -2925,6 +2969,12 @@ def main() -> None:
         # ================================================================
 
         # ---- Nudge: expiry, limit-check, and frame injection ----
+        if bstate.nudge_settle_at and now >= bstate.nudge_settle_at:
+            bstate.nudge_settle_at = 0.0
+            if rudder_angle is not None:
+                log.info("NUDGE limit stop settled at %.1f° (limit %.1f°, %+.1f° past)",
+                         rudder_angle, bstate.nudge_settle_lim,
+                         abs(rudder_angle) - abs(bstate.nudge_settle_lim))
         nudge_active = bstate.nudge_until > 0.0
         if nudge_active:
             if now - bstate.nudge_alive_last > NUDGE_ALIVE_TIMEOUT_S:
@@ -2941,21 +2991,36 @@ def main() -> None:
                 # starts while they are valid.  (They replaced the old
                 # rudder_limit_port_pct / rudder_limit_stbd_pct settings.)
                 if rudder_angle is not None and bstate.limits_ok:
+                    # Speed estimate from pypilot's angle updates (smoothed), used to
+                    # stop early by speed * NUDGE_LIMIT_LEAD_S (lag + coast).
+                    if bstate.nudge_prev_angle is None:
+                        bstate.nudge_prev_angle, bstate.nudge_prev_t = rudder_angle, now
+                    elif rudder_angle != bstate.nudge_prev_angle and now > bstate.nudge_prev_t:
+                        v = (rudder_angle - bstate.nudge_prev_angle) / (now - bstate.nudge_prev_t)
+                        bstate.nudge_speed = 0.5 * bstate.nudge_speed + 0.5 * v
+                        bstate.nudge_prev_angle, bstate.nudge_prev_t = rudder_angle, now
                     lim = bstate.rudder_limits
                     limit_hit = False
                     if bstate.nudge_cmd_val == 2000:   # port nudge (conv 1: larger = port)
                         port_lim = float(lim["port_limit_deg"])   # pypilot angle: + = port
-                        if rudder_angle >= port_lim:
+                        ahead = rudder_angle + max(0.0, bstate.nudge_speed) * NUDGE_LIMIT_LEAD_S
+                        if ahead >= port_lim:
                             limit_hit = True
-                            log.info("NUDGE PORT: port limit reached (%.1f° >= %.1f°), stopping",
-                                     rudder_angle, port_lim)
+                            bstate.nudge_settle_lim = port_lim
+                            log.info("NUDGE PORT: port limit ahead (%.1f° now, %.1f° predicted >= "
+                                     "%.1f°, %.1f°/s), stopping", rudder_angle, ahead, port_lim,
+                                     bstate.nudge_speed)
                     else:                            # stbd nudge
                         stbd_lim = -float(lim["stbd_limit_deg"])
-                        if rudder_angle <= stbd_lim:
+                        ahead = rudder_angle + min(0.0, bstate.nudge_speed) * NUDGE_LIMIT_LEAD_S
+                        if ahead <= stbd_lim:
                             limit_hit = True
-                            log.info("NUDGE STBD: stbd limit reached (%.1f° <= %.1f°), stopping",
-                                     rudder_angle, stbd_lim)
+                            bstate.nudge_settle_lim = stbd_lim
+                            log.info("NUDGE STBD: stbd limit ahead (%.1f° now, %.1f° predicted <= "
+                                     "%.1f°, %.1f°/s), stopping", rudder_angle, ahead, stbd_lim,
+                                     bstate.nudge_speed)
                     if limit_hit:
+                        bstate.nudge_settle_at = now + NUDGE_SETTLE_LOG_S
                         if bstate.nudge_was_idle:
                             send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
                         bstate.nudge_until = 0.0
@@ -2978,6 +3043,7 @@ def main() -> None:
                 if crc_calc == candidate[3]:
                     del pilot_buf[:4]
                     relay_good += 1
+                    bstate.pp_frame_last = now     # pypilot's servo stream is alive
                     if candidate[0] == PYPILOT_COMMAND_CODE:
                         bstate.pp_cmd_last = now   # AP stream watchdog (even if dropped below)
                     if nudge_active:

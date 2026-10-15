@@ -95,6 +95,8 @@ Encoding note: For int16 values:
     - 0 = WARN_NONE (clear all warnings)
     - 1 = WARN_AP_PRESSED (AP toggle rejected while remote in MANUAL — single 200ms beep + 5s OLED flash)
     - 2 = WARN_STEER_LOSS (TCP dropped, or REMOTE dead-man expired, in MANUAL mode — continuous rapid beeping, life-safety)
+    - 3 = WARN_SILENCE (v3.3.0): remote STOP — silence every Nano alarm (steer loss, motor-link, hardware faults), the same flags as the Nano's own STOP button. Needed on units without helm buttons
+- `0xE4` PILOT_RUDDER (v3.3.0 note): sent at 5 Hz only while pypilot's servo stream is alive (a frame within 1 s); the Nano's local-angle cross-check uses it only if it arrived within 0.6 s
 
 ### 2.4 Nano → Bridge: Buzzer state reporting (v0.2.0_B7)
 
@@ -173,7 +175,7 @@ Notes:
 | Line | Description |
 |------|-------------|
 | `PING` | Keepalive (auto-sent by TCP client) |
-| `ESTOP` | Emergency stop — disengage AP, clear MANUAL |
+| `ESTOP` | Emergency stop — disengage AP, clear MANUAL, end a jog, and (v3.3.0) silence every Nano alarm (`0xEA` value 3) — the web STOP behaves like the Nano's STOP button |
 | `BTN TOGGLE` | Toggle `ap.enabled` |
 | `BTN -10` / `BTN -1` / `BTN +1` / `BTN +10` | Adjust `ap.heading_command` |
 | `MODE MANUAL` | Enter MANUAL steering mode |

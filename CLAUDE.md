@@ -384,10 +384,23 @@ disengagement must always be available.** Keep all of these true:
   engage path must clear `pp_cmd_block`; nothing else may.
 - **Every stop raises a visible alert:** `raise_alert()` → telemetry `WARN <code>` → page
   bottom-right panel (`REMOTE STEER: STOPPED`, `AUTOPILOT: STOPPED`).
+- **The web STOP must always be able to silence the Nano** (`ESTOP` → `WARNING_CODE`
+  value 3 `WARN_SILENCE`). Units without helm buttons (Inno-Pilot-Rosa) have no other way:
+  on the 2026-10-15 bench test a STEER LOSS buzzer could only be stopped by entering and
+  leaving REMOTE. Any new Nano alarm must be cleared by `WARN_SILENCE` too.
+- **"pypilot connected" comes from `client.connection`, never from the absence of
+  exceptions.** `pypilotClient` does not raise when pypilot dies — it closes the socket and
+  reconnects by itself. Until v3.3.0 the bridge set `connected = True` every pass, so the
+  "pypilot connection lost" stop never fired on hardware (only the Nano watchdog caught it).
+  The simulator stub must keep behaving like the real client (no exceptions).
+- **Never relay a frozen pypilot angle to the Nano.** `PILOT_RUDDER_CODE` is sent only
+  while pypilot's servo stream is alive (`PP_STREAM_STALE_S`), and the Nano's cross-check
+  only trusts it for 0.6 s; otherwise a hung pypilot latches a cross-check rejection.
 
 Simulator coverage (outside the repo, `~/inno-pilot-sweep-sim-2026-10-02/`, run with
 `SIM_PP_SERVO=1`): `remote_alive remote_legacy remote_nano_stop alert_clear nudge_deadman
-nudge_release nudge_cap nudge_nano_stop pp_lost pp_hang_aplost pp_hang_bridge`. The Nano latch and
+nudge_release nudge_cap nudge_nano_stop pp_lost pp_hang_aplost pp_hang_bridge estop_silence
+pp_hang_xcheck nudge_lead`. The Nano latch and
 watchdog are firmware-only and need the bench test in the PR.
 
 ## No rudder motion before rudder limits: INVARIANTS (v3.3.0, 2026-10-15)
@@ -568,6 +581,12 @@ and never succeeds until the service is restarted.
 
 **Impact:** The autopilot servo is not connected to pypilot's control loop after a
 bridge restart without a full service restart.
+
+**Also triggered by any pypilot hang (bench test, Inno-Pilot-Rosa, 2026-10-15):** after a
+hang pypilot's own watchdog restarts its child processes, and the new servo process hits
+the same EBUSY — so the AP stays dead (the bridge's 3 s failsafe disengages every engage
+attempt) until the three services are restarted together. This makes it the biggest
+operational risk found so far; it is the next PR after v3.3.0.
 
 **Workaround:** `sudo systemctl restart pypilot inno-pilot-bridge inno-pilot-socat`
 followed by ~5 s wait.  A full system reboot also clears the condition.
