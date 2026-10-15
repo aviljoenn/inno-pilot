@@ -349,6 +349,91 @@ testing, ever** — no endurance tests. Keep all of these true:
   (`ram_nano_deadband_deg()`), which is `deadband_pct` × full span — ±6° on Inno-Pilot-Rosa.
   Found on the first boat run.
 
+## Stop paths, dead-men and failsafes: INVARIANTS (safety PR, 2026-10-15)
+
+The user's priorities, in order: stable phone↔Pi comms; if anything degrades, keep the boat
+stable and alert the skipper by every means; **an immediate and unconditional
+disengagement must always be available.** Keep all of these true:
+
+- **Nano STOP is one press, always a full stop, and latched.** One press disengages AP,
+  exits REMOTE, stops the motor *and* silences any alarm (it used to be two-press while an
+  alarm sounded). While `stop_latch_ap` is set the Nano ignores COMMAND frames and re-sends
+  STOP every 0.5 s; it clears only after an unbroken ≥ 0.6 s run of DISENGAGE frames and
+  ≥ 1 s after the press. `stop_latch_man` ignores MANUAL_MODE=1 until the bridge sends 0.
+  Never add a path that re-engages the motor from a single frame while latched.
+- **Nano AP command watchdog** (`AP_CMD_TIMEOUT_MS` 1.5 s): engaged + no COMMAND →
+  disengage, `!STEER LOSS`, button event 7 (`BTN_EVT_AP_LOST`). pypilot sends COMMAND at
+  ≥ 5 Hz while engaged, so do not slow that stream below ~2 Hz anywhere. Any new bridge
+  path that drives the motor with synthetic COMMAND frames (like NUDGE) must keep them
+  coming at > 1 Hz, and must end with a DISENGAGE if it started from IDLE.
+- **REMOTE dead-man is opt-in per session.** The page enters with `MODE MANUAL ALIVE`
+  (arms it at once) and sends `ALIVE` every 0.4 s; 1.5 s of silence →
+  `remote_steer_loss()`. Only the page that selected REMOTE sends ALIVE (`gRemoteOwner`):
+  a second open phone must not keep REMOTE alive. A hidden page stops the
+  heartbeat on purpose (screen auto-lock must *alert*, not stop silently). The paused ESP32
+  remote never sends ALIVE and keeps the TCP-drop-only behaviour — keep that working.
+- **NUDGE dead-man:** press sends `NUDGE PORT|STBD`, then `NUDGE HOLD` every 0.2 s, then
+  `NUDGE STOP`. HOLD must never start or resume a jog (a jog stopped by the cap, a rudder
+  limit or a Nano STOP stays stopped while the finger is still down).
+- **Bridge AP stream watchdog** (`AP_STREAM_TIMEOUT_S` 3 s): mode AP but no COMMAND from
+  pypilot → `ap_failsafe_stop()`. Backs up the Nano watchdog and catches "AP shown, nothing
+  steering" (e.g. re-engaged while pypilot is hung).
+- **No surprise re-engage** (`pp_cmd_block`): after the bridge stops the AP because pypilot
+  vanished (connection lost, or Nano event 7), pypilot COMMAND frames are not relayed to
+  the Nano until pypilot itself sends DISENGAGE or the skipper engages again. Any new
+  engage path must clear `pp_cmd_block`; nothing else may.
+- **Every stop raises a visible alert:** `raise_alert()` → telemetry `WARN <code>` → page
+  bottom-right panel (`REMOTE STEER: STOPPED`, `AUTOPILOT: STOPPED`).
+- **The web STOP must always be able to silence the Nano** (`ESTOP` → `WARNING_CODE`
+  value 3 `WARN_SILENCE`). Units without helm buttons (Inno-Pilot-Rosa) have no other way:
+  on the 2026-10-15 bench test a STEER LOSS buzzer could only be stopped by entering and
+  leaving REMOTE. Any new Nano alarm must be cleared by `WARN_SILENCE` too.
+- **"pypilot connected" comes from `client.connection`, never from the absence of
+  exceptions.** `pypilotClient` does not raise when pypilot dies — it closes the socket and
+  reconnects by itself. Until v3.3.0 the bridge set `connected = True` every pass, so the
+  "pypilot connection lost" stop never fired on hardware (only the Nano watchdog caught it).
+  The simulator stub must keep behaving like the real client (no exceptions).
+- **Never relay a frozen pypilot angle to the Nano.** `PILOT_RUDDER_CODE` is sent only
+  while pypilot's servo stream is alive (`PP_STREAM_STALE_S`), and the Nano's cross-check
+  only trusts it for 0.6 s; otherwise a hung pypilot latches a cross-check rejection.
+
+Simulator coverage (outside the repo, `~/inno-pilot-sweep-sim-2026-10-02/`, run with
+`SIM_PP_SERVO=1`): `remote_alive remote_legacy remote_nano_stop alert_clear nudge_deadman
+nudge_release nudge_cap nudge_nano_stop pp_lost pp_hang_aplost pp_hang_bridge estop_silence
+pp_hang_xcheck nudge_lead`. The Nano latch and
+watchdog are firmware-only and need the bench test in the PR.
+
+## No rudder motion before rudder limits: INVARIANTS (v3.3.0, 2026-10-15)
+
+User rule: **nothing moves the rudder — not even a jog — until the rudder limits have been
+set by hand.** Enforced in the bridge (`limits_refuse()`, `limits_stop_motion()`,
+`bstate.limits_ok`), not only in the Dock-Side Wizard page. Keep all of these true:
+
+- **Every new path that can move the rudder must call `limits_refuse()` first.** Current
+  gates: remote `BTN TOGGLE` (engage), `MODE MANUAL`, `NUDGE PORT|STBD`, `RAM_SETUP`, Nano
+  B3 engage, and the pypilot→Nano relay (COMMAND frames dropped + `ap.enabled=False` while
+  limits are invalid — catches an AP engaged on pypilot's port 8000 page).
+- **Limits are valid only for the calibration they were set against** (`limits_check()`,
+  tolerance `LIMITS_CAL_TOL` = one step of the Nano EEPROM mirror's rounding). Never widen
+  the tolerance to make a mismatch go away — a mismatch means the angle no longer means
+  what it meant when the skipper set the limits.
+- **The limits file is bridge-owned** (`/var/lib/inno-pilot/rudder_limits.json`). Never move
+  it into `settings.json` or let `SETTINGS SET` write it: a remote must not be able to
+  declare limits "set".
+- **`LIMITS` commands only run in IDLE** and nothing in them moves the rudder; the skipper
+  turns the wheel by hand. A capture changes pypilot's calibration, which invalidates the
+  limits by design.
+- **REMOTE survives a pypilot outage:** `bstate.last_cal` keeps the last complete
+  calibration, so limits stay valid while pypilot is down. Do not clear it on disconnect.
+- **Honest wording:** the soft limits bound the jog and the sweep only. AP/REMOTE are not yet
+  held inside them (TODO.md HIGH item) — never present "limits set" as protection in those
+  modes until that is fixed.
+
+Simulator coverage (`~/inno-pilot-sweep-sim-2026-10-02/`, `SIM_PP_SERVO=1`): `lim_refuse`
+and `lim_commission` (with `SIM_LIMITS=none`), `lim_invalidate_remote lim_invalidate_ap
+lim_pp_outage_remote`. `SIM_LIMITS=set` (default) pre-writes valid limits so the older
+scenarios still run.
+
 ## Nano: never `digitalRead()` a PWM pin — use `motor_pwm()` for D9
 
 On AVR, `digitalRead()` calls `turnOffPWM()` on a PWM-capable pin. The pin-state
@@ -496,6 +581,12 @@ and never succeeds until the service is restarted.
 
 **Impact:** The autopilot servo is not connected to pypilot's control loop after a
 bridge restart without a full service restart.
+
+**Also triggered by any pypilot hang (bench test, Inno-Pilot-Rosa, 2026-10-15):** after a
+hang pypilot's own watchdog restarts its child processes, and the new servo process hits
+the same EBUSY — so the AP stays dead (the bridge's 3 s failsafe disengages every engage
+attempt) until the three services are restarted together. This makes it the biggest
+operational risk found so far; it is the next PR after v3.3.0.
 
 **Workaround:** `sudo systemctl restart pypilot inno-pilot-bridge inno-pilot-socat`
 followed by ~5 s wait.  A full system reboot also clears the condition.

@@ -55,9 +55,17 @@ steps 1–2 are done. Its deadband lookup is isolated in `ram_nano_deadband_deg(
 
 ### Setup wizards (agreed with the user 2026-10-15)
 
-Settings panel is now split into **SETUP WIZARDS** (Startup, Dock-Side, Sea Trial —
-placeholders, "COMING SOON") and **ADVANCED SETTINGS** (every individual setting,
-collapsed by default). Wizards are not built yet.
+Settings panel is now split into **SETUP WIZARDS** (Startup, Dock-Side, Sea Trial)
+and **ADVANCED SETTINGS** (every individual setting, collapsed by default).
+
+**Progress (v3.3.0, 2026-10-15):** the bridge now enforces "no rudder motion before limits"
+(AP incl. pypilot's port 8000, REMOTE, jog, sweep; limits invalidated by any calibration
+change) and **Dock-Side step 1 — rudder sensor + limits by hand** is built (see CLAUDE.md
+"No rudder motion before rudder limits"). Startup and Sea Trial are still placeholders; the
+remaining Dock-Side steps are listed in the wizard as "coming next". Open from step 1:
+measured stop angles are *declared* (pypilot's model: stops = ±range) — asymmetric stops are
+absorbed into the calibration curve; motor direction is not cross-checked against the
+captured sides until the jog step exists.
 
 **Hard rule: no automated rudder movement of any kind until rudder limits are set.**
 That includes jog. Limits are therefore found by hand: clutch out, the skipper turns
@@ -109,6 +117,49 @@ the Nano acts on them. The web remote shows them greyed out and locked, "(NOT US
 | DS-05 | `autopilot.off_course_alarm_deg` | Not read; keep, default 20°, implement | open |
 | DS-06 | `safety.auto_disengage_on_fault` | Not read — shows ON but does nothing; misleading safety setting | open |
 | DS-07 | `safety.comms_warn_threshold_pct`, `comms_crit_threshold_pct` | Not read | open |
+| DS-08 | `autopilot.rudder_limit_port_pct`, `rudder_limit_stbd_pct` | Replaced in v3.3.0 by the Dock-Side Wizard's degree limits (`rudder_limits.json`); greyed out "REPLACED"; still in the Nano EEPROM block (DUP-06) | open (remove with the next EEPROM layout change) |
+
+## [MEDIUM] First power-up: out-of-box connection and first look (opened 2026-10-15)
+
+**Status:** idea agreed in discussion 2026-10-15, not started. Goal: first unboxing and
+power-up is simple and elegant — nothing ambiguous, no clutter, nothing overwhelming.
+Today a unit only joins Wi-Fi because the SD image was pre-configured, and the skipper
+must find its IP address; the web remote's Wi-Fi settings are dead (DS-01, DS-02).
+
+**Direction:** Wi-Fi is the only first-run path. Bluetooth is not part of unboxing:
+iOS Safari has no Web Bluetooth, so it would force an app. Bluetooth stays for remote
+steering comms (see "Rosa comms + safety priorities") and possibly recovery later.
+
+Flow (one decision per screen):
+1. Power on with no known network → Pi starts its own hotspot `Inno-Pilot-XXXX`
+   (per-unit suffix). The unit's OLED shows only the hotspot name + "Scan the card".
+2. One card in the box: QR code that joins the hotspot. Unique per-unit password, printed
+   on the card and a label on the unit (not an open network). Captive portal → setup
+   page opens by itself.
+3. Screen 1: "Name your boat" (existing boat-name modal).
+4. Screen 2: "How will you connect on board?" → [Use Inno-Pilot's own Wi-Fi] or
+   [Join my boat's Wi-Fi] (list filtered to 2.4 GHz — Pi Zero 2 W has no 5 GHz).
+5. Test before commit: try the boat network while the hotspot stays up; report
+   "Connected — open inno-pilot.local (or <IP>)" or "Couldn't join — wrong password?".
+   Always show the IP too (.local fails on the RENDRE APs).
+6. Land on the remote: steering greyed out, one alert "Setup not finished —
+   Dock-Side Wizard". Advanced Settings out of sight.
+
+Safety nets:
+- Saved boat network unreachable ~2 min after boot → hotspot returns automatically
+  (never locked out by a new router password or marina).
+- Physical reset: a button hold at power-up (e.g. STOP 10 s) forgets Wi-Fi → step 1.
+
+Open questions / risks:
+- Pi Zero 2 W hotspot + client at the same time only works on one channel and is
+  fragile; step 5 may need a brief "switching, reconnect" moment instead.
+- Per-unit hotspot password must be generated at flashing time and printed on the
+  card → a step in the build process.
+- Captive-portal auto-open differs between iOS and Android; test on real phones.
+
+**Next step:** prototype steps 1–2 on the bench Pi (hotspot + captive portal) and check
+the page auto-opens on an iPhone and an Android phone. Feeds the Startup Wizard
+(see "Setup wizards") and resolves DS-01/DS-02.
 
 ## [HIGH PRIORITY] Proper SignalK integration design — two operating scenarios
 

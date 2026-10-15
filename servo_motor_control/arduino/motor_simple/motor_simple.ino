@@ -30,11 +30,11 @@ enum ButtonID : uint8_t;
 // Meaning: MAJOR = hardware change, MINOR = software feature change, PATCH = patch / bug fix.
 // Bumped on EVERY merge of code to master, in all actively developed components at once
 // (see CLAUDE.md "Version sync").
-const char INNOPILOT_VERSION[] = "v3.2.0";
+const char INNOPILOT_VERSION[] = "v3.3.0";
 // Numeric form of INNOPILOT_VERSION: major*10000 + minor*100 + patch (v3.0.2 -> 30002).
 // Sent by the bridge in BRIDGE_VERSION_CODE (uint16) and compared for !VER MISMATCH!.
 // MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-const uint16_t INNOPILOT_VERSION_CODE = 30200;
+const uint16_t INNOPILOT_VERSION_CODE = 30300;
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -65,6 +65,7 @@ const uint8_t WARNING_CODE           = 0xEA; // warning subtype
 const uint8_t WARN_NONE              = 0;
 const uint8_t WARN_AP_PRESSED        = 1;    // AP button pressed while remote not in MANUAL
 const uint8_t WARN_STEER_LOSS        = 2;    // TCP dropped in MANUAL mode
+const uint8_t WARN_SILENCE           = 3;    // remote STOP: silence every alarm (v3.3.0)
 // Nano->Bridge: buzzer state reporting
 const uint8_t BUZZER_STATE_CODE      = 0xEB; // 1=buzzer on, 0=off
 
@@ -148,6 +149,7 @@ bool     pilot_command_valid = false;
 uint16_t pilot_command_deg10 = 0;
 
 bool     pilot_rudder_valid  = false;
+unsigned long pilot_rudder_ms = 0;   // when PILOT_RUDDER_CODE last arrived (cross-check freshness)
 int16_t  pilot_rudder_deg10  = 0;
 
 // Rudder limits from pypilot (tenths of degrees)
@@ -312,9 +314,37 @@ unsigned long ap_pressed_warn_ms     = 0;
 const unsigned long AP_PRESSED_WARN_MS = 5000UL; // 5s OLED flash duration
 const unsigned long CLUTCH_SETTLE_MS   = 50UL;   // ms to wait after clutch engages before allowing motor EN
 unsigned long ap_warn_beep_end_ms    = 0;         // when single beep ends
-// Steer-loss warning (remote TCP dropped while in MANUAL mode)
+// Steer-loss warning (remote TCP dropped while in MANUAL mode, or the AP command
+// watchdog below fired): OLED "!STEER LOSS" + continuous rapid beeping.
 bool steer_loss_active   = false;
 bool steer_loss_silenced = false;
+
+// ---- STOP latch (safety, 2026-10-15) ----
+// A local STOP must stay a stop.  COMMAND_CODE re-engages the AP on receipt, and
+// pypilot sends one at >= 5 Hz while it is engaged, so a lost or late STOP event
+// used to re-engage motor and clutch within ~100-200 ms.  After STOP:
+//  - stop_latch_ap: COMMAND frames are ignored (and STOP is re-sent) until pypilot
+//    has visibly let go: an unbroken run of DISENGAGE frames >= STOP_LATCH_CLEAR_MS,
+//    and at least STOP_LATCH_MIN_MS after the press.  One bridge-made DISENGAGE
+//    (end of a nudge) cannot clear it, because any COMMAND restarts the run.
+//  - stop_latch_man: armed only if REMOTE was active; MANUAL_MODE=1 re-asserts are
+//    ignored until the bridge has sent MANUAL_MODE=0 (it has left REMOTE).
+bool          stop_latch_ap     = false;
+bool          stop_latch_man    = false;
+unsigned long stop_latch_ms     = 0;   // when STOP was pressed
+unsigned long stop_dis_since_ms = 0;   // start of the current DISENGAGE-only run (0 = none)
+unsigned long stop_resend_ms    = 0;   // last BTN_EVT_STOP re-send while latched
+const unsigned long STOP_LATCH_MIN_MS   = 1000UL;
+const unsigned long STOP_LATCH_CLEAR_MS = 600UL;
+const unsigned long STOP_RESEND_MS      = 500UL;
+
+// ---- AP command watchdog (safety, 2026-10-15) ----
+// pypilot sends COMMAND at >= 5 Hz while engaged (every 0.2 s even when the
+// command is zero; servo.py do_raw_command).  If none arrives for this long the
+// steering computer is gone or hung: disengage and alarm rather than keep driving
+// the last, possibly non-neutral, command (which could run the rudder hard over).
+// Bridge frames keep pi_alive true, so pi_alive alone cannot catch this.
+const unsigned long AP_CMD_TIMEOUT_MS = 1500UL;
 // Buzzer state tracking for change reporting to bridge
 bool last_buzzer_state = false;
 
@@ -459,7 +489,10 @@ enum ButtonEvent {
   BTN_EVT_TOGGLE  = 3,
   BTN_EVT_PLUS10  = 4,
   BTN_EVT_PLUS1   = 5,
-  BTN_EVT_STOP    = 6
+  BTN_EVT_STOP    = 6,
+  // Not a button: the Nano's AP command watchdog disengaged because pypilot's
+  // COMMAND frames stopped (pypilot crashed/hung).  Bridge: ap.enabled=false + alert.
+  BTN_EVT_AP_LOST = 7
 };
 
 // Overlay for big transient messages (e.g. -10, +1, AP: ON)
@@ -1502,6 +1535,20 @@ void update_motor_from_command() {
 
   unsigned long now = millis();
   bool pi_alive = pi_ever_online && (now - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
+
+  // AP command watchdog (see AP_CMD_TIMEOUT_MS): engaged but no COMMAND for too
+  // long -> disengage (motor stops, clutch drops below), alarm, tell the bridge.
+  // Never auto-centre: the rudder is released to the helm where it is.
+  if (ap_enabled_remote && (now - last_command_ms > AP_CMD_TIMEOUT_MS)) {
+    ap_enabled_remote   = false;
+    flags              &= ~ENGAGED;
+    ap_display          = false;
+    last_command_val    = 1000;   // neutral, so the delta-jog path cannot fire
+    last_command_ms     = 0;
+    steer_loss_active   = true;
+    steer_loss_silenced = false;
+    send_button_event(BTN_EVT_AP_LOST);
+  }
   bool ap_active = ap_enabled_remote && pi_alive;
   bool command_recent = (now - last_command_ms <= PI_OFFLINE_TIMEOUT_MS);
 
@@ -2053,6 +2100,16 @@ void process_packet() {
 
   switch (code) {
     case COMMAND_CODE:
+      if (stop_latch_ap) {
+        // Latched after a local STOP: never re-engage from a COMMAND.  pypilot still
+        // commanding means our STOP event was lost or not yet acted on -- repeat it.
+        stop_dis_since_ms = 0;
+        if (now - stop_resend_ms >= STOP_RESEND_MS) {
+          stop_resend_ms = now;
+          send_button_event(BTN_EVT_STOP);
+        }
+        break;
+      }
       // 0..2000, 1000 = neutral
       last_command_val = value;
       last_command_ms = now;
@@ -2069,6 +2126,15 @@ void process_packet() {
       break;
 
     case DISENGAGE_CODE:
+      if (stop_latch_ap) {
+        // pypilot (or the bridge) says disengaged.  Clear the latch only after an
+        // unbroken DISENGAGE-only run: proof pypilot itself has let go.
+        if (stop_dis_since_ms == 0) stop_dis_since_ms = now;
+        if (now - stop_dis_since_ms >= STOP_LATCH_CLEAR_MS &&
+            now - stop_latch_ms     >= STOP_LATCH_MIN_MS) {
+          stop_latch_ap = false;
+        }
+      }
       flags &= ~ENGAGED;
       // DISENGAGE_CODE means AP is off
       if (ap_enabled_remote) {
@@ -2106,6 +2172,7 @@ void process_packet() {
     case PILOT_RUDDER_CODE:
       pilot_rudder_deg10 = (int16_t)value; // interpret two's complement
       pilot_rudder_valid = true;
+      pilot_rudder_ms    = millis();
       break;
 
     case PILOT_RUDDER_DIRB_LIM_CODE:
@@ -2150,6 +2217,16 @@ void process_packet() {
     }
 
     case MANUAL_MODE_CODE:
+      if (value != 0 && stop_latch_man) {
+        // REMOTE re-asserted after a local STOP: the bridge has not left MANUAL yet.
+        // Ignore it and repeat the STOP so it does.
+        if (now - stop_resend_ms >= STOP_RESEND_MS) {
+          stop_resend_ms = now;
+          send_button_event(BTN_EVT_STOP);
+        }
+        break;
+      }
+      if (value == 0) stop_latch_man = false;
       if (value != 0 && !remote_manual_active) {
         // Entering MANUAL: initialise speed estimator and brake state machine
         speed_prev_adc    = rudder_adc_smoothed;
@@ -2200,6 +2277,17 @@ void process_packet() {
         steer_loss_active      = false;
         steer_loss_silenced    = false;
         ap_pressed_warn_active = false;
+      } else if ((uint8_t)value == WARN_SILENCE) {
+        // Remote STOP (web page) = the silence half of the physical STOP button.
+        // Units without helm buttons (e.g. Inno-Pilot-Rosa) had no other way to
+        // silence an alarm: found on the 2026-10-15 bench test (STEER LOSS buzzer).
+        // Same flags as the PTM edge below; pi_fault_alarm_silenced resets itself
+        // once all hardware faults have cleared.
+        steer_loss_active       = false;
+        steer_loss_silenced     = false;
+        comms_fault_silenced    = true;
+        pi_fault_alarm_silenced = true;
+        ap_pressed_warn_active  = false;
       }
       break;
 
@@ -2460,37 +2548,38 @@ void loop() {
   }
 
   if (ptm_edge) {
-    // Two-press STOP: first press silences active alarm if any; second (or first if no alarm) is full stop
-    bool alarm_was_active = (steer_loss_active && !steer_loss_silenced)
-                          || ap_pressed_warn_active
-                          || (comms_crit_active && !comms_fault_silenced);
+    // STOP is always a full stop AND silences any alarm, in ONE press (2026-10-15).
+    // It used to be two-press while an alarm sounded (first press only silenced and
+    // left the AP engaged) -- but an alarm is exactly when the skipper most needs
+    // immediate, unconditional control.
+    comms_fault_silenced   = true;
 
-    if (alarm_was_active) {
-      // First press: silence alarm only, AP stays engaged
-      steer_loss_silenced    = true;
-      ap_pressed_warn_active = false;
-      comms_fault_silenced   = true;
-      show_overlay("SIL");
-    } else {
-      // Full emergency stop
-      flags &= ~ENGAGED;
-      ap_enabled_remote      = false;  // stop motor immediately — don't wait for bridge DISENGAGE
-      last_command_val       = 1000;
-      remote_manual_active   = false;
-      steer_loss_active      = false;
-      steer_loss_silenced    = false;
-      ap_pressed_warn_active = false;
+    // Latch the stop (see stop_latch_ap / stop_latch_man): capture REMOTE before
+    // it is cleared below.
+    stop_latch_ap     = true;
+    stop_latch_man    = remote_manual_active;
+    stop_latch_ms     = now;
+    stop_dis_since_ms = 0;
+    stop_resend_ms    = now;
 
-      // Make OLED show OFF immediately (remote truth will follow)
-      ap_display = false;
-      ap_display_override_until_ms = millis() + 2000UL;
+    flags &= ~ENGAGED;
+    ap_enabled_remote      = false;  // stop motor immediately — don't wait for bridge DISENGAGE
+    last_command_val       = 1000;
+    last_command_ms        = 0;      // command_recent=false: no delta jog from a stale command
+    remote_manual_active   = false;
+    steer_loss_active      = false;
+    steer_loss_silenced    = false;
+    ap_pressed_warn_active = false;
 
-      // Tell the bridge/pypilot to disable ap.enabled
-      send_button_event(BTN_EVT_STOP);
+    // Make OLED show OFF immediately (remote truth will follow)
+    ap_display = false;
+    ap_display_override_until_ms = millis() + 2000UL;
 
-      // Show big STOP overlay
-      show_overlay("STOP");
-    }
+    // Tell the bridge/pypilot to disable ap.enabled (re-sent while latched)
+    send_button_event(BTN_EVT_STOP);
+
+    // Show big STOP overlay
+    show_overlay("STOP");
   }
 
 // ----- Button ladder on A6 (B1..B5) -----
@@ -2850,8 +2939,13 @@ if (!ap_engaged && !remote_manual_active) {
     if (rcal_status == RCAL_ST_ACTIVE) {
       local_rudder_deg10 = rcal_eval_deg10(rcal_k, rudder_adc_smoothed);
       unsigned long tnow = millis();
+      // Fresh = the relayed angle ITSELF is recent.  Any Pi frame (HELLO) used to
+      // count, so a frozen pypilot angle kept "fresh" and the check latched a
+      // rejection (bench test 2026-10-15).  The bridge sends it at 5 Hz and stops
+      // when pypilot's stream goes quiet.
       bool pp_fresh = pi_ever_online && pilot_rudder_valid &&
-                      (tnow - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS);
+                      (tnow - last_pi_frame_ms <= PI_OFFLINE_TIMEOUT_MS) &&
+                      (tnow - pilot_rudder_ms <= 600UL);
       int16_t diff = local_rudder_deg10 - pilot_rudder_deg10;
       if (pp_fresh && (diff > RCAL_XCHECK_DEG10 || diff < -RCAL_XCHECK_DEG10)) {
         if (rcal_bad_since == 0) rcal_bad_since = tnow ? tnow : 1;

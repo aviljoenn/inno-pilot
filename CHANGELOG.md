@@ -10,6 +10,75 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.3.0] — 2026-10-15
+
+Minor (feature) release. Bumped across all actively developed components (Nano, bridge,
+web remote). The paused ESP32 remote firmware (v1.3.3_B3) and its OTA binary are
+deliberately not bumped.
+
+### Safety: no rudder motion before rudder limits are set
+- **The bridge refuses every rudder motion until the rudder limits have been set by hand**:
+  engaging AP (web remote, Nano B3 **and** pypilot's own port 8000 page — its COMMAND frames
+  are dropped before the Nano and `ap.enabled=False` is sent back), REMOTE steering, jog and
+  the rudder sweep. Alert `RUDDER LIMITS: NOT SET` in the web page alert panel
+  (telemetry `WARN LIMITS_UNSET` when something was refused or stopped).
+- **Limits are tied to the calibration they were set against.** Any later change to pypilot's
+  rudder calibration (reset or capture on port 8000, a rudder range edit, the Nano EEPROM
+  copy differing beyond its rounding) makes them invalid, and anything moving the rudder is
+  stopped through its normal exit path. A pypilot outage keeps the last calibration, so
+  REMOTE steering still works when pypilot dies.
+- **Dock-Side Wizard, step 1 — rudder sensor & limits by hand** (Settings → Setup Wizards →
+  Dock-Side → OPEN). Clutch out, the skipper turns the wheel/tiller: rudder angle at the stops
+  → capture centre, port stop and starboard stop (each sampled for 1 s and rejected if the
+  rudder moved > 0.5°; handed to pypilot's own 3-point calibration) → soft limits in degrees,
+  at least 1° inside each stop (default 3°). The bridge checks the resulting calibration
+  (stops inside the sensor span, span not tiny, curve monotonic) before accepting.
+  New bridge commands `LIMITS RANGE|CAPTURE|SET`, status telemetry `LIMITS <json>`.
+- Limits live in a bridge-owned file `/var/lib/inno-pilot/rudder_limits.json` (atomic
+  write), deliberately outside `settings.json` so `SETTINGS SET` cannot mark them set.
+- Jog and sweep now use these degree limits. The old **Port/Stbd Limit (%)** settings are
+  greyed out as "REPLACED: DOCK-SIDE WIZARD" (still written to the Nano EEPROM block).
+- **Existing installations must run the Dock-Side Wizard step once after updating** —
+  there is no carry-over of the old percentage limits (agreed: Inno-Pilot-Rosa is
+  re-commissioned).
+- Not yet: the soft limits are not enforced while AP or REMOTE steer (TODO.md HIGH item);
+  "limits set" is a precondition for motion, not yet a bound in every mode.
+
+### Fixed after the Inno-Pilot-Rosa bench test (2026-10-15)
+- **Web STOP silences the Nano's alarms** (new `WARNING_CODE` value 3), like the Nano's STOP
+  button — units without helm buttons could not stop a STEER LOSS buzzer. Web STOP also
+  ends a running jog.
+- **Bridge now detects pypilot dying.** pypilot's client never raises on disconnect, so the
+  immediate "pypilot connection lost" stop never fired on hardware (the Nano's 1.5 s
+  watchdog caught it instead). The connection state now comes from the client.
+- **Jog stops before the soft limit, not after**: it allows for its speed × 0.25 s (one
+  pypilot angle step + coast; tuned on Inno-Pilot-Rosa, where the coast is only 0.6–0.9°). Measured overshoot before: up to 2.2° at detection, 0.8° short of the
+  stop. The log reports where the rudder settled, for tuning.
+- **No stale rudder angle to the Nano**: when pypilot hangs, the bridge stops relaying its
+  frozen angle, and the Nano's cross-check only trusts a relayed angle under 0.6 s old —
+  a hang no longer latches the Nano off its local angle.
+
+### Safety (stop latch, dead-men, failsafe)
+- **Nano STOP is now one press, always a full stop, and latched** (`motor_simple.ino`). It
+  used to be two-press while an alarm sounded (first press only silenced and left the AP
+  engaged), and a stop could be undone within ~200 ms by pypilot's next COMMAND frame. The
+  Nano now ignores COMMAND frames and re-sends STOP until pypilot has visibly disengaged.
+- **Nano AP command watchdog**: engaged but no pypilot COMMAND for 1.5 s (pypilot crashed or
+  hung) → disengage, `!STEER LOSS` alarm, new button event 7 (AP_LOST) to the bridge.
+- **REMOTE steering dead-man**: the web page sends `ALIVE` every 0.4 s; 1.5 s of silence (phone
+  dropped, screen locked, Wi-Fi gone) stops REMOTE steering with STEER LOSS. Before, REMOTE
+  steering continued indefinitely while the server stayed connected. Armed at entry
+  (`MODE MANUAL ALIVE`), sent only by the phone that selected REMOTE. Opt-in per session, so
+  the paused ESP32 remote is unaffected.
+- **NUDGE dead-man**: `NUDGE HOLD` every 0.2 s while held; 0.8 s of silence stops the jog
+  (was: up to 10 s). A held button can no longer restart a jog the bridge has stopped.
+- **pypilot loss while engaged** (bridge): immediate DISENGAGE + alert when the pypilot
+  connection drops, or when AP is shown but pypilot has sent no COMMAND for 3 s (also catches
+  a re-engage while pypilot is hung); and no surprise re-engage — pypilot COMMAND frames are held back until pypilot disengages or the skipper
+  re-engages.
+- Skipper alerts `REMOTE STEER: STOPPED` / `AUTOPILOT: STOPPED` in the web page alert panel
+  (telemetry `WARN <code>`); the mode selector follows the bridge when it leaves REMOTE.
+
 ## [v3.2.0] — 2026-10-15
 
 Minor (feature) release. Bumped across all actively developed components (Nano, bridge,

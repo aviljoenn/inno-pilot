@@ -45,7 +45,11 @@ Recommended event ids:
 - 3 = toggle AP
 - 4 = +10°
 - 5 = +1°
-- 6 = STOP (force AP off)
+- 6 = STOP (force AP off). Since the safety PR: always a full stop that also silences
+  alarms (formerly two-press), and latched in the Nano — the Nano re-sends 6 every 0.5 s
+  while pypilot keeps commanding, until pypilot's DISENGAGE stream has run for 0.6 s
+- 7 = AP_LOST (Nano AP command watchdog: engaged, but no pypilot COMMAND frame for 1.5 s;
+  the Nano has disengaged and raised STEER LOSS)
 
 ### 2.2 Bridge → Nano: AP state + telemetry
 Bridge injects “state frames” so the Nano can display pypilot truth.
@@ -90,7 +94,9 @@ Encoding note: For int16 values:
   - value subtypes:
     - 0 = WARN_NONE (clear all warnings)
     - 1 = WARN_AP_PRESSED (AP toggle rejected while remote in MANUAL — single 200ms beep + 5s OLED flash)
-    - 2 = WARN_STEER_LOSS (TCP dropped in MANUAL mode — continuous rapid beeping, life-safety)
+    - 2 = WARN_STEER_LOSS (TCP dropped, or REMOTE dead-man expired, in MANUAL mode — continuous rapid beeping, life-safety)
+    - 3 = WARN_SILENCE (v3.3.0): remote STOP — silence every Nano alarm (steer loss, motor-link, hardware faults), the same flags as the Nano's own STOP button. Needed on units without helm buttons
+- `0xE4` PILOT_RUDDER (v3.3.0 note): sent at 5 Hz only while pypilot's servo stream is alive (a frame within 1 s); the Nano's local-angle cross-check uses it only if it arrived within 0.6 s
 
 ### 2.4 Nano → Bridge: Buzzer state reporting (v0.2.0_B7)
 
@@ -169,16 +175,29 @@ Notes:
 | Line | Description |
 |------|-------------|
 | `PING` | Keepalive (auto-sent by TCP client) |
-| `ESTOP` | Emergency stop — disengage AP, clear MANUAL |
+| `ESTOP` | Emergency stop — disengage AP, clear MANUAL, end a jog, and (v3.3.0) silence every Nano alarm (`0xEA` value 3) — the web STOP behaves like the Nano's STOP button |
 | `BTN TOGGLE` | Toggle `ap.enabled` |
 | `BTN -10` / `BTN -1` / `BTN +1` / `BTN +10` | Adjust `ap.heading_command` |
 | `MODE MANUAL` | Enter MANUAL steering mode |
+| `MODE MANUAL ALIVE` | Enter MANUAL and arm the REMOTE dead-man at once (the web page; it promises `ALIVE` heartbeats) |
 | `MODE AUTO` | Exit MANUAL, return to AP/IDLE |
 | `RUD xx.x` | Rudder target 0.0–100.0% (only valid in MANUAL) |
+| `ALIVE` | REMOTE dead-man heartbeat, sent by the web page every 0.4 s while in MANUAL. Opt-in: armed by `MODE MANUAL ALIVE` or by the first ALIVE of a MANUAL session; then no ALIVE for 1.5 s exits MANUAL with STEER LOSS (`WARN STEER_LOSS`). A remote that never sends ALIVE keeps the old behaviour (TCP drop only) |
+| `NUDGE PORT` / `NUDGE STBD` | Start a hold-to-run motor jog (IDLE or AP only; 10 s cap) |
+| `NUDGE HOLD` | Nudge dead-man heartbeat, every 0.2 s while the button is held; no HOLD for 0.8 s stops the jog. Never starts or resumes a jog |
+| `NUDGE STOP` | Button released — stop the jog now |
 | `RAM_SETUP <deg> [cycles]` | Arm the rudder sweep (Hardware Test 1). Disables AP, enters MANUAL on the Nano, mode `RAM_OFF`. Refused (reply `RAM_RESULT {"result":"REFUSED",...}`) if the sweep is too small for the rudder range/limits/deadband. Disarms after 60 s if never held (v3.0.3) |
 | `RAM HOLD` | Dead-man heartbeat, sent every ~200 ms while the operator holds B3. First HOLD starts the sweep (`RAM_ON`); no HOLD for 1 s stops it (v3.0.3) |
 | `RAM RELEASE` | Operator let go — stops the sweep immediately. Releasing ends the test; a later HOLD does not resume it (v3.0.3) |
+| `LIMITS RANGE <deg>` | Dock-Side Wizard (v3.3.0): declared rudder angle at the stops → pypilot `rudder.range` (10–100). Clears captured points. IDLE only, like all `LIMITS` commands |
+| `LIMITS CAPTURE CENTRE\|PORT\|STBD` | Sample the rudder for 1 s (skipper holds it still, clutch out); if it moved < 0.5° the point goes to pypilot's 3-point calibration (`rudder.calibration_state`). Never moves the rudder |
+| `LIMITS SET <port_deg> <stbd_deg>` | Soft limits (magnitudes, ≥ 5°, ≥ 1° inside the stops). Needs all three points captured this session (or valid limits already) and a usable calibration; saves `/var/lib/inno-pilot/rudder_limits.json` |
 | `TEST <id>` | Disabled since v3.0.3 (no Nano sketch implements it). Bridge replies `TEST_LINE Not available...` + `TEST_DONE` |
+
+**No rudder motion before limits (v3.3.0):** while the rudder limits are not set, or no longer
+match pypilot's calibration, the bridge refuses `BTN TOGGLE` (engage), `MODE MANUAL`,
+`NUDGE PORT|STBD` and `RAM_SETUP` (and Nano B3 engage), drops pypilot COMMAND frames to the
+Nano, and stops anything already moving. Each refusal raises `WARN LIMITS_UNSET`.
 
 While the sweep is armed or running, any `ESTOP`, `BTN`, `MODE`, `NUDGE`, `RUD` or `TGT`
 stops it first (single exit path `ram_test_abort()`); `BTN` is then swallowed, the others
@@ -197,7 +216,8 @@ proceed normally. Any Nano button and a remote disconnect also stop it.
 | `MODE IDLE` / `MODE AP` / `MODE MANUAL` / `MODE RAM_OFF` / `MODE RAM_ON` | Bridge mode state (`RAM_*` = rudder sweep armed / running) |
 | `RAM_PROG <done> <total>` | Rudder sweep progress in full strokes (only while armed/running) |
 | `RAM_RESULT <json>` | Rudder sweep outcome, once, at the end: `result` = PASS / CHECK / STOPPED / DISARMED / REFUSED, `reason`, per-direction `dirs.port`/`dirs.stbd` (speed_dps, hard_over_s, lag_ms, overshoot_max_deg, end_err_deg, settle_timeouts, i_peak_a, i_mean_a), `speed_asym_pct`, `nano_deadband_deg`, `slow_zone_deg`, `speed_power` (full / mixed / reduced) |
-| `WARN AP_PRESSED` | AP toggle was rejected (remote shows warning) |
+| `WARN` / `WARN <code>` | Bridge-raised skipper alert, every telemetry cycle; bare `WARN` = none. `STEER_LOSS` = REMOTE steering stopped (phone/link lost), `AP_LOST` = autopilot stopped because pypilot vanished, `LIMITS_UNSET` = motion refused or stopped because the rudder limits are not set/valid (v3.3.0). Clears 2 s after the skipper re-engages, or after 120 s. (Replaces the documented-but-never-sent `WARN AP_PRESSED`; AP-pressed is a Nano-only warning, `0xEA` value 1) |
+| `LIMITS <json>` | Rudder limits status, every telemetry cycle (v3.3.0): `ok`, `reason`, `set`, `port_deg`, `stbd_deg`, `range`, `cal_problem`, `capturing`, `done` (points captured this session), `msg` (last `LIMITS` command result), `margin` |
 | `PONG` | Keepalive reply |
 
 ---

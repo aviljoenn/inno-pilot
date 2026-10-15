@@ -49,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v3.2.0"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
+INNOPILOT_VERSION = "v3.3.0"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
                                # MAJOR=hardware, MINOR=software feature, PATCH=fix — see CLAUDE.md "Version sync"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
@@ -179,8 +179,15 @@ _state: dict = {
     "debug":        False,    # True when bridge is in DEBUG log level
     "net_pi":       None,     # Pi->router link from inno-health-notify: {state, loss_pct, avg_ms} or None
     "ram_prog":     None,     # RAM sweep progress "done/total" strokes while armed/running, else None
+    "limits":       None,     # rudder limits status from the bridge (telemetry LIMITS <json>), or None
 }
 _state_lock = threading.Lock()
+
+# When the selector last went to REMOTE (monotonic).  The bridge can end REMOTE on
+# its own (steer loss: phone heartbeat lost); after this grace the selector follows
+# the bridge instead of showing REMOTE with nobody steering (see MODE telemetry).
+_ui_remote_since = 0.0
+UI_REMOTE_GRACE_S = 2.0
 
 # One queue per connected SSE browser, tracked with client id.
 _sse_subs: list[dict] = []
@@ -361,6 +368,15 @@ def _parse_bridge_line(line: str) -> None:
                 _update(mode=mode)
             else:
                 _update(mode=mode, ram_prog=None)   # sweep over: drop stale progress
+            # The bridge ended REMOTE by itself (e.g. STEER LOSS after the phone's
+            # heartbeat stopped): move the selector to AUTO so the page does not
+            # keep showing REMOTE.  The grace covers the moment between selecting
+            # REMOTE and the bridge confirming it.
+            if mode != "MANUAL":
+                with _state_lock:
+                    ui = _state.get("ui_mode")
+                if ui == "remote" and time.monotonic() - _ui_remote_since > UI_REMOTE_GRACE_S:
+                    _update(ui_mode="auto")
 
     elif c in ("HDG", "CMD", "RDR", "DB"):
         try:
@@ -421,6 +437,14 @@ def _parse_bridge_line(line: str) -> None:
         # Bridge sends PYPILOT OK|DEAD every telemetry cycle.
         if len(parts) > 1:
             _update(pypilot_ok=(parts[1].upper() == "OK"))
+
+    elif c == "LIMITS":
+        # Rudder limits status (Dock-Side Wizard; "no rudder motion before limits").
+        # Sent every telemetry cycle; unchanged snapshots are not re-published.
+        try:
+            _update(limits=json.loads(line.split(None, 1)[1]))
+        except (IndexError, ValueError):
+            log.warning("Bad LIMITS from bridge: %s", line)
 
     elif c == "RAM_PROG":
         # RAM sweep progress: RAM_PROG <full strokes done> <total>
@@ -1258,6 +1282,25 @@ body{
 }
 .tres-b3.visible{display:block}
 
+/* Dock-Side Wizard (reuses the TEST overlay panel) */
+.wz-rud{font-family:'Courier New',monospace;color:#00d4ff;font-size:1.5em;text-align:center;
+  padding:4px 0;letter-spacing:1px}
+.wz-stat{font-size:.72em;border-radius:5px;padding:5px 8px;margin:4px 0;line-height:1.45;white-space:pre-wrap}
+.wz-stat.ok {background:rgba(0,204,80,.08);border:1px solid #0a4020;color:#00cc50}
+.wz-stat.bad{background:rgba(204,48,48,.08);border:1px solid #3a1010;color:#e06060}
+.wz-row{display:flex;align-items:center;gap:8px;padding:4px 0}
+.wz-inp{width:58px;background:#080f20;border:1px solid #1e3450;border-radius:4px;color:#00d4ff;
+  font-family:'Courier New',monospace;font-size:.95em;padding:4px 6px;outline:none;text-align:center}
+.wz-lbl{color:#90a8c0;font-size:.74em;flex:1;line-height:1.35}
+.wz-btn{padding:6px 10px;border-radius:6px;font-size:.72em;font-weight:700;letter-spacing:1px;
+  cursor:pointer;touch-action:manipulation;border:1px solid #1e3450;
+  background:linear-gradient(180deg,#0e2038,#08121f);color:#00d4ff;min-width:84px}
+.wz-btn:disabled{opacity:.4;cursor:default}
+.wz-btn.done{border-color:#0a4020;color:#00cc50}
+.wz-msg{font-family:'Courier New',monospace;font-size:.66em;color:#e8a020;min-height:1.2em;
+  margin-top:6px;white-space:pre-wrap}
+.wz-next{color:#506070;font-size:.68em;line-height:1.6}
+
 /* Shared footer */
 .tftr{border-top:1px solid #1a1200;padding:7px 12px;display:flex;gap:8px;flex-shrink:0}
 .tftr-btn{
@@ -1455,8 +1498,8 @@ body{
     </div>
     <div class="sbody" id="sbody">
 
-      <!-- Group 1: guided setup.  The wizards themselves are not built yet;
-           the rows are placeholders so the menu structure is in place. -->
+      <!-- Group 1: guided setup.  Dock-Side has its first step (rudder limits);
+           Startup and Sea Trial are placeholders so the menu structure is in place. -->
       <div class="sg-title">SETUP WIZARDS</div>
       <div class="sf-row">
         <span class="sf-lbl" title="First-time setup: boat name and type, on-board Wi-Fi, and which sensors and options are fitted.">Startup Wizard &#9432;</span>
@@ -1464,7 +1507,7 @@ body{
       </div>
       <div class="sf-row">
         <span class="sf-lbl" title="Done alongside the dock: rudder sensor and limits, motor power and speed, compass and gyro checks.">Dock-Side Wizard &#9432;</span>
-        <button class="sf-bb sf-soon" id="sf-wiz-dock" style="padding:3px 10px" disabled>COMING SOON</button>
+        <button class="sf-bb" id="sf-wiz-dock" style="padding:3px 10px">OPEN</button>
       </div>
       <div class="sf-row">
         <span class="sf-lbl" title="Done under way: compass calibration and alignment, steering gains, off-course alarm.">Sea Trial Wizard &#9432;</span>
@@ -1746,6 +1789,56 @@ body{
     </div>
   </div><!-- .tpanel -->
 </div><!-- .tov -->
+
+<!-- Dock-Side Wizard overlay.  Step 1 (rudder sensor + limits by hand) is built;
+     later steps are listed as coming soon.  Nothing on this page moves the rudder. -->
+<div class="tov hidden" id="wov">
+  <div class="tpanel">
+    <div class="thdr">
+      <span class="thdr-title">&#9875; DOCK-SIDE WIZARD</span>
+      <span class="thdr-hint">Step 1: rudder sensor &amp; limits &mdash; by hand</span>
+    </div>
+    <div class="tbody">
+      <div class="wz-rud" id="wz-rud">Rudder --</div>
+      <div class="wz-stat bad" id="wz-stat">Limits: unknown</div>
+
+      <div class="tdet-section">Before you start</div>
+      <div class="tdet-text">Autopilot in standby. Release the clutch (or open the bypass valve) so you can turn the wheel or tiller by hand. Nothing in this step moves the rudder. Until the limits are set, the autopilot, REMOTE steering, jog and sweep are all refused.</div>
+
+      <div class="tdet-section">1. Rudder angle at the stops</div>
+      <div class="wz-row">
+        <input class="wz-inp" type="number" id="wz-range" min="10" max="100" step="1">
+        <span class="wz-lbl">degrees each side. Measure it if you can; this is what the stops will read.</span>
+        <button class="wz-btn" id="wz-range-set" style="min-width:56px">SET</button>
+      </div>
+
+      <div class="tdet-section">2. Capture &mdash; hold the rudder still for 1 s</div>
+      <div class="wz-row"><span class="wz-lbl">Rudder straight (centre)</span>
+        <button class="wz-btn" id="wz-cap-CENTRE">CENTRE</button></div>
+      <div class="wz-row"><span class="wz-lbl">Hard against the PORT stop</span>
+        <button class="wz-btn" id="wz-cap-PORT">PORT STOP</button></div>
+      <div class="wz-row"><span class="wz-lbl">Hard against the STARBOARD stop</span>
+        <button class="wz-btn" id="wz-cap-STBD">STBD STOP</button></div>
+
+      <div class="tdet-section">3. Check</div>
+      <div class="tdet-text">Turn the wheel a little to port: the reading above must show P and grow. Centre must read close to 0. If not, capture again.</div>
+
+      <div class="tdet-section">4. Soft limits (inside the stops)</div>
+      <div class="wz-row">
+        <span class="wz-lbl">Port</span><input class="wz-inp" type="number" id="wz-lim-port" step="0.5">
+        <span class="wz-lbl">Stbd</span><input class="wz-inp" type="number" id="wz-lim-stbd" step="0.5">
+      </div>
+      <div class="tdet-confirm"><button class="tdet-btn yes" id="wz-save">SAVE LIMITS</button></div>
+      <div class="wz-msg" id="wz-msg"></div>
+
+      <div class="tdet-section">Coming next</div>
+      <div class="wz-next">Motor direction &amp; clutch &bull; Minimum motor power &bull; Coast &amp; rudder speed &bull; Motor current &bull; Steering tolerance (sweep) &bull; Compass &amp; gyro checks &bull; Remote range &bull; STOP from every source</div>
+    </div>
+    <div class="tftr">
+      <button class="tftr-btn close" id="wov-close">CLOSE</button>
+    </div>
+  </div>
+</div>
 
 <!-- Software update modal -->
 <div id="upd-overlay" class="upd-overlay">
@@ -2079,6 +2172,37 @@ document.addEventListener('visibilitychange', function() {
 window.addEventListener('pagehide', ramHoldStop);
 window.addEventListener('blur', ramHoldStop);
 
+// ── REMOTE steering dead-man (2026-10-15) ───────────────────────────────────
+// While the bridge is in REMOTE steering (mode MANUAL) the page sends "ALIVE"
+// every 400 ms.  The bridge stops REMOTE steering, raises STEER_LOSS and sounds
+// the Nano's warning if no ALIVE arrives for 1.5 s.  Like RAM HOLD, the
+// heartbeat must come from the browser: the web remote server stays connected
+// to the bridge when the phone is gone.
+// A hidden page (screen auto-lock, app switch, tab closed) deliberately stops
+// the heartbeat rather than sending a clean MODE AUTO: nobody is watching the
+// wheel, and a screen that timed out on its own must ALERT the skipper that
+// steering stopped, not stop it silently.  Coming back within 1.5 s (a quick
+// glance at another app) keeps REMOTE steering without interruption.
+// blur is NOT treated as loss here (unlike RAM HOLD / NUDGE): the page is still
+// visible and its timers keep running, so the heartbeat continues.
+// Only the page that SELECTED REMOTE sends it (gRemoteOwner): every open page
+// sees mode MANUAL, and a second phone lying in the cabin must not keep REMOTE
+// alive after the helmsman's phone has gone.  Reloading the page gives up
+// ownership (= leaving REMOTE).  Ownership lapses once the bridge has left
+// MANUAL; the 3 s grace covers the gap between the click and the first
+// telemetry showing MANUAL.
+var REMOTE_ALIVE_PERIOD_MS = 400;
+var gRemoteOwner      = false;
+var gRemoteOwnerSince = 0;
+function claimRemote() { gRemoteOwner = true; gRemoteOwnerSince = Date.now(); }
+setInterval(function() {
+  if (gMode !== 'MANUAL') {
+    if (gRemoteOwner && Date.now() - gRemoteOwnerSince > 3000) gRemoteOwner = false;
+    return;
+  }
+  if (gRemoteOwner && !document.hidden) sendCmd('ALIVE');
+}, REMOTE_ALIVE_PERIOD_MS);
+
 function ramFmt(v, unit) { return (v === null || v === undefined) ? '  --' : String(v) + (unit || ''); }
 
 function showRamResult(r) {
@@ -2178,6 +2302,90 @@ document.getElementById('tres-b3').addEventListener('click', function() {
   sendCmd('BTN TOGGLE');
 });
 
+// ── Dock-Side Wizard, step 1: rudder sensor + limits by hand ──────────────
+// Sends LIMITS RANGE / CAPTURE / SET; the bridge does every check and reports
+// back in the LIMITS telemetry (d.limits).  The page only displays.
+var gWizOpen = false;
+var gWizFilled = false;     // inputs pre-filled once per opening (do not fight typing)
+
+function openDockWizard() {
+  _doClosePanel();                 // leave Settings without saving
+  gWizOpen = true;
+  gWizFilled = false;
+  document.getElementById('wz-msg').textContent = '';
+  document.getElementById('wov').classList.remove('hidden');
+  // Observer mode: connected for live readings, nothing steering.
+  handleToggleAction('on');
+  setToggle('on');
+}
+
+function closeDockWizard() {
+  gWizOpen = false;
+  document.getElementById('wov').classList.add('hidden');
+}
+
+function wizRender(d) {
+  var L = d.limits;
+  var rud = document.getElementById('wz-rud');
+  if (d.rdr === null || d.rdr === undefined || !d.connected) {
+    rud.textContent = 'Rudder --';
+  } else {
+    var side = d.rdr > 0.05 ? 'P ' : (d.rdr < -0.05 ? 'S ' : '');
+    rud.textContent = 'Rudder ' + side + Math.abs(d.rdr).toFixed(1) + '\u00b0';
+  }
+  var st = document.getElementById('wz-stat');
+  if (!L) {
+    st.className = 'wz-stat bad';
+    st.textContent = d.connected ? 'Limits: waiting for the autopilot\u2026' : 'Not connected to the autopilot';
+    return;
+  }
+  if (L.ok) {
+    st.className = 'wz-stat ok';
+    st.textContent = 'Limits SET: port ' + L.port_deg + '\u00b0, starboard ' + L.stbd_deg +
+                     '\u00b0 (stops \u00b1' + Math.round(L.range) + '\u00b0)';
+  } else {
+    st.className = 'wz-stat bad';
+    st.textContent = 'Limits NOT SET: ' + L.reason + (L.cal_problem ? '\\nCalibration: ' + L.cal_problem : '');
+  }
+  ['CENTRE', 'PORT', 'STBD'].forEach(function(p) {
+    var b = document.getElementById('wz-cap-' + p);
+    var done = (L.done || []).indexOf(p) >= 0;
+    b.classList.toggle('done', done);
+    b.disabled = !!L.capturing;
+    b.textContent = (L.capturing === p ? 'HOLD STILL\u2026'
+                     : {CENTRE: 'CENTRE', PORT: 'PORT STOP', STBD: 'STBD STOP'}[p] + (done ? ' \u2713' : ''));
+  });
+  if (!gWizFilled && L.range) {
+    gWizFilled = true;
+    document.getElementById('wz-range').value = Math.round(L.range);
+    var dflt = Math.max(5, L.range - (L.margin || 3));
+    document.getElementById('wz-lim-port').value = L.port_deg != null ? L.port_deg : dflt;
+    document.getElementById('wz-lim-stbd').value = L.stbd_deg != null ? L.stbd_deg : dflt;
+  }
+  document.getElementById('wz-msg').textContent = L.msg || '';
+}
+
+document.getElementById('sf-wiz-dock').addEventListener('click', openDockWizard);
+document.getElementById('wov-close').addEventListener('click', closeDockWizard);
+document.getElementById('wz-range-set').addEventListener('click', function() {
+  var v = parseFloat(document.getElementById('wz-range').value);
+  if (!(v >= 10 && v <= 100)) { document.getElementById('wz-msg').textContent = 'Enter 10-100 degrees'; return; }
+  sendCmd('LIMITS RANGE ' + v);
+  // New range -> propose new soft limits on the next status
+  gWizFilled = false;
+});
+['CENTRE', 'PORT', 'STBD'].forEach(function(p) {
+  document.getElementById('wz-cap-' + p).addEventListener('click', function() {
+    sendCmd('LIMITS CAPTURE ' + p);
+  });
+});
+document.getElementById('wz-save').addEventListener('click', function() {
+  var pv = parseFloat(document.getElementById('wz-lim-port').value);
+  var sv = parseFloat(document.getElementById('wz-lim-stbd').value);
+  if (isNaN(pv) || isNaN(sv)) { document.getElementById('wz-msg').textContent = 'Enter both limits'; return; }
+  sendCmd('LIMITS SET ' + pv + ' ' + sv);
+});
+
 // ── SSE subscription ──────────────────────────────────────────────────────
 var es = new EventSource('/events');
 es.onmessage = function(e) { updateUI(JSON.parse(e.data)); };
@@ -2255,7 +2463,14 @@ var ALERT_COLS = 21;      // characters that fit a panel row
 function updateAlertsFromState(d) {
   var a = [];
   var comms = (d.comms || 'OK').toUpperCase();
+  // Bridge-raised alerts (telemetry WARN <code>): steering stopped for safety.
+  if (d.connected && d.warn === 'STEER_LOSS')         a.push({p:0, text:'REMOTE STEER: STOPPED', cls:'a-crit'});
+  if (d.connected && d.warn === 'AP_LOST')            a.push({p:0, text:'AUTOPILOT: STOPPED',    cls:'a-crit'});
   if (d.connected && d.rudder_stall)                  a.push({p:1, text:'RUDDER: NOT MOVING',    cls:'a-crit'});
+  // No rudder motion before limits: steering is refused until the Dock-Side Wizard
+  // has set them.  Red when the bridge just refused or stopped something.
+  if (d.connected && d.limits && !d.limits.ok)
+    a.push({p:1, text:'RUDDER LIMITS: NOT SET', cls: d.warn === 'LIMITS_UNSET' ? 'a-crit' : 'a-warn'});
   if (!d.connected && gTogglePos !== 'off')           a.push({p:2, text:'AUTOPILOT: LOST',       cls:'a-crit'});
   if (d.connected && comms === 'CRIT')                a.push({p:3, text:'STEER MOTOR: FAULT',    cls:'a-crit'});
   if (d.connected && d.pypilot_ok === false)          a.push({p:4, text:'COMPASS: NO HEADING',   cls:'a-warn'});
@@ -2324,6 +2539,7 @@ setInterval(linkProbe, LP_PERIOD_MS);
 
 // ── UI updater ────────────────────────────────────────────────────────────
 function updateUI(d) {
+  if (gWizOpen) wizRender(d);
   gConnected = !!d.connected;
   gMode      = d.mode || 'IDLE';
   gApOn      = !!d.ap;
@@ -2556,6 +2772,12 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
 
 // ── Nudge buttons — hold-to-run, active in AUTO mode only ──
 // Press sends NUDGE PORT/STBD once; release sends NUDGE STOP after 100 ms debounce.
+// Dead-man (2026-10-15): while the button is held the page sends NUDGE HOLD every
+// 200 ms; the bridge stops the jog if no HOLD arrives for 0.8 s, so ANY way the
+// heartbeat stops (phone dropped/locked, tab hidden, page closed, Wi-Fi lost)
+// stops the motor — it used to keep running for up to 10 s.  HOLD never starts a
+// jog, so a jog the bridge stopped (10 s cap, rudder limit, Nano STOP) stays
+// stopped until the button is released and pressed again.
 // The debounce prevents a fast tap delivering START+STOP so close together that the
 // bridge processes them before the motor has engaged (causes the "hesitation" symptom).
 // gNudgeActive stays true until the deferred STOP is actually sent, so a second press
@@ -2563,6 +2785,8 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
 (function() {
   var gNudgeActive   = false;  // true while a nudge is in progress (including stop debounce)
   var gNudgeStopTimer = null;  // setTimeout handle for the deferred NUDGE STOP
+  var gNudgeHoldTimer = null;  // setInterval handle for the NUDGE HOLD heartbeat
+  var NUDGE_HOLD_PERIOD_MS = 200;
 
   function startNudge(dir) {
     // Guard: reject if not in AUTO mode (belt-and-suspenders alongside disabled attr)
@@ -2573,10 +2797,16 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
     if (gNudgeStopTimer) { clearTimeout(gNudgeStopTimer); gNudgeStopTimer = null; }
     gNudgeActive = true;
     sendCmd('NUDGE ' + dir);
+    gNudgeHoldTimer = setInterval(function() {
+      // A hidden page cannot be watched by the skipper: let the heartbeat lapse.
+      if (!document.hidden) sendCmd('NUDGE HOLD');
+    }, NUDGE_HOLD_PERIOD_MS);
   }
 
   function stopNudge() {
     if (!gNudgeActive) return;
+    // Heartbeat stops at once, even though the STOP itself is debounced below.
+    if (gNudgeHoldTimer) { clearInterval(gNudgeHoldTimer); gNudgeHoldTimer = null; }
     // 100 ms debounce: delay STOP so the bridge has time to engage the motor before
     // the STOP arrives.  gNudgeActive stays true until the STOP is sent, blocking a
     // second nudge start during this window.
@@ -2604,6 +2834,13 @@ document.getElementById('stop-btn').addEventListener('touchstart', function(e) {
   stbdBtn.addEventListener('touchstart',  function(e) { e.preventDefault(); startNudge('STBD'); }, {passive: false});
   stbdBtn.addEventListener('touchend',    function(e) { e.preventDefault(); stopNudge(); }, {passive: false});
   stbdBtn.addEventListener('touchcancel', stopNudge);
+
+  // Losing the page's attention is the same as letting go (same rule as RAM HOLD).
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) stopNudge();
+  });
+  window.addEventListener('pagehide', stopNudge);
+  window.addEventListener('blur', stopNudge);
 }());
 
 // Mode radio button clicks
@@ -2640,11 +2877,15 @@ function handleToggleAction(action) {
 
   } else if (action === 'remote') {
     // REMOTE mode: helm wheel lights up, skipper commands the rudder.
+    // Selecting REMOTE on this page makes it the dead-man heartbeat sender.
+    claimRemote();
     if (gMode === 'MANUAL') {
       gTogglePos = 'remote';
       return;
     }
-    sendCmd('MODE MANUAL').then(function(res) {
+    // "ALIVE" = this page promises the dead-man heartbeat: the bridge arms it at
+    // once, so locking the phone even before the first ALIVE still stops steering.
+    sendCmd('MODE MANUAL ALIVE').then(function(res) {
       if (!res.ok) return;
       gTogglePos = 'remote';
       // Sync wheel graphic to actual rudder position (same sign as telemetry update).
@@ -2779,8 +3020,9 @@ var SF = [
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
   {id:'pgain',                  sec:'autopilot', type:'number', dead:true},
   {id:'off_course_alarm_deg',   sec:'autopilot', type:'number', dead:true},
-  {id:'rudder_limit_port_pct',  sec:'autopilot', type:'number'},
-  {id:'rudder_limit_stbd_pct',  sec:'autopilot', type:'number'},
+  // Replaced in v3.3.0 by the Dock-Side Wizard's limits in degrees (bridge-owned file).
+  {id:'rudder_limit_port_pct',  sec:'autopilot', type:'number', dead:'REPLACED: DOCK-SIDE WIZARD'},
+  {id:'rudder_limit_stbd_pct',  sec:'autopilot', type:'number', dead:'REPLACED: DOCK-SIDE WIZARD'},
   // Safety
   {id:'auto_disengage_on_fault',  sec:'safety', type:'bool', dead:true},
   {id:'comms_warn_threshold_pct', sec:'safety', type:'number', dead:true},
@@ -2993,10 +3235,14 @@ function sfMarkDead() {
     var row = document.querySelector('.sf-row[data-sfid="' + f.id + '"]');
     if (!row) return;
     row.classList.add('sf-dead');
-    row.title = 'Not used yet: saved, but Inno-Pilot does not act on this setting.';
+    // dead:true = not used yet; dead:'<text>' = replaced by something else (text says what)
+    var tag = (typeof f.dead === 'string') ? f.dead : 'NOT USED';
+    row.title = (typeof f.dead === 'string')
+      ? 'No longer used: replaced by the setting named in brackets.'
+      : 'Not used yet: saved, but Inno-Pilot does not act on this setting.';
     row.querySelectorAll('input,button').forEach(function(el) { el.disabled = true; });
     var lbl = row.querySelector('.sf-lbl');
-    if (lbl) lbl.insertAdjacentHTML('beforeend', '<span class="sf-dead-tag">(NOT USED)</span>');
+    if (lbl) lbl.insertAdjacentHTML('beforeend', '<span class="sf-dead-tag">(' + tag + ')</span>');
   });
 }
 sfMarkDead();
@@ -3433,6 +3679,8 @@ class _Handler(BaseHTTPRequestHandler):
             _update(mode="IDLE", ap=0, ui_mode="on")
         elif len(tok) >= 2 and tok[0] == "MODE":
             if tok[1] == "MANUAL":
+                global _ui_remote_since
+                _ui_remote_since = time.monotonic()
                 _update(mode="MANUAL", ui_mode="remote")
             elif tok[1] == "AUTO":
                 _update(mode="IDLE", ui_mode="auto")

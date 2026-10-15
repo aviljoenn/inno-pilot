@@ -124,10 +124,10 @@ def ota_host() -> str:
 # Bumped on EVERY merge of code to master, in all actively developed components at once.
 # Paused components (currently the ESP32 remote firmware + its OTA binary) are deliberately
 # NOT bumped, so the mismatch stays visible (see CLAUDE.md "Version sync").
-INNOPILOT_VERSION      = "v3.2.0"
+INNOPILOT_VERSION      = "v3.3.0"
 # Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
 # MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-INNOPILOT_VERSION_CODE = 30200
+INNOPILOT_VERSION_CODE = 30300
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -177,6 +177,7 @@ WARNING_CODE               = 0xEA  # warning type to display/beep on Nano
 # Warning subtypes sent with WARNING_CODE
 WARN_NONE        = 0
 WARN_STEER_LOSS  = 2   # TCP dropped in MANUAL: continuous beep, STOP required
+WARN_SILENCE     = 3   # remote STOP: Nano silences every alarm (like its own STOP button)
 
 # Nano -> Bridge telemetry / events
 PIN_STATE_CODE    = 0xE1  # H-bridge pin state change: bits [2]=D9/EN, [1]=D3/LPWM, [0]=D2/RPWM
@@ -216,9 +217,59 @@ BTN_EVT_TOGGLE    = 3
 BTN_EVT_PLUS10    = 4
 BTN_EVT_PLUS1     = 5
 BTN_EVT_STOP      = 6
+# Not a button: the Nano's AP command watchdog disengaged because pypilot's
+# COMMAND frames stopped arriving (pypilot crashed or hung).
+BTN_EVT_AP_LOST   = 7
 # Plain names for logs / RAM sweep stop reasons shown to the skipper
 BTN_EVT_NAMES = {BTN_EVT_MINUS10: "-10", BTN_EVT_MINUS1: "-1", BTN_EVT_TOGGLE: "B3",
-                 BTN_EVT_PLUS10: "+10", BTN_EVT_PLUS1: "+1", BTN_EVT_STOP: "STOP"}
+                 BTN_EVT_PLUS10: "+10", BTN_EVT_PLUS1: "+1", BTN_EVT_STOP: "STOP",
+                 BTN_EVT_AP_LOST: "AP command watchdog"}
+
+# ---------------------------------------------------------------------------
+# Phone dead-man heartbeats (safety, 2026-10-15)
+# The web remote's TCP client is inno_web_remote.py on this Pi, which stays
+# connected when the phone is gone (screen off, battery, overboard, Wi-Fi), so a
+# TCP disconnect cannot detect a lost phone.  Anything that moves the rudder from
+# the phone therefore needs a heartbeat that originates in the browser:
+#  - REMOTE (MODE MANUAL): "ALIVE" lines.  Enforced once the client has sent its
+#    first ALIVE in this REMOTE session (opt-in keeps the paused ESP32 remote,
+#    which never sends ALIVE and relies on its own TCP drop, working).
+#  - NUDGE: the page sends "NUDGE HOLD" while the button is held; a nudge with no
+#    heartbeat for NUDGE_ALIVE_TIMEOUT_S stops (it used to run up to 10 s).
+# ---------------------------------------------------------------------------
+REMOTE_ALIVE_TIMEOUT_S = 1.5   # page sends ALIVE every 0.4 s while in REMOTE
+NUDGE_ALIVE_TIMEOUT_S  = 0.8   # page sends NUDGE HOLD every 0.2 s while held
+
+# Jog soft-limit lead (bench test 2026-10-15): the bridge sees pypilot's rudder angle
+# ~0.2-0.4 s late (5 Hz updates + filtering) and the rudder coasts after the motor
+# stops, so stopping AT the limit ran 2.2 deg past it (0.8 deg short of the stop).
+# The jog now stops when angle + speed * lead reaches the limit.  Tune on the boat:
+# "NUDGE ... settled at" in the log shows where the rudder actually came to rest.
+# Measured on Inno-Pilot-Rosa (12-14 deg/s): the rudder coasts only 0.6-0.9 deg after
+# the stop; most of the old overshoot was pypilot's 5 Hz angle steps (~2.6 deg each
+# at that speed).  0.5 s stopped 3-6 deg short; 0.25 s covers one step + coast.
+NUDGE_LIMIT_LEAD_S     = 0.25
+NUDGE_SETTLE_LOG_S     = 1.5   # log the resting angle this long after a limit stop
+
+# pypilot's servo stream (COMMAND/DISENGAGE frames on the PTY) runs at >= 5 Hz in
+# every mode.  Silent for this long = pypilot hung: its rudder angle is stale and is
+# no longer relayed to the Nano (whose cross-check would otherwise latch a rejection
+# against a frozen angle — bench test 2026-10-15).
+PP_STREAM_STALE_S      = 1.0
+
+# Skipper alerts the bridge raises itself (telemetry "WARN <code>"; bare "WARN" = none).
+ALERT_STEER_LOSS = "STEER_LOSS"   # REMOTE steering stopped: phone/link lost
+ALERT_AP_LOST    = "AP_LOST"      # autopilot stopped steering: pypilot lost
+ALERT_HOLD_S     = 120.0          # shown this long unless the skipper re-engages first
+ALERT_LIMITS_UNSET = "LIMITS_UNSET"  # motion refused or stopped: rudder limits not set/valid
+
+
+# Bridge-side AP stream watchdog: in AP mode pypilot sends COMMAND at >= 5 Hz.
+# None for this long means nothing is steering although the remote shows AP
+# (pypilot hung, or the skipper re-engaged while it was hung so the Nano never
+# engaged).  Longer than the Nano's own 1.5 s watchdog, which normally acts first;
+# this one also covers a lost Nano event and a Nano that never engaged.
+AP_STREAM_TIMEOUT_S = 3.0
 
 # Nano -> Bridge new telemetry
 BUZZER_STATE_CODE = 0xEB  # Nano->Bridge: buzzer on(1)/off(0)
@@ -317,6 +368,44 @@ RCT_SETTINGS_PATH = "/etc/inno-pilot/rct_settings.json"
 # ---------------------------------------------------------------------------
 PILOT_SETTINGS_PATH = "/var/lib/inno-pilot/settings.json"
 
+# ---------------------------------------------------------------------------
+# Rudder limits ("no rudder motion before limits are set", agreed 2026-10-15).
+#
+# The bridge refuses every rudder motion (AP, REMOTE, jog, sweep) until the
+# skipper has set the rudder limits BY HAND in the Dock-Side Wizard: clutch out,
+# turn the wheel/tiller to centre and to each stop while the bridge captures the
+# rudder sensor, then confirm soft limits a few degrees inside each stop.
+#
+# The capture reuses pypilot's own 3-point calibration (rudder.py, triggered via
+# rudder.calibration_state): the stops are DECLARED to be at +/-rudder.range.
+# The limits are stored together with the calibration they were set against
+# (scale/offset/nonlinearity/range).  Any later change to that calibration --
+# a reset or capture on pypilot's port 8000 page, a range edit, the Nano's
+# EEPROM copy differing -- makes the limits invalid, and the bridge stops any
+# motion in progress.  The file is owned by the bridge and is deliberately NOT
+# part of settings.json, so SETTINGS SET from a remote cannot mark limits "set".
+#
+# NOTE: the soft limits are enforced by the bridge only for the jog and the
+# sweep.  AP and REMOTE are still bounded only by pypilot's +/-range and the
+# Nano's own limits (TODO.md HIGH item) -- "limits set" is a precondition for
+# motion, not yet a guarantee that every mode stays inside them.
+# ---------------------------------------------------------------------------
+RUDDER_LIMITS_PATH = "/var/lib/inno-pilot/rudder_limits.json"
+LIMITS_MARGIN_DEFAULT_DEG = 3.0  # proposed soft limit = stop - this
+LIMITS_MIN_MARGIN_DEG     = 1.0  # a soft limit must be at least this far inside its stop
+LIMITS_MIN_DEG            = 5.0  # ... and at least this far from centre
+LIMITS_CAP_SAMPLE_S       = 1.0  # a capture samples the rudder angle for this long
+LIMITS_CAP_STILL_DEG      = 0.5  # ... and fails if it moved more than this (not held still)
+LIMITS_CAP_SETTLE_S       = 2.0  # pypilot needs a moment to apply a capture before SET
+LIMITS_RANGE_MIN_DEG      = 10.0 # pypilot rudder.range bounds (RangeProperty 10..100)
+LIMITS_RANGE_MAX_DEG      = 100.0
+# Calibration tolerance when comparing with the values stored at "limits set".
+# pypilot re-adopts the Nano's EEPROM copy on every connect, which is quantised
+# (arduino_servo mirror: offset*64, scale*8, nonlinearity*8), so allow one step.
+LIMITS_CAL_TOL = {"scale": 0.13, "offset": 0.02, "nonlinearity": 0.13, "range": 0.5}
+# pypilot calibration_state names for each captured point
+LIMITS_CAP_POINTS = {"CENTRE": "centered", "PORT": "port range", "STBD": "starboard range"}
+
 _DEFAULT_PILOT_SETTINGS: dict = {
     "network": {
         "ip_mode": "dhcp",
@@ -353,6 +442,9 @@ _DEFAULT_PILOT_SETTINGS: dict = {
         # Convention: pct=100 = full port, pct=0 = full stbd (matches conv. 1, 2, 7).
         # rudder_limit_port_pct is therefore the *upper* allowed pct (default 100 = no limit).
         # rudder_limit_stbd_pct is the *lower* allowed pct (default 0 = no limit).
+        # NO LONGER USED (v3.3.0): replaced by the Dock-Side Wizard's degree limits in
+        # RUDDER_LIMITS_PATH.  Kept only because they are still part of the Nano
+        # EEPROM settings block (_serialize_settings); see TODO.md DUP-06.
         "rudder_limit_port_pct":  100,
         "rudder_limit_stbd_pct":  0,
     },
@@ -593,6 +685,45 @@ class BridgeState:
     nudge_cmd_val:          int = 0         # PYPILOT_COMMAND_CODE value: 2000=full port, 0=full stbd (conv 1)
     nudge_was_idle:        bool = False      # True if mode was IDLE when nudge was triggered
     nudge_last_sent:      float = 0.0       # monotonic time of last synthetic COMMAND frame sent
+    nudge_alive_last:     float = 0.0       # monotonic time of the last NUDGE start/HOLD from the page
+    nudge_prev_angle: Optional[float] = None  # jog speed estimate (soft-limit lead)
+    nudge_prev_t:         float = 0.0
+    nudge_speed:          float = 0.0       # deg/s, + = port (pypilot convention)
+    nudge_settle_at:      float = 0.0       # when to log the resting angle after a limit stop
+    nudge_settle_lim:     float = 0.0
+    pp_frame_last:        float = 0.0       # monotonic time of the last valid frame FROM pypilot's servo
+    # REMOTE dead-man (see REMOTE_ALIVE_TIMEOUT_S)
+    manual_alive_last:    float = 0.0       # monotonic time of the last ALIVE in REMOTE
+    manual_hb_seen:        bool = False     # client sent ALIVE this REMOTE session -> enforce
+    # Skipper alert raised by the bridge (ALERT_*), sent as telemetry "WARN <code>"
+    alert:        Optional[str] = None
+    alert_at:             float = 0.0       # monotonic time the alert was raised
+    # pypilot connection, previous loop (detects a crash/restart while engaged)
+    prev_pp_connected: Optional[bool] = None
+    # No surprise re-engage: set when the bridge itself stopped the AP because
+    # pypilot vanished (connection lost / Nano AP command watchdog).  While set,
+    # pypilot COMMAND frames are not relayed to the Nano, so a pypilot that comes
+    # back still engaged cannot re-engage the motor after the skipper was told
+    # "AUTOPILOT: STOPPED".  Cleared by pypilot's own DISENGAGE (it has caught
+    # up) or by the skipper engaging the AP again.
+    pp_cmd_block: bool = False
+    pp_cmd_last:  float = 0.0        # monotonic time of the last COMMAND frame FROM pypilot
+    # Rudder limits (see RUDDER_LIMITS_PATH).  limits_ok is re-evaluated every
+    # loop; while False every rudder motion is refused or stopped.
+    rudder_limits: dict = field(default_factory=dict)  # contents of RUDDER_LIMITS_PATH
+    limits_ok:      bool = False
+    limits_reason:  str  = "not checked yet"
+    last_cal: Optional[dict] = None    # last complete pypilot calibration seen (kept
+                                       # across a pypilot outage so REMOTE stays usable)
+    limits_ap_stop_sent: float = 0.0   # rate-limits "ap.enabled=False" while blocked
+    # By-hand capture in progress (LIMITS CAPTURE <point>)
+    lim_cap_point: Optional[str] = None   # CENTRE / PORT / STBD being sampled
+    lim_cap_t0:    float = 0.0
+    lim_cap_min:   float = 0.0
+    lim_cap_max:   float = 0.0
+    lim_cap_done:  dict = field(default_factory=dict)  # point -> time captured (this session)
+    lim_cap_last:  float = 0.0     # monotonic time of the last capture sent to pypilot
+    lim_msg:       str  = ""       # last result line for the wizard page
     # Fix #5c two-way sync: tracks the last pypilot rudder.range value mirrored into
     # _pilot_settings, to avoid re-persisting and re-pushing on every loop iteration.
     last_synced_rudder_range: float = -1.0
@@ -638,7 +769,7 @@ def pypilot_worker(
             client.watch('rudder.scale', True)    # calibration -> Nano local angle
             client.watch('rudder.offset', True)
             client.watch('rudder.nonlinearity', True)
-            log_pp.info("Connected to pypilot")
+            log_pp.info("pypilot client started (127.0.0.1) — connects on first poll")
 
             while True:
                 # Drain outbound set() queue before blocking on receive()
@@ -653,8 +784,23 @@ def pypilot_worker(
                 # Sleep to yield CPU back to main thread on single-core Pi Zero
                 time.sleep(0.01)
 
+                # Connection state from the client itself.  pypilotClient never
+                # raises when pypilot goes away: it closes the socket
+                # (client.connection = False) and quietly reconnects on later
+                # polls, re-sending our watches.  This used to be "connected = True"
+                # on every pass, so a dead pypilot looked alive and the bridge's
+                # "pypilot connection lost" stop never fired (only the Nano's 1.5 s
+                # watchdog caught it — bench test on Inno-Pilot-Rosa, 2026-10-15).
+                conn_now = bool(client.connection)
                 with lock:
-                    state.connected = True
+                    was = state.connected
+                    state.connected = conn_now
+                if was and not conn_now:
+                    log_pp.warning("Connection lost: pypilot closed the connection — reconnecting")
+                elif conn_now and not was:
+                    log_pp.info("pypilot connection up")
+
+                with lock:
                     if "ap.heading_command" in msgs:
                         try:
                             state.heading_cmd = float(msgs["ap.heading_command"])
@@ -1225,16 +1371,247 @@ def handle_remote_disconnect(
     Nano out of manual mode, trigger the Nano steer-loss alarm, disengage AP.
     """
     if bstate.mode == MODE_MANUAL:
-        send_nano_frame(nano, MANUAL_MODE_CODE, 0)          # exit manual on Nano
-        send_nano_frame(nano, WARNING_CODE, WARN_STEER_LOSS) # trigger Nano alarm
-        set_q.put(("ap.enabled", False))
-        with plock:
-            pstate.ap_enabled = False
-        log.warning("Remote disconnected in MANUAL mode — STEER LOSS triggered")
-        bstate.mode = MODE_IDLE
+        remote_steer_loss(nano, bstate, set_q, pstate, plock, "remote disconnected")
     elif ram_active(bstate):
         # No remote left means nobody can be holding the dead-man button.
         ram_test_abort(nano, bstate, "remote disconnected")
+
+
+def raise_alert(bstate: BridgeState, code: str) -> None:
+    """Raise a skipper alert (ALERT_*); telemetry carries it as "WARN <code>"."""
+    bstate.alert = code
+    bstate.alert_at = time.monotonic()
+
+
+def remote_steer_loss(
+    nano: serial.Serial,
+    bstate: BridgeState,
+    set_q: "queue.Queue[tuple]",
+    pstate: PypilotState,
+    plock: threading.Lock,
+    reason: str,
+) -> None:
+    """REMOTE steering lost its operator (TCP drop or missing ALIVE heartbeat).
+
+    Force the Nano out of REMOTE (motor stops, clutch drops — the rudder is left
+    where it is; never auto-centre), sound the Nano steer-loss alarm, make sure
+    the AP is off, and raise the skipper alert.
+    """
+    send_nano_frame(nano, MANUAL_MODE_CODE, 0)          # exit manual on Nano
+    send_nano_frame(nano, WARNING_CODE, WARN_STEER_LOSS) # trigger Nano alarm
+    set_q.put(("ap.enabled", False))
+    with plock:
+        pstate.ap_enabled = False
+    bstate.mode = MODE_IDLE
+    bstate.manual_hb_seen = False
+    raise_alert(bstate, ALERT_STEER_LOSS)
+    log.warning("REMOTE steering lost (%s) — STEER LOSS triggered, mode -> IDLE", reason)
+
+
+def nudge_stop(nano: serial.Serial, bstate: BridgeState, reason: str) -> None:
+    """End an active nudge.  From IDLE the Nano gets DISENGAGE (clutch drops);
+    from AP the pypilot relay simply resumes.  No-op when no nudge is running."""
+    if bstate.nudge_until <= 0.0:
+        return
+    if bstate.nudge_was_idle:
+        send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
+        log.info("%s: nudge stopped (mode was IDLE — sent DISENGAGE to Nano)", reason)
+    else:
+        log.info("%s: nudge stopped (mode was AP — pypilot relay resumed)", reason)
+    bstate.nudge_until = 0.0
+
+
+def ap_failsafe_stop(
+    nano: serial.Serial,
+    bstate: BridgeState,
+    set_q: "queue.Queue[tuple]",
+    pstate: PypilotState,
+    plock: threading.Lock,
+    reason: str,
+) -> None:
+    """The bridge stops the AP because pypilot is gone or silent while engaged.
+
+    DISENGAGE to the Nano at once, tell pypilot (queued if it is unreachable),
+    alert the skipper, and block pypilot COMMAND frames until pypilot itself
+    disengages or the skipper engages again (pp_cmd_block: no surprise re-engage).
+    """
+    nudge_stop(nano, bstate, reason)
+    send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
+    set_q.put(("ap.enabled", False))   # delivered when pypilot is back
+    with plock:
+        pstate.ap_enabled = False
+    bstate.mode = MODE_IDLE
+    bstate.pp_cmd_block = True
+    raise_alert(bstate, ALERT_AP_LOST)
+    log.warning("AP stopped by failsafe (%s) — DISENGAGE sent, mode -> IDLE", reason)
+
+
+# ===========================================================================
+# Rudder limits: "no rudder motion before limits are set"
+# ===========================================================================
+
+def load_rudder_limits() -> dict:
+    """Read RUDDER_LIMITS_PATH; {} when missing or unreadable (= limits not set)."""
+    try:
+        with open(RUDDER_LIMITS_PATH) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log.warning("Rudder limits file unreadable (%s) — treating limits as NOT set", exc)
+        return {}
+
+
+def save_rudder_limits(data: dict) -> None:
+    """Write RUDDER_LIMITS_PATH atomically (temp file + rename), so a power cut
+    mid-write can never leave a half-written file that parses as 'set'."""
+    os.makedirs(os.path.dirname(RUDDER_LIMITS_PATH), exist_ok=True)
+    tmp = RUDDER_LIMITS_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, RUDDER_LIMITS_PATH)
+    log.info("Rudder limits saved -> %s", RUDDER_LIMITS_PATH)
+
+
+def cal_snapshot(scale: Optional[float], offset: Optional[float],
+                 nonlin: Optional[float], rng: Optional[float]) -> Optional[dict]:
+    """pypilot's rudder calibration as a dict, or None while any value is unknown."""
+    if None in (scale, offset, nonlin, rng):
+        return None
+    return {"scale": float(scale), "offset": float(offset),
+            "nonlinearity": float(nonlin), "range": float(rng)}
+
+
+def cal_problem(cal: dict) -> Optional[str]:
+    """Plain-words reason why a calibration is unusable for limits, or None.
+
+    pypilot: angle = scale*u + offset + nl*(m0-u)*(m1-u), u = raw in -0.5..0.5,
+    m0/m1 = raw at -range/+range.  Checks the stops are inside the sensor's
+    span, far enough apart, and that the curve is monotonic between them
+    (slope at each stop keeps the sign of scale and at least half its size).
+    """
+    scale, offset, nl, rng = cal["scale"], cal["offset"], cal["nonlinearity"], cal["range"]
+    if abs(scale) < 1.0:
+        return "rudder sensor calibration is missing or flat"
+    m0, m1 = (-rng - offset) / scale, (rng - offset) / scale
+    if max(abs(m0), abs(m1)) > 0.5:
+        return "a stop lies outside the rudder sensor's range"
+    if abs(m1 - m0) < 0.02:
+        return "the rudder sensor barely changes between the stops"
+    if abs(nl * (m1 - m0)) > 0.5 * abs(scale):
+        return "centre is too far off the middle between the stops (curve not usable)"
+    return None
+
+
+def limits_check(lim: dict, cal: Optional[dict]) -> tuple:
+    """(ok, reason): are the stored limits valid for the current calibration?"""
+    if not lim.get("set"):
+        return False, "rudder limits have not been set"
+    if cal is None:
+        return False, "waiting for the rudder calibration from pypilot"
+    stored = lim.get("cal") or {}
+    for key, tol in LIMITS_CAL_TOL.items():
+        try:
+            if abs(float(stored[key]) - cal[key]) > tol:
+                return False, "rudder calibration changed since the limits were set"
+        except (KeyError, TypeError, ValueError):
+            return False, "stored rudder limits are incomplete"
+    return True, "ok"
+
+
+def limits_refuse(bstate: BridgeState, what: str) -> bool:
+    """True (and alert the skipper) if rudder motion `what` must be refused."""
+    if bstate.limits_ok:
+        return False
+    raise_alert(bstate, ALERT_LIMITS_UNSET)
+    log.warning("%s refused: %s — run the Dock-Side Wizard", what, bstate.limits_reason)
+    return True
+
+
+def limits_status_json(bstate: BridgeState) -> str:
+    """Status line body for the Dock-Side Wizard page (telemetry LIMITS <json>)."""
+    lim = bstate.rudder_limits
+    cal = bstate.last_cal
+    return json.dumps({
+        "ok": bstate.limits_ok,
+        "reason": bstate.limits_reason,
+        "set": bool(lim.get("set")),
+        "port_deg": lim.get("port_limit_deg"),
+        "stbd_deg": lim.get("stbd_limit_deg"),
+        "range": cal["range"] if cal else None,
+        "cal_problem": cal_problem(cal) if cal else None,
+        "capturing": bstate.lim_cap_point,
+        "done": sorted(bstate.lim_cap_done),
+        "msg": bstate.lim_msg,
+        "margin": LIMITS_MARGIN_DEFAULT_DEG,
+    }, separators=(",", ":"))
+
+
+def limits_capture_service(bstate: BridgeState, set_q: "queue.Queue[tuple]",
+                           rudder_angle: Optional[float], pp_connected: bool,
+                           now: float) -> None:
+    """Run a pending LIMITS CAPTURE: watch the rudder for LIMITS_CAP_SAMPLE_S and,
+    if it stayed still, hand the point to pypilot's calibration (rudder.py
+    snapshots its raw sensor value for the declared angle 0/+range/-range)."""
+    point = bstate.lim_cap_point
+    if point is None:
+        return
+    if (bstate.mode != MODE_IDLE or bstate.nudge_until > 0.0 or
+            not pp_connected or rudder_angle is None):
+        bstate.lim_cap_point = None
+        bstate.lim_msg = "Capture of %s cancelled (steering started or rudder reading lost)" % point
+        log.warning("LIMITS CAPTURE %s cancelled", point)
+        return
+    bstate.lim_cap_min = min(bstate.lim_cap_min, rudder_angle)
+    bstate.lim_cap_max = max(bstate.lim_cap_max, rudder_angle)
+    if now - bstate.lim_cap_t0 < LIMITS_CAP_SAMPLE_S:
+        return
+    bstate.lim_cap_point = None
+    spread = bstate.lim_cap_max - bstate.lim_cap_min
+    if spread > LIMITS_CAP_STILL_DEG:
+        bstate.lim_msg = ("%s not captured: the rudder moved %.1f° — hold it still and try again"
+                          % (point, spread))
+        log.warning("LIMITS CAPTURE %s rejected: moved %.2f deg", point, spread)
+        return
+    set_q.put(("rudder.calibration_state", LIMITS_CAP_POINTS[point]))
+    bstate.lim_cap_done[point] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    bstate.lim_cap_last = now
+    bstate.lim_msg = "%s captured" % point
+    log.info("LIMITS CAPTURE %s -> pypilot calibration_state '%s' (still within %.2f deg)",
+             point, LIMITS_CAP_POINTS[point], spread)
+
+
+def limits_stop_motion(nano: serial.Serial, bstate: BridgeState,
+                       set_q: "queue.Queue[tuple]", pstate: PypilotState,
+                       plock: threading.Lock) -> None:
+    """Limits became invalid: stop whatever is moving the rudder (each stop
+    through its own normal exit path).  Never auto-centres."""
+    why = "rudder limits not valid (%s)" % bstate.limits_reason
+    stopped = False
+    if ram_active(bstate):
+        ram_test_abort(nano, bstate, why)
+        stopped = True
+    if bstate.nudge_until > 0.0:
+        nudge_stop(nano, bstate, why)
+        stopped = True
+    if bstate.mode == MODE_MANUAL:
+        send_nano_frame(nano, MANUAL_MODE_CODE, 0)    # motor stops, clutch drops
+        bstate.mode = MODE_IDLE
+        bstate.manual_hb_seen = False
+        stopped = True
+    if bstate.mode == MODE_AP:
+        send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
+        set_q.put(("ap.enabled", False))
+        with plock:
+            pstate.ap_enabled = False
+        bstate.mode = MODE_IDLE
+        stopped = True
+    if stopped:
+        raise_alert(bstate, ALERT_LIMITS_UNSET)
+        log.warning("Steering stopped: %s", why)
 
 
 # ===========================================================================
@@ -1586,10 +1963,19 @@ def process_remote_line(
       MODE MANUAL       -> enter remote manual steering
       MODE AUTO         -> exit remote manual steering
       RUD <pct>         -> rudder target 0-100% (only in MANUAL mode)
-      NUDGE PORT|STBD   -> 500 ms full-power motor jog (IDLE or AP mode only)
+      NUDGE PORT|STBD   -> hold-to-run motor jog (IDLE or AP mode only); the page
+                           then sends NUDGE HOLD while held (dead-man,
+                           NUDGE_ALIVE_TIMEOUT_S) and NUDGE STOP on release
+      ALIVE             -> REMOTE dead-man heartbeat from the page (REMOTE_ALIVE_TIMEOUT_S);
+                           "MODE MANUAL ALIVE" arms it at entry
       RAM_SETUP <deg> [cycles] -> arm the RAM commissioning sweep
       RAM HOLD          -> dead-man heartbeat: starts / keeps the sweep running
       RAM RELEASE       -> operator let go: stops the sweep
+      LIMITS RANGE|CAPTURE|SET ... -> Dock-Side Wizard: rudder limits by hand
+                           (status goes out as telemetry "LIMITS <json>")
+
+    No rudder motion before limits: BTN TOGGLE (engage), MODE MANUAL, NUDGE and
+    RAM_SETUP are refused while bstate.limits_ok is False (see RUDDER_LIMITS_PATH).
     """
     parts = line.strip().split()
     if not parts:
@@ -1607,6 +1993,16 @@ def process_remote_line(
 
     if cmd == "PING":
         remote_send(remote_sock, "PONG")
+
+    elif cmd == "ALIVE":
+        # REMOTE dead-man heartbeat.  Only meaningful in REMOTE; the first one
+        # arms enforcement for this REMOTE session (see REMOTE_ALIVE_TIMEOUT_S).
+        if bstate.mode == MODE_MANUAL:
+            bstate.manual_alive_last = time.monotonic()
+            if not bstate.manual_hb_seen:
+                bstate.manual_hb_seen = True
+                log.info("REMOTE dead-man heartbeat active (timeout %.1f s)",
+                         REMOTE_ALIVE_TIMEOUT_S)
 
     elif cmd == "HELLO":
         remote_ver = parts[1] if len(parts) > 1 else "unknown"
@@ -1631,6 +2027,11 @@ def process_remote_line(
             log.info("OTA offered to remote at %s", ota_url)
 
     elif cmd == "ESTOP":
+        # Remote STOP = the Nano's STOP button: full stop AND silence every alarm.
+        # Units without helm buttons have no other way to silence the Nano buzzer
+        # (bench test 2026-10-15: STEER LOSS alarm could not be stopped).
+        send_nano_frame(nano, WARNING_CODE, WARN_SILENCE)
+        nudge_stop(nano, bstate, "remote ESTOP")   # STOP is unconditional: ends a jog too
         set_q.put(("ap.enabled", False))
         with plock:
             pstate.ap_enabled = False
@@ -1654,10 +2055,14 @@ def process_remote_line(
             with plock:
                 current = pstate.ap_enabled
             target = True if current is None else (not current)
+            if target and limits_refuse(bstate, "Remote BTN TOGGLE (engage AP)"):
+                return
             set_q.put(("ap.enabled", target))
             with plock:
                 pstate.ap_enabled = target  # optimistic cache
             if target:
+                bstate.pp_cmd_block = False   # skipper chose to engage
+                bstate.pp_cmd_last = time.monotonic()   # AP stream watchdog grace
                 bstate.mode = MODE_AP
             else:
                 bstate.mode = MODE_IDLE
@@ -1686,6 +2091,8 @@ def process_remote_line(
         arg = parts[1].upper()
 
         if arg == "MANUAL":
+            if limits_refuse(bstate, "Remote MODE MANUAL (REMOTE steering)"):
+                return
             # Disable AP, grant manual authority to remote
             set_q.put(("ap.enabled", False))
             with plock:
@@ -1696,6 +2103,12 @@ def process_remote_line(
             # the opposite side due to a sign-convention mismatch in the pct formula.
             send_nano_frame(nano, MANUAL_MODE_CODE, 1)
             bstate.mode = MODE_MANUAL
+            # New REMOTE session.  "MODE MANUAL ALIVE" (the web page) promises the
+            # ALIVE heartbeat, so the dead-man is armed at once -- a page hidden
+            # before its first ALIVE (tap REMOTE, lock the phone) must still stop.
+            # Plain "MODE MANUAL" (paused ESP32 remote) arms on the first ALIVE, if any.
+            bstate.manual_hb_seen    = len(parts) > 2 and parts[2].upper() == "ALIVE"
+            bstate.manual_alive_last = time.monotonic()
             # C: track the Nano's seed (= where the rudder is now) instead of the old
             # fixed 500 placeholder.  The stall check compares this target with the
             # actual rudder; with 500 it saw a "commanded" move that never happened
@@ -1707,13 +2120,15 @@ def process_remote_line(
                 bstate.manual_rud_target = int(round(max(0.0, min(100.0, pct)) * 10.0))
             else:
                 bstate.manual_rud_target = 500
-            log.info("Remote -> MODE MANUAL: manual steering active (target seeded %d)",
-                     bstate.manual_rud_target)
+            log.info("Remote -> MODE MANUAL: manual steering active (target seeded %d, "
+                     "dead-man %s)", bstate.manual_rud_target,
+                     "armed" if bstate.manual_hb_seen else "on first ALIVE")
 
         elif arg == "AUTO":
             if bstate.mode == MODE_MANUAL:
                 send_nano_frame(nano, MANUAL_MODE_CODE, 0)
                 bstate.mode = MODE_IDLE
+                bstate.manual_hb_seen = False
                 log.info("Remote -> MODE AUTO: manual steering released")
 
     elif cmd == "RUD":
@@ -1808,6 +2223,9 @@ def process_remote_line(
         if ram_active(bstate):
             refuse("sweep already armed or running")
             return
+        if limits_refuse(bstate, "Remote RAM_SETUP (rudder sweep)"):
+            refuse("rudder limits not set — run the Dock-Side Wizard first")
+            return
         if len(parts) < 2:
             refuse("missing degrees")
             return
@@ -1827,10 +2245,9 @@ def process_remote_line(
             return
         rng = float(abs(pp_rng)) if pp_rng else float(
             _pilot_settings.get("vessel", {}).get("rudder_range_deg", 35))
-        # Respect the operator's rudder limits (pct: 100=port end, 0=stbd end).
-        ap_cfg = _pilot_settings.get("autopilot", {})
-        port_max = (float(ap_cfg.get("rudder_limit_port_pct", 100)) / 50.0 - 1.0) * rng
-        stbd_max = -(float(ap_cfg.get("rudder_limit_stbd_pct", 0)) / 50.0 - 1.0) * rng
+        # Stay inside the Dock-Side Wizard's soft limits (degrees, valid: checked above).
+        port_max = float(bstate.rudder_limits["port_limit_deg"])
+        stbd_max = float(bstate.rudder_limits["stbd_limit_deg"])
         lim = int(min(rng, port_max, stbd_max))
         deg = max(1, min(deg, lim))
         if deg < RAM_MIN_DEG:
@@ -1901,12 +2318,19 @@ def process_remote_line(
                 ram_test_abort(nano, bstate, "hold button released")
 
     elif cmd == "NUDGE":
-        # NUDGE PORT | NUDGE STBD — start sustained motor jog (hold-to-run).
+        # NUDGE PORT | NUDGE STBD — start / keep running the motor jog (hold-to-run).
         # NUDGE STOP             — stop the active jog immediately.
         #
-        # The web UI sends NUDGE PORT/STBD once on button press and NUDGE STOP
-        # once on button release.  No heartbeats are used.  A 10 s safety timeout
-        # auto-stops the jog if NUDGE STOP is never received (e.g. browser crash).
+        # NUDGE HOLD             — dead-man heartbeat for the running jog.
+        #
+        # Dead-man (2026-10-15): the web UI sends NUDGE PORT/STBD once on press, then
+        # NUDGE HOLD every 0.2 s while the button is held, and NUDGE STOP on release.
+        # HOLD only refreshes nudge_alive_last; it never starts a jog, so once a jog
+        # has been stopped by anything else (10 s cap, rudder limit, Nano STOP,
+        # pypilot loss) a still-held button cannot restart it — the skipper must
+        # release and press again.  The main loop stops the jog when heartbeats stop
+        # for NUDGE_ALIVE_TIMEOUT_S (phone lost / screen off / Wi-Fi).  The 10 s cap
+        # remains as a last resort.
         #
         # In IDLE: engages the clutch for the jog duration, then disengages on stop.
         # In AP:   suppresses pypilot relay while jog is active; AP resumes after.
@@ -1921,14 +2345,15 @@ def process_remote_line(
         if direction == "STOP":
             # Explicit stop from button release — terminate nudge immediately.
             if bstate.nudge_until > 0.0:
-                if bstate.nudge_was_idle:
-                    send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
-                    log.info("NUDGE STOP received: mode was IDLE — sent DISENGAGE to Nano")
-                else:
-                    log.info("NUDGE STOP received: mode was AP — pypilot relay resumed")
-                bstate.nudge_until = 0.0
+                nudge_stop(nano, bstate, "NUDGE STOP received")
             else:
                 log.debug("NUDGE STOP received: no active nudge, ignored")
+            return
+
+        if direction == "HOLD":
+            if bstate.nudge_until > 0.0:
+                bstate.nudge_alive_last = time.monotonic()
+            # else: no jog running (stopped or never started) — ignore; never resume
             return
 
         if direction not in ("PORT", "STBD"):
@@ -1937,13 +2362,130 @@ def process_remote_line(
         if bstate.mode not in (MODE_IDLE, MODE_AP):
             log.warning("Remote NUDGE: ignored — mode is %s (must be IDLE or AP)", bstate.mode)
             return
+        if limits_refuse(bstate, "Remote NUDGE %s (jog)" % direction):
+            return
         cmd_val = 2000 if direction == "PORT" else 0
-        bstate.nudge_was_idle  = (bstate.mode == MODE_IDLE)
-        bstate.nudge_cmd_val   = cmd_val
-        bstate.nudge_last_sent = 0.0  # force immediate first frame
-        bstate.nudge_until     = time.monotonic() + 10.0  # 10 s safety timeout
-        log.info("NUDGE %s started: cmd_val=%d, was_idle=%s, safety timeout=10s",
-                 direction, cmd_val, bstate.nudge_was_idle)
+        now_m = time.monotonic()
+        if bstate.nudge_until > 0.0 and bstate.nudge_cmd_val == cmd_val:
+            bstate.nudge_alive_last = now_m      # heartbeat for the running jog
+            return
+        bstate.nudge_was_idle   = (bstate.mode == MODE_IDLE)
+        bstate.nudge_cmd_val    = cmd_val
+        bstate.nudge_last_sent  = 0.0  # force immediate first frame
+        bstate.nudge_alive_last = now_m
+        bstate.nudge_until      = now_m + 10.0  # last-resort cap
+        bstate.nudge_prev_angle = None          # fresh speed estimate for the limit lead
+        bstate.nudge_speed      = 0.0
+        log.info("NUDGE %s started: cmd_val=%d, was_idle=%s, dead-man %.1f s, cap 10 s",
+                 direction, cmd_val, bstate.nudge_was_idle, NUDGE_ALIVE_TIMEOUT_S)
+
+    elif cmd == "LIMITS":
+        # Dock-Side Wizard, step 1: rudder sensor + limits BY HAND (see RUDDER_LIMITS_PATH).
+        #   LIMITS RANGE <deg>          declared rudder angle at the stops (pypilot rudder.range)
+        #   LIMITS CAPTURE CENTRE|PORT|STBD   sample the still rudder, then hand the
+        #                               point to pypilot's 3-point calibration
+        #   LIMITS SET <port_deg> <stbd_deg>  soft limits (magnitudes) -> limits set
+        # Nothing here moves the rudder: the skipper turns the wheel/tiller with the
+        # clutch out.  Refused unless the bridge is IDLE, so a capture can never
+        # change the calibration under a running AP/REMOTE/jog/sweep.
+        sub = parts[1].upper() if len(parts) > 1 else ""
+
+        def lim_reply(msg: str) -> None:
+            bstate.lim_msg = msg
+            log.info("LIMITS %s: %s", sub, msg)
+
+        if bstate.mode != MODE_IDLE or bstate.nudge_until > 0.0:
+            lim_reply("Not now: put the autopilot in standby first (mode %s)" % bstate.mode)
+            return
+        with plock:
+            pp_ok = pstate.connected
+            rud = pstate.rudder_angle
+        if not pp_ok or rud is None:
+            lim_reply("No rudder reading: pypilot is not running or the rudder sensor is not seen")
+            return
+
+        if sub == "RANGE":
+            try:
+                deg = float(parts[2])
+            except (IndexError, ValueError):
+                lim_reply("Rudder angle at the stops: enter a number of degrees")
+                return
+            if not LIMITS_RANGE_MIN_DEG <= deg <= LIMITS_RANGE_MAX_DEG:
+                lim_reply("Rudder angle at the stops must be %.0f-%.0f°"
+                          % (LIMITS_RANGE_MIN_DEG, LIMITS_RANGE_MAX_DEG))
+                return
+            set_q.put(("rudder.range", deg))
+            # pypilot's captured points carry the angle they were declared at;
+            # after a range change they must all be captured again.
+            bstate.lim_cap_done = {}
+            bstate.lim_cap_last = time.monotonic()   # our own change: not "foreign"
+            lim_reply("Stops set to ±%.0f°. Now capture centre, port stop and starboard stop" % deg)
+
+        elif sub == "CAPTURE":
+            point = parts[2].upper() if len(parts) > 2 else ""
+            if point not in LIMITS_CAP_POINTS:
+                lim_reply("Unknown point '%s' (CENTRE, PORT or STBD)" % point)
+                return
+            if bstate.lim_cap_point is not None:
+                lim_reply("Already capturing %s" % bstate.lim_cap_point)
+                return
+            # Sampled in the main loop over LIMITS_CAP_SAMPLE_S (see limits_capture_service).
+            bstate.lim_cap_point = point
+            bstate.lim_cap_t0 = time.monotonic()
+            bstate.lim_cap_min = bstate.lim_cap_max = rud
+            lim_reply("Capturing %s: hold the rudder still" % point)
+
+        elif sub == "SET":
+            try:
+                port_deg, stbd_deg = abs(float(parts[2])), abs(float(parts[3]))
+            except (IndexError, ValueError):
+                lim_reply("Enter both limits in degrees")
+                return
+            cal = bstate.last_cal
+            if cal is None:
+                lim_reply("No rudder calibration from pypilot yet")
+                return
+            fresh = all(p in bstate.lim_cap_done for p in LIMITS_CAP_POINTS)
+            if not fresh and not bstate.limits_ok:
+                missing = [p for p in LIMITS_CAP_POINTS if p not in bstate.lim_cap_done]
+                lim_reply("Capture %s first" % ", ".join(missing))
+                return
+            if time.monotonic() - bstate.lim_cap_last < LIMITS_CAP_SETTLE_S:
+                lim_reply("Calibration still updating, press SAVE again in a moment")
+                return
+            problem = cal_problem(cal)
+            if problem:
+                lim_reply("Calibration not usable: %s. Capture the three points again" % problem)
+                return
+            rng = cal["range"]
+            for name, v in (("Port", port_deg), ("Starboard", stbd_deg)):
+                if v > rng - LIMITS_MIN_MARGIN_DEG or v < LIMITS_MIN_DEG:
+                    lim_reply("%s limit must be %.0f-%.0f° (at least %.0f° inside the %.0f° stop)"
+                              % (name, LIMITS_MIN_DEG, rng - LIMITS_MIN_MARGIN_DEG,
+                                 LIMITS_MIN_MARGIN_DEG, rng))
+                    return
+            data = {
+                "version": 1,
+                "set": True,
+                "set_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "port_limit_deg": round(port_deg, 1),
+                "stbd_limit_deg": round(stbd_deg, 1),
+                "cal": cal,
+                "captured_at": bstate.lim_cap_done if fresh else
+                               bstate.rudder_limits.get("captured_at"),
+            }
+            try:
+                save_rudder_limits(data)
+            except Exception as exc:
+                lim_reply("Could not save the limits: %s" % exc)
+                return
+            bstate.rudder_limits = data
+            bstate.lim_cap_done = {}
+            lim_reply("Limits set: port %.1f°, starboard %.1f° (stops ±%.0f°)"
+                      % (port_deg, stbd_deg, rng))
+
+        else:
+            lim_reply("Unknown LIMITS command '%s'" % sub)
 
     elif cmd == "SETTINGS":
         sub = parts[1].upper() if len(parts) > 1 else ""
@@ -2062,6 +2604,12 @@ def main() -> None:
 
     # ---- bridge state (mode state machine) ----
     bstate = BridgeState()
+    bstate.rudder_limits = load_rudder_limits()
+    log.info("Rudder limits: %s", "stored (port %s°, stbd %s°), checked against pypilot's "
+             "calibration once it arrives" % (bstate.rudder_limits.get("port_limit_deg"),
+                                              bstate.rudder_limits.get("stbd_limit_deg"))
+             if bstate.rudder_limits.get("set") else
+             "NOT SET — all rudder motion refused until the Dock-Side Wizard sets them")
 
     # ---- volatile diagnostic log (tmpfs — does not survive reboot) ----
     diag_log = logging.getLogger("bridge.diag")
@@ -2147,6 +2695,36 @@ def main() -> None:
                              rcal_in[0], rcal_in[1], rcal_in[2], rudder_range, *coeffs)
 
         # ----------------------------------------------------------------
+        # Rudder limits: valid only for the calibration they were set against.
+        # Invalid -> stop anything moving the rudder (no motion before limits).
+        # The last complete calibration is kept through a pypilot outage so
+        # REMOTE (steering on the Nano's local angle) stays available.
+        # ----------------------------------------------------------------
+        cal_now = cal_snapshot(*rcal_in, rudder_range)
+        if cal_now is not None:
+            # A calibration change the wizard did not cause (port 8000 reset or
+            # capture, settings range edit) while points are captured: those
+            # points no longer describe pypilot's calibration, so LIMITS SET must
+            # not accept them.  Our own captures/range land within
+            # LIMITS_CAP_SETTLE_S of lim_cap_last (rudder.range is watched at 1 s).
+            if (bstate.lim_cap_done and bstate.last_cal is not None and
+                    cal_now != bstate.last_cal and
+                    now - bstate.lim_cap_last > LIMITS_CAP_SETTLE_S):
+                bstate.lim_cap_done = {}
+                bstate.lim_msg = ("Rudder calibration was changed elsewhere — "
+                                  "capture centre, port and starboard again")
+                log.warning("LIMITS: calibration changed outside the wizard — captured points discarded")
+            bstate.last_cal = cal_now
+        lim_ok, lim_reason = limits_check(bstate.rudder_limits, bstate.last_cal)
+        if (lim_ok, lim_reason) != (bstate.limits_ok, bstate.limits_reason):
+            (log.info if lim_ok else log.warning)(
+                "Rudder limits: %s", "valid" if lim_ok else "NOT valid — " + lim_reason)
+        bstate.limits_ok, bstate.limits_reason = lim_ok, lim_reason
+        if not lim_ok:
+            limits_stop_motion(nano, bstate, set_q, pstate, plock)
+        limits_capture_service(bstate, set_q, rudder_angle, pp_connected, now)
+
+        # ----------------------------------------------------------------
         # RAM commissioning sweep: dead-man/validity watchdogs, stroke
         # measurement and reversals — every loop, not just at 5 Hz.
         # Current is only used when a current sensor is configured.
@@ -2159,6 +2737,45 @@ def main() -> None:
             if remote_clients:
                 remote_send_many(remote_clients, "RAM_RESULT " + bstate.ram_result_pending)
             bstate.ram_result_pending = None   # already in the journal either way
+
+        # ----------------------------------------------------------------
+        # REMOTE dead-man: the page sends ALIVE while it is in REMOTE.  Once
+        # it has, silence for REMOTE_ALIVE_TIMEOUT_S means the phone is gone.
+        # ----------------------------------------------------------------
+        if (bstate.mode == MODE_MANUAL and bstate.manual_hb_seen and
+                now - bstate.manual_alive_last > REMOTE_ALIVE_TIMEOUT_S):
+            remote_steer_loss(nano, bstate, set_q, pstate, plock,
+                              "no ALIVE heartbeat for %.1f s" % REMOTE_ALIVE_TIMEOUT_S)
+
+        # ----------------------------------------------------------------
+        # pypilot crash / restart while engaged: disengage at once rather than
+        # wait for the Nano's AP command watchdog (which also covers a hang,
+        # where the connection stays up but COMMAND frames stop).
+        # ----------------------------------------------------------------
+        if bstate.prev_pp_connected and not pp_connected:
+            # pypilot keeps captured calibration points in RAM only: a restart
+            # loses them, so a half-done Dock-Side capture must start again.
+            bstate.lim_cap_done = {}
+            # A nudge's rudder-limit check uses pypilot's angle: stop it in any mode.
+            nudge_stop(nano, bstate, "pypilot connection lost")
+            if bstate.mode == MODE_AP:
+                ap_failsafe_stop(nano, bstate, set_q, pstate, plock,
+                                 "pypilot connection lost while engaged")
+        bstate.prev_pp_connected = pp_connected
+
+        # AP shown but pypilot not commanding (see AP_STREAM_TIMEOUT_S).
+        if (bstate.mode == MODE_AP and bstate.nudge_until <= 0.0 and
+                now - bstate.pp_cmd_last > AP_STREAM_TIMEOUT_S):
+            ap_failsafe_stop(nano, bstate, set_q, pstate, plock,
+                             "no pypilot COMMAND for %.1f s in AP" % AP_STREAM_TIMEOUT_S)
+
+        # A raised alert clears once the skipper re-engages (AP or REMOTE) or
+        # after ALERT_HOLD_S.  The 2 s guard keeps it visible across the mode
+        # change that raised it.
+        if bstate.alert is not None:
+            age = now - bstate.alert_at
+            if age > ALERT_HOLD_S or (age > 2.0 and bstate.mode in (MODE_AP, MODE_MANUAL)):
+                bstate.alert = None
 
         # ----------------------------------------------------------------
         # Fix #5c two-way sync: when pypilot publishes a new rudder.range
@@ -2194,7 +2811,8 @@ def main() -> None:
                 send_nano_frame(nano, PILOT_HEADING_CODE, enc_deg10_u16(heading))
             if heading_cmd is not None:
                 send_nano_frame(nano, PILOT_COMMAND_CODE, enc_deg10_u16(heading_cmd))
-            if rudder_angle is not None:
+            pp_angle_fresh = pp_connected and (now - bstate.pp_frame_last) <= PP_STREAM_STALE_S
+            if rudder_angle is not None and pp_angle_fresh:
                 # Coord-system bridge (see PILOT_RUDDER_CODE comment): negate to
                 # translate pypilot's canonical positive=port into the Nano's
                 # internal positive=Dir-A (high ADC) degree axis.
@@ -2221,6 +2839,8 @@ def main() -> None:
                 failed: set[socket.socket] = set()
                 failed.update(remote_send_many(remote_clients, f"AP {1 if bstate.mode == MODE_AP else 0}"))
                 failed.update(remote_send_many(remote_clients, f"MODE {bstate.mode}"))
+                failed.update(remote_send_many(remote_clients,
+                                               "LIMITS " + limits_status_json(bstate)))
                 if ram_active(bstate):
                     done = sum(1 for r in bstate.ram_results if r.full)
                     failed.update(remote_send_many(
@@ -2332,6 +2952,11 @@ def main() -> None:
                     remote_clients,
                     f"PYPILOT {'OK' if pp_ok else 'DEAD'}",
                 ))
+                # Bridge-raised skipper alert (ALERT_*); bare "WARN" clears it.
+                failed.update(remote_send_many(
+                    remote_clients,
+                    f"WARN {bstate.alert}" if bstate.alert else "WARN",
+                ))
 
                 for sock in failed:
                     meta = remote_clients.pop(sock, {})
@@ -2347,39 +2972,58 @@ def main() -> None:
         # ================================================================
 
         # ---- Nudge: expiry, limit-check, and frame injection ----
+        if bstate.nudge_settle_at and now >= bstate.nudge_settle_at:
+            bstate.nudge_settle_at = 0.0
+            if rudder_angle is not None:
+                log.info("NUDGE limit stop settled at %.1f° (limit %.1f°, %+.1f° past)",
+                         rudder_angle, bstate.nudge_settle_lim,
+                         abs(rudder_angle) - abs(bstate.nudge_settle_lim))
         nudge_active = bstate.nudge_until > 0.0
         if nudge_active:
-            if now >= bstate.nudge_until:
-                # Timer expired — terminate nudge cleanly
-                if bstate.nudge_was_idle:
-                    send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
-                    log.info("NUDGE expired: mode was IDLE — sent DISENGAGE to Nano")
-                else:
-                    log.info("NUDGE expired: mode was AP — pypilot relay resumed")
-                bstate.nudge_until = 0.0
+            if now - bstate.nudge_alive_last > NUDGE_ALIVE_TIMEOUT_S:
+                # Dead-man: the page stopped sending NUDGE HOLD (phone/Wi-Fi/screen lost)
+                nudge_stop(nano, bstate, "NUDGE dead-man (no HOLD for %.1f s)"
+                           % NUDGE_ALIVE_TIMEOUT_S)
+                nudge_active = False
+            elif now >= bstate.nudge_until:
+                nudge_stop(nano, bstate, "NUDGE 10 s cap reached")
                 nudge_active = False
             else:
-                # Cancel early if rudder has reached the software limit
-                if rudder_angle is not None and rudder_range is not None and rudder_range > 0:
-                    # Convention: pct=100=port, pct=0=stbd.
-                    current_pct = (rudder_range + rudder_angle) / (2.0 * rudder_range) * 100.0
-                    ap_cfg = _pilot_settings.get("autopilot", {})
+                # Cancel early if rudder has reached the soft limit.  Limits are the
+                # Dock-Side Wizard's degree limits (RUDDER_LIMITS_PATH); a nudge only
+                # starts while they are valid.  (They replaced the old
+                # rudder_limit_port_pct / rudder_limit_stbd_pct settings.)
+                if rudder_angle is not None and bstate.limits_ok:
+                    # Speed estimate from pypilot's angle updates (smoothed), used to
+                    # stop early by speed * NUDGE_LIMIT_LEAD_S (lag + coast).
+                    if bstate.nudge_prev_angle is None:
+                        bstate.nudge_prev_angle, bstate.nudge_prev_t = rudder_angle, now
+                    elif rudder_angle != bstate.nudge_prev_angle and now > bstate.nudge_prev_t:
+                        v = (rudder_angle - bstate.nudge_prev_angle) / (now - bstate.nudge_prev_t)
+                        bstate.nudge_speed = 0.5 * bstate.nudge_speed + 0.5 * v
+                        bstate.nudge_prev_angle, bstate.nudge_prev_t = rudder_angle, now
+                    lim = bstate.rudder_limits
                     limit_hit = False
                     if bstate.nudge_cmd_val == 2000:   # port nudge (conv 1: larger = port)
-                        # port_lim is the *upper* allowed pct (default 100 = no limit).
-                        port_lim = float(ap_cfg.get("rudder_limit_port_pct", 100))
-                        if current_pct >= port_lim:
+                        port_lim = float(lim["port_limit_deg"])   # pypilot angle: + = port
+                        ahead = rudder_angle + max(0.0, bstate.nudge_speed) * NUDGE_LIMIT_LEAD_S
+                        if ahead >= port_lim:
                             limit_hit = True
-                            log.info("NUDGE PORT: port limit reached (%.1f%% >= %.1f%%), stopping",
-                                     current_pct, port_lim)
+                            bstate.nudge_settle_lim = port_lim
+                            log.info("NUDGE PORT: port limit ahead (%.1f° now, %.1f° predicted >= "
+                                     "%.1f°, %.1f°/s), stopping", rudder_angle, ahead, port_lim,
+                                     bstate.nudge_speed)
                     else:                            # stbd nudge
-                        # stbd_lim is the *lower* allowed pct (default 0 = no limit).
-                        stbd_lim = float(ap_cfg.get("rudder_limit_stbd_pct", 0))
-                        if current_pct <= stbd_lim:
+                        stbd_lim = -float(lim["stbd_limit_deg"])
+                        ahead = rudder_angle + min(0.0, bstate.nudge_speed) * NUDGE_LIMIT_LEAD_S
+                        if ahead <= stbd_lim:
                             limit_hit = True
-                            log.info("NUDGE STBD: stbd limit reached (%.1f%% <= %.1f%%), stopping",
-                                     current_pct, stbd_lim)
+                            bstate.nudge_settle_lim = stbd_lim
+                            log.info("NUDGE STBD: stbd limit ahead (%.1f° now, %.1f° predicted <= "
+                                     "%.1f°, %.1f°/s), stopping", rudder_angle, ahead, stbd_lim,
+                                     bstate.nudge_speed)
                     if limit_hit:
+                        bstate.nudge_settle_at = now + NUDGE_SETTLE_LOG_S
                         if bstate.nudge_was_idle:
                             send_nano_frame(nano, PYPILOT_DISENGAGE_CODE, 0)
                         bstate.nudge_until = 0.0
@@ -2402,6 +3046,9 @@ def main() -> None:
                 if crc_calc == candidate[3]:
                     del pilot_buf[:4]
                     relay_good += 1
+                    bstate.pp_frame_last = now     # pypilot's servo stream is alive
+                    if candidate[0] == PYPILOT_COMMAND_CODE:
+                        bstate.pp_cmd_last = now   # AP stream watchdog (even if dropped below)
                     if nudge_active:
                         # Nudge in progress: consume frame but do not forward to Nano.
                         # pypilot's frames are silently dropped for the 500 ms window.
@@ -2412,6 +3059,24 @@ def main() -> None:
                         # mode and drives the rudder to the hard limit. Drop it.
                         log.debug("pilot->nano RAM_DROP  code=0x%02X (COMMAND suppressed during RAM test)",
                                   candidate[0])
+                    elif not bstate.limits_ok and candidate[0] == PYPILOT_COMMAND_CODE:
+                        # No rudder motion before limits: pypilot is engaged by some
+                        # route the bridge did not gate (e.g. its own port 8000 page).
+                        # The command never reaches the Nano; tell pypilot to stop.
+                        if now - bstate.limits_ap_stop_sent > 1.0:
+                            bstate.limits_ap_stop_sent = now
+                            set_q.put(("ap.enabled", False))
+                            with plock:
+                                pstate.ap_enabled = False
+                            raise_alert(bstate, ALERT_LIMITS_UNSET)
+                            log.warning("pypilot COMMAND dropped: %s — ap.enabled=False sent",
+                                        bstate.limits_reason)
+                    elif bstate.pp_cmd_block and candidate[0] == PYPILOT_COMMAND_CODE:
+                        # No surprise re-engage after the bridge stopped the AP
+                        # (see BridgeState.pp_cmd_block): pypilot is still
+                        # commanding, the skipper has not re-engaged.  Drop it.
+                        log.debug("pilot->nano BLOCK_DROP code=0x%02X (AP stopped by "
+                                  "failsafe; waiting for skipper)", candidate[0])
                     else:
                         # Normal path: wrap with magic header and forward to Nano
                         wrapped = wrap_frame(candidate)
@@ -2423,6 +3088,9 @@ def main() -> None:
                         # This keeps bstate.mode correct when pypilot changes AP state
                         # independently (fault, external client, etc.).
                         relay_code = candidate[0]
+                        if relay_code == PYPILOT_DISENGAGE_CODE and bstate.pp_cmd_block:
+                            bstate.pp_cmd_block = False   # pypilot has caught up
+                            log.info("pypilot relay: DISENGAGE received — failsafe block cleared")
                         if relay_code == PYPILOT_DISENGAGE_CODE and bstate.mode == MODE_AP:
                             bstate.mode = MODE_IDLE
                             with plock:
@@ -2513,7 +3181,7 @@ def main() -> None:
                     if ram_active(bstate):
                         ram_test_abort(nano, bstate,
                                        f"helm {BTN_EVT_NAMES.get(value, value)} button pressed")
-                        ram_swallow = value != BTN_EVT_STOP
+                        ram_swallow = value not in (BTN_EVT_STOP, BTN_EVT_AP_LOST)
                     try:
                         if ram_swallow:
                             pass
@@ -2521,10 +3189,14 @@ def main() -> None:
                             with plock:
                                 current = pstate.ap_enabled
                             target = True if current is None else (not current)
+                            if target and limits_refuse(bstate, "Nano B3 (engage AP)"):
+                                continue
                             set_q.put(("ap.enabled", target))
                             with plock:
                                 pstate.ap_enabled = target
                             if target:
+                                bstate.pp_cmd_block = False   # skipper chose to engage
+                                bstate.pp_cmd_last = now      # AP stream watchdog grace
                                 bstate.mode = MODE_AP
                             else:
                                 bstate.mode = MODE_IDLE
@@ -2546,15 +3218,30 @@ def main() -> None:
                             with plock:
                                 pstate.heading_cmd = new_cmd
 
-                        elif value == BTN_EVT_STOP:
-                            # STOP pressed on Nano: disengage AP and exit any manual mode
+                        elif value in (BTN_EVT_STOP, BTN_EVT_AP_LOST):
+                            # STOP pressed on the Nano, or the Nano's AP command
+                            # watchdog disengaged: AP off, leave REMOTE, end any nudge.
+                            # The Nano re-sends STOP while its STOP latch sees pypilot
+                            # still commanding, so this must stay idempotent.
                             set_q.put(("ap.enabled", False))
                             with plock:
                                 pstate.ap_enabled = False
+                            nudge_stop(nano, bstate, "Nano %s" % BTN_EVT_NAMES[value])
                             if bstate.mode == MODE_MANUAL:
                                 send_nano_frame(nano, MANUAL_MODE_CODE, 0)
+                                bstate.manual_hb_seen = False
+                            if value == BTN_EVT_AP_LOST:
+                                # pypilot hung: if it recovers still engaged it must
+                                # not re-engage by itself (see pp_cmd_block).
+                                bstate.pp_cmd_block = True
+                            if value == BTN_EVT_AP_LOST and bstate.mode == MODE_AP:
+                                raise_alert(bstate, ALERT_AP_LOST)
+                                log.warning("Nano AP command watchdog: pypilot stopped "
+                                            "commanding while engaged — AP off, mode=IDLE")
+                            else:
+                                log.info("Nano %s -> ap.enabled=False, mode=IDLE",
+                                         BTN_EVT_NAMES[value])
                             bstate.mode = MODE_IDLE
-                            log.info("Nano STOP -> ap.enabled=False, mode=IDLE")
 
                     except Exception as e:
                         log.error("Button event error: %s", e)
