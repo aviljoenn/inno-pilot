@@ -34,7 +34,7 @@ deliberately not bumped.
 
 ### Added
 - Attended rudder sweep with measurements (Hardware Test 1); Hardware tests 2-9 greyed out
-  (PR #85, first shipped on Dyason as v3.0.3 from the PR branch).
+  (PR #85, first shipped on Inno-Pilot-Rosa as v3.0.3 from the PR branch).
 
 ### Fixed
 - Latent `NameError` in vendored pypilot `gps_filter.py` (missing `import datetime`, PR #80).
@@ -46,7 +46,7 @@ remote). The paused
 ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped.
 
 ### Fixed
-- **REMOTE helm: "play" between the finger and the rudder** (found on Dyason after the
+- **REMOTE helm: "play" between the finger and the rudder** (found on Inno-Pilot-Rosa after the
   deadband tuning; four stacked causes, fixed together):
   - **A — final finger position dropped** (`inno_web_remote.py`): RUD was rate-limited
     to 5 Hz and anything inside the 200 ms window was discarded, with nothing sent on
@@ -82,9 +82,9 @@ ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped
   - Nano flash 96% (29508 / 30720) after B — little headroom left.
 - **Nano: REMOTE steering and the rudder sweep could not start the motor near the
   target** (`motor_simple.ino`; hardware impact — motor drive). Within 4 × deadband of
-  the target (24° on Dyason) remote-manual mode wrote `analogWrite(D9, 160)`, but the
+  the target (24° on Inno-Pilot-Rosa) remote-manual mode wrote `analogWrite(D9, 160)`, but the
   pin-state telemetry called `digitalRead(D9)` every loop, and on AVR `digitalRead()`
-  turns PWM off on that pin — the duty never reached the motor. Found when Dyason's
+  turns PWM off on that pin — the duty never reached the motor. Found when Inno-Pilot-Rosa's
   second sweep stopped "stuck" without moving at all. Fix: all EN writes go through
   `motor_pwm()`, which records the duty, and the telemetry reports EN from that value
   (no `digitalRead(D9)`); and the slow zone now drives at full duty (255), matching the
@@ -126,9 +126,9 @@ ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped
     STOPPED. Reported only — nothing is written to settings.
   - Amplitude 5°–range (also clamped to `rudder_limit_*_pct`), 1–10 cycles
     (default 3). Bridge now watches `servo.current` from pypilot.
-  - **Deadband-aware** (found on Dyason's first boat run, which false-stopped with
+  - **Deadband-aware** (found on Inno-Pilot-Rosa's first boat run, which false-stopped with
     "rudder not moving" while the rudder moved fine): the Nano stops anywhere within
-    its deadband (`deadband_pct` × full span — ±6° on Dyason at 10%). The sweep now
+    its deadband (`deadband_pct` × full span — ±6° on Inno-Pilot-Rosa at 10%). The sweep now
     treats arriving inside that band as the end of the stroke, uses its own
     speed-independent jam check (< 0.5° progress in 2 s) instead of the generic 2°/s
     stall detector, times speed over the travel actually achieved, estimates lag from
@@ -138,7 +138,7 @@ ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped
     complete run (speeds measured exactly), release (~120 ms), window blur
     (~120 ms), silent heartbeat loss (~1.1 s), Nano STOP, Nano B3, jam → stall,
     remote MODE, disconnect, 60 s arm timeout, too-small sweep refused; plus a
-    Dyason-like profile (±30°, 10% deadband, 80/20 limits) that reproduced both boat
+    Inno-Pilot-Rosa-like profile (±30°, 10% deadband, 80/20 limits) that reproduced both boat
     failures (false stop; motor never starting inside the old PWM-160 zone) and passes
     with the fixes. Nano: 91% flash / 70% RAM, `Serial` 221 bytes (128-byte RX buffer).
 
@@ -151,7 +151,7 @@ component makes a bump of all of them mandatory. The paused ESP32 remote firmwar
 
 ### Fixed
 - **Web remote felt slow and jerky** (`inno_web_remote.py`; web remote only — bridge,
-  pypilot and Nano untouched). Diagnosed from a Dyason Debug capture 2026-09-30.
+  pypilot and Nano untouched). Diagnosed from a Inno-Pilot-Rosa Debug capture 2026-09-30.
   - **SSE coalescing:** every bridge telemetry line used to push a full-state
     snapshot to every browser — ~48 events/s, ~85% identical, each a full page
     re-render, and enough to overflow a browser's 60-event queue (→ "dropped slow
@@ -275,7 +275,7 @@ component makes a bump of all of them mandatory. The paused ESP32 remote firmwar
   defines `__all__`). Added the missing `import datetime`.
   - **Dormant on every current install, not a live fault.** The line runs only
     when the `wmm2020` package is installed *and* `gps.filtered.enabled` is
-    true. On Dyason `wmm2020` is absent (`ModuleNotFoundError`) and
+    true. On Inno-Pilot-Rosa `wmm2020` is absent (`ModuleNotFoundError`) and
     `gps.filtered.enabled=false` is persisted in `~/.pypilot/pypilot.conf`, so
     it was unreachable. Found 2026-09-26 while auditing whether GPS input could
     influence autopilot heading.
@@ -330,7 +330,7 @@ component makes a bump of all of them mandatory. The paused ESP32 remote firmwar
 - **pypilot competing with avahi-daemon for mDNS (UDP 5353)** (`compute_module/pypilot/pypilot/server.py`,
   `compute_module/pypilot/pypilot/signalk.py`, `compute_module/glue/inno_pilot_bridge.py`):
   `<hostname>.local` resolution on the LAN was intermittently failing — diagnosed
-  on Dyason (2026-09-17) after the web UI appeared unreachable via mDNS. Three
+  on Inno-Pilot-Rosa (2026-09-17) after the web UI appeared unreachable via mDNS. Three
   independent pieces of code each ran their own IPv4 python-zeroconf mDNS
   responder/scanner, all competing with the system `avahi-daemon` for the same
   UDP 5353 socket (avahi itself logs `Detected another IPv4 mDNS stack running
@@ -346,7 +346,7 @@ component makes a bump of all of them mandatory. The paused ESP32 remote firmwar
      (re)connect — fixed by pinning `pypilotClient('127.0.0.1')` (bridge and
      pypilot always run co-resident on the same Pi at a fixed port, so no
      discovery was ever needed).
-  - Verified on Dyason: `avahi-daemon` is now the sole UDP 5353 holder, a fresh
+  - Verified on Inno-Pilot-Rosa: `avahi-daemon` is now the sole UDP 5353 holder, a fresh
     avahi restart logs no conflict warning, and a direct unicast mDNS query
     (`dig @<pi-ip> -p 5353 <hostname>.local A`) resolves correctly.
   - See `CLAUDE.md`'s "pypilot fork strategy" section for the full diagnosis
