@@ -1082,6 +1082,22 @@ body{
   margin:12px 0 4px;padding-bottom:3px;border-bottom:1px solid #152030;
 }
 .ss-title:first-child{margin-top:4px}
+/* Top-level groups: SETUP WIZARDS (always shown) and ADVANCED SETTINGS
+   (every individual setting; collapsed each time the panel opens). */
+.sg-title{
+  color:#00d4ff;font-size:.74em;font-weight:700;letter-spacing:2.5px;
+  margin:14px 0 4px;padding:4px 5px;border-radius:4px;
+  background:rgba(0,191,255,.06);border-left:3px solid #00bfff;
+}
+.sg-title:first-child{margin-top:4px}
+.sf-adv.hidden{display:none}
+/* Wizard rows not yet built: shown so the structure is visible, not selectable */
+.sf-bb.sf-soon{cursor:default;opacity:.45;filter:grayscale(1)}
+/* Dead setting: stored and saved, but nothing on the Pi or Nano acts on it yet.
+   Shown greyed out and locked until it is wired up or removed (see TODO.md). */
+.sf-row.sf-dead{opacity:.4;filter:grayscale(1)}
+.sf-row.sf-dead *{pointer-events:none}
+.sf-dead-tag{color:#607080;font-size:.78em;letter-spacing:.5px;margin-left:4px}
 .sf-row{
   display:flex;align-items:center;justify-content:space-between;
   padding:5px 5px;border-radius:5px;border:1px solid transparent;gap:6px;
@@ -1439,6 +1455,31 @@ body{
     </div>
     <div class="sbody" id="sbody">
 
+      <!-- Group 1: guided setup.  The wizards themselves are not built yet;
+           the rows are placeholders so the menu structure is in place. -->
+      <div class="sg-title">SETUP WIZARDS</div>
+      <div class="sf-row">
+        <span class="sf-lbl" title="First-time setup: boat name and type, on-board Wi-Fi, and which sensors and options are fitted.">Startup Wizard &#9432;</span>
+        <button class="sf-bb sf-soon" id="sf-wiz-start" style="padding:3px 10px" disabled>COMING SOON</button>
+      </div>
+      <div class="sf-row">
+        <span class="sf-lbl" title="Done alongside the dock: rudder sensor and limits, motor power and speed, compass and gyro checks.">Dock-Side Wizard &#9432;</span>
+        <button class="sf-bb sf-soon" id="sf-wiz-dock" style="padding:3px 10px" disabled>COMING SOON</button>
+      </div>
+      <div class="sf-row">
+        <span class="sf-lbl" title="Done under way: compass calibration and alignment, steering gains, off-course alarm.">Sea Trial Wizard &#9432;</span>
+        <button class="sf-bb sf-soon" id="sf-wiz-sea" style="padding:3px 10px" disabled>COMING SOON</button>
+      </div>
+
+      <!-- Group 2: every individual setting, collapsed by default.
+           Collapsing only hides rows; SAVE still collects and sends all fields. -->
+      <div class="sg-title">ADVANCED SETTINGS</div>
+      <div class="sf-row">
+        <span class="sf-lbl">All Settings</span>
+        <button class="sf-bb" id="sf-adv-toggle" style="padding:3px 14px">SHOW &#9662;</button>
+      </div>
+      <div class="sf-adv hidden" id="sf-adv">
+
       <div class="ss-title">NETWORK</div>
       <div class="sf-row" data-sfid="ip_mode">
         <span class="sf-lbl">IP Mode</span>
@@ -1625,6 +1666,8 @@ body{
         <span class="sf-lbl" title="Check GitHub for new commits and optionally install.">Software Update &#9432;</span>
         <button class="sf-bb" id="sf-check-update" style="padding:3px 14px">CHECK &#8250;</button>
       </div>
+
+      </div><!-- #sf-adv -->
 
     </div><!-- .sbody -->
     <div class="sftr">
@@ -2702,20 +2745,23 @@ window.addEventListener('touchend', function() { wheelEnd(); });
 // onVal/offVal: stored value toggled by tapping the enum field.
 // dep: {id, val} — field hidden unless named field equals val.
 // def: value shown (and saved) when the stored settings do not have the field yet.
+// dead: true — stored and saved, but nothing on the Pi or Nano acts on it yet
+//       (verified 2026-10-15).  Row is greyed out and locked; its stored value is
+//       kept and re-saved unchanged.  Wire it up or remove it, then drop the flag.
 var SF = [
   // Network
-  {id:'ip_mode', sec:'network', type:'enum',     onVal:'static', offVal:'dhcp'},
-  {id:'ip',      sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
-  {id:'mask',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
-  {id:'gateway', sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
-  {id:'dns1',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
-  {id:'dns2',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}},
+  {id:'ip_mode', sec:'network', type:'enum',     onVal:'static', offVal:'dhcp', dead:true},
+  {id:'ip',      sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}, dead:true},
+  {id:'mask',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}, dead:true},
+  {id:'gateway', sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}, dead:true},
+  {id:'dns1',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}, dead:true},
+  {id:'dns2',    sec:'network', type:'text',     dep:{id:'ip_mode', val:'static'}, dead:true},
   // Wi-Fi
-  {id:'ssid',    sec:'wifi',    type:'text'},
-  {id:'key',     sec:'wifi',    type:'password'},
+  {id:'ssid',    sec:'wifi',    type:'text', dead:true},
+  {id:'key',     sec:'wifi',    type:'password', dead:true},
   // Vessel
   {id:'name',             sec:'vessel',   type:'text'},
-  {id:'type',             sec:'vessel',   type:'enum',   onVal:'sail', offVal:'power'},
+  {id:'type',             sec:'vessel',   type:'enum',   onVal:'sail', offVal:'power', dead:true},
   {id:'rudder_range_deg', sec:'vessel',   type:'number'},
   // Features
   {id:'limit_switches',         sec:'features', type:'bool'},
@@ -2731,14 +2777,14 @@ var SF = [
   {id:'helm_wheel_deg',         sec:'features', type:'number', def:90, dep:{id:'remote_helm', val:'true'}},
   // Autopilot
   {id:'deadband_pct',           sec:'autopilot', type:'number'},
-  {id:'pgain',                  sec:'autopilot', type:'number'},
-  {id:'off_course_alarm_deg',   sec:'autopilot', type:'number'},
+  {id:'pgain',                  sec:'autopilot', type:'number', dead:true},
+  {id:'off_course_alarm_deg',   sec:'autopilot', type:'number', dead:true},
   {id:'rudder_limit_port_pct',  sec:'autopilot', type:'number'},
   {id:'rudder_limit_stbd_pct',  sec:'autopilot', type:'number'},
   // Safety
-  {id:'auto_disengage_on_fault',  sec:'safety', type:'bool'},
-  {id:'comms_warn_threshold_pct', sec:'safety', type:'number'},
-  {id:'comms_crit_threshold_pct', sec:'safety', type:'number'},
+  {id:'auto_disengage_on_fault',  sec:'safety', type:'bool', dead:true},
+  {id:'comms_warn_threshold_pct', sec:'safety', type:'number', dead:true},
+  {id:'comms_crit_threshold_pct', sec:'safety', type:'number', dead:true},
   // Notifications
   {id:'health_interval_min', sec:'notifications', type:'number'},
   {id:'ping_interval_s',     sec:'notifications', type:'number'},
@@ -2857,6 +2903,7 @@ function openSettings() {
     return;
   }
   gSettingsOpen = true;
+  sfAdvShow(false);   // always open on the top-level view (wizards + collapsed Advanced)
   document.getElementById('gear-btn').classList.add('settings-open');
   document.getElementById('sov').classList.remove('hidden');
   setToggle('off'); // re-renders buttons (override inside setToggle shows settings labels)
@@ -2930,7 +2977,34 @@ function closeSettings(save) {
   _doClosePanel();
 }
 
+// Show or hide the ADVANCED SETTINGS block.  Purely visual: hidden inputs keep
+// their values, so sfCollect() and SAVE behave exactly as before.
+function sfAdvShow(show) {
+  document.getElementById('sf-adv').classList.toggle('hidden', !show);
+  document.getElementById('sf-adv-toggle').innerHTML = show ? 'HIDE &#9652;' : 'SHOW &#9662;';
+  if (!show) document.getElementById('sbody').scrollTop = 0;
+}
+
+// Grey out and lock dead settings (SF entries with dead:true), once at load.
+// Inputs are disabled, so their stored values are still read back and re-saved.
+function sfMarkDead() {
+  SF.forEach(function(f) {
+    if (!f.dead) return;
+    var row = document.querySelector('.sf-row[data-sfid="' + f.id + '"]');
+    if (!row) return;
+    row.classList.add('sf-dead');
+    row.title = 'Not used yet: saved, but Inno-Pilot does not act on this setting.';
+    row.querySelectorAll('input,button').forEach(function(el) { el.disabled = true; });
+    var lbl = row.querySelector('.sf-lbl');
+    if (lbl) lbl.insertAdjacentHTML('beforeend', '<span class="sf-dead-tag">(NOT USED)</span>');
+  });
+}
+sfMarkDead();
+
 // Settings event wiring
+document.getElementById('sf-adv-toggle').addEventListener('click', function() {
+  sfAdvShow(document.getElementById('sf-adv').classList.contains('hidden'));
+});
 document.getElementById('gear-btn').addEventListener('click', openSettings);
 document.getElementById('gear-btn').addEventListener('touchstart', function(e) {
   e.preventDefault(); openSettings();
@@ -2966,7 +3040,7 @@ document.querySelectorAll('.sf-eval').forEach(function(el) {
     e.stopPropagation();
     var row = el.parentElement;
     while (row && !row.classList.contains('sf-row')) { row = row.parentElement; }
-    if (!row) return;
+    if (!row || row.classList.contains('sf-dead')) return;   // dead setting: locked
     var fid = row.dataset.sfid;
     var f = SF.find(function(x) { return x.id === fid; });
     if (!f || f.type !== 'enum') return;
