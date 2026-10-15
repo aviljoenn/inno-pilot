@@ -116,10 +116,22 @@ Secondary safety (Nano): absolute “never exceed” protection:
 - faults produce audible alarm + OLED message; PTM can silence/stop
 
 Remote safety:
-- **Steer loss**: if TCP drops while in MANUAL mode, bridge sends `WARN_STEER_LOSS` to Nano —
-  continuous rapid 100ms buzzer + flashing `!STEER LOSS` on OLED. Requires physical STOP press to silence.
-- **Two-press STOP**: first press silences active alarm (AP stays engaged); second press is full emergency stop
-  (disengage AP, exit MANUAL, stop motor)
+- **Steer loss**: if TCP drops while in MANUAL mode, or the web page's REMOTE dead-man
+  heartbeat (`ALIVE`, every 0.4 s) is silent for 1.5 s, bridge exits MANUAL and sends
+  `WARN_STEER_LOSS` to Nano — continuous rapid 100ms buzzer + flashing `!STEER LOSS` on OLED,
+  and the web page shows `REMOTE STEER: STOPPED`. Requires physical STOP press to silence.
+- **Single-press STOP (latched)**: one press is always a full emergency stop *and* silences any
+  alarm (disengage AP, exit MANUAL, stop motor). Until it was two-press (first press only
+  silenced, AP stayed engaged) — changed so the skipper's one press is unconditional. The stop
+  is latched in the Nano: pypilot COMMAND frames are ignored (and STOP re-sent) until pypilot
+  has visibly disengaged; REMOTE stays off until the remote leaves and re-enters MANUAL.
+- **AP command watchdog (Nano)**: engaged but no pypilot COMMAND frame for 1.5 s (pypilot
+  crashed or hung) → Nano disengages, raises `!STEER LOSS`, reports button event 7.
+- **pypilot loss (bridge)**: pypilot connection drops while engaged → bridge sends DISENGAGE at
+  once and alerts `AUTOPILOT: STOPPED`; pypilot COMMAND frames are then held back until pypilot
+  itself disengages or the skipper re-engages (no surprise re-engage).
+- **NUDGE dead-man**: the page sends `NUDGE HOLD` every 0.2 s while a nudge button is held;
+  silence for 0.8 s stops the jog (10 s cap kept as a last resort).
 - **AP-rejected warning**: if remote presses AP toggle while bridge is in MANUAL, Nano gets
   `WARN_AP_PRESSED` — single 200ms beep + 5s OLED flash `?AP Pressed?`
 - **Buzzer priority**: steer-loss (continuous) > hardware faults > AP warning (single beep)
