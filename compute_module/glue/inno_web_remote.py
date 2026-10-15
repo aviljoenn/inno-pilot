@@ -49,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v3.3.0"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
+INNOPILOT_VERSION = "v3.3.1"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
                                # MAJOR=hardware, MINOR=software feature, PATCH=fix — see CLAUDE.md "Version sync"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.

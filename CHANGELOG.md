@@ -10,6 +10,24 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.3.1] — 2026-10-15
+
+Patch release. Bumped across all actively developed components (Nano, bridge, web remote);
+only the vendored pypilot fork changed. The paused ESP32 remote firmware (v1.3.3_B3) and its
+OTA binary are deliberately not bumped.
+
+### Fixed
+- **Autopilot dead after any pypilot restart or hang (EBUSY on `/dev/ttyINNOPILOT`).**
+  pypilot's servo set the exclusive flag (TIOCEXCL) on its port and cleared it only on a tidy
+  close; when the servo process was killed (service stop, or pypilot's own watchdog after a
+  hang) the flag stayed on the socat PTY and every reopen failed with EBUSY, so an engaged AP
+  sent no commands until pypilot, the bridge and socat were restarted together. Found and
+  confirmed on Inno-Pilot-Rosa (flag read back as set). Deliberate pypilot-fork strips:
+  - `servo.py`: no TIOCEXCL on the servo port.
+  - `nmea.py`: serial NMEA probing disabled — the flag only existed to keep that probe off
+    the servo port, and Inno-Pilot has no serial NMEA devices (GPS/wind come over TCP/UDP).
+    TCP/UDP NMEA inputs are unchanged.
+
 ## [v3.3.0] — 2026-10-15
 
 Minor (feature) release. Bumped across all actively developed components (Nano, bridge,

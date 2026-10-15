@@ -502,6 +502,16 @@ class Nmea(object):
             print('nmea poll times', *times)
             
     def probe_serial(self):
+        # INNO-PILOT STRIP (v3.3.1): serial NMEA probing disabled.
+        # Upstream scans every serial port (here only the servo PTY, via the by-id
+        # symlink) for NMEA data every few seconds.  Inno-Pilot has no serial NMEA
+        # devices -- GPS/wind arrive over TCP/UDP (Share GPS, SignalK), the Nano is
+        # owned by the bridge -- so the probe only ever poked the servo port, and
+        # servo.py's TIOCEXCL existed to fend it off (see the strip there; that flag
+        # caused EBUSY after any pypilot restart).  A future serial GPS goes through
+        # gpsd (TODO.md GPS-29), which this probe never handled anyway.
+        # TCP/UDP NMEA inputs below are untouched.
+        return
         # probe new nmea data devices
         if not self.probedevice:
             try:

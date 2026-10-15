@@ -124,10 +124,10 @@ def ota_host() -> str:
 # Bumped on EVERY merge of code to master, in all actively developed components at once.
 # Paused components (currently the ESP32 remote firmware + its OTA binary) are deliberately
 # NOT bumped, so the mismatch stays visible (see CLAUDE.md "Version sync").
-INNOPILOT_VERSION      = "v3.3.0"
+INNOPILOT_VERSION      = "v3.3.1"
 # Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
 # MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-INNOPILOT_VERSION_CODE = 30300
+INNOPILOT_VERSION_CODE = 30301
 
 # ---------------------------------------------------------------------------
 # Serial devices
