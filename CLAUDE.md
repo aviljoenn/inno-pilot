@@ -83,7 +83,10 @@ Before adding new tooling, check what the repo already uses:
 
 **Rule:** If you can't build firmware due to missing toolchain/board config, state that clearly in the PR and keep changes conservative.
 
-> **Facts about the Inno-Pilot Raspberry Pi** 
+> **Facts about the Inno-Pilot Raspberry Pi**
+> Unit naming: the Pi Zero unit formerly called **Dyason** was renamed **Inno-Pilot-Rosa**
+> on 2026-10-15 (destined for the yacht Rosa). Older notes, code comments, capture folders and the
+> `instances.local/Dyason/` path still use the old name.
 > Every Inno-Pilot constructed may use different hardware types, E.g. Pi5, Pi Zero, Arduino nano, Pi Pico etc.
 > Every Inno-Pilot constructed may be on different IP subnets with different IP addresses
 > `arduino-cli` is installed at `/usr/local/bin/arduino-cli`
@@ -212,7 +215,7 @@ integrations we don't use, optional hardware backends we don't have, etc.
 (`zeroconf_service.py`, `_pypilot._tcp.local.`) was disabled — it ran a second
 IPv4 mDNS responder on the same host as `avahi-daemon`, and the two competed
 for UDP 5353, causing intermittent `<hostname>.local` resolution failures on
-the LAN. Diagnosed on Dyason; avahi itself logged
+the LAN. Diagnosed on Inno-Pilot-Rosa; avahi itself logged
 `WARNING: Detected another IPv4 mDNS stack running on this host`. Nothing in
 Inno-Pilot's bridge/web stack used pypilot's self-announcement (they connect
 over a known local port), so it was pure unwanted surface area.
@@ -272,7 +275,7 @@ Current invalidation points (keep them in step with any edit):
 
 Row 0 is written directly and is never shadow-managed; nothing calls `draw_row(0,…)`.
 
-**Measured baseline (Dyason, idle, v1.3.3_B11).** Use these to spot regressions:
+**Measured baseline (Inno-Pilot-Rosa, idle, v1.3.3_B11).** Use these to spot regressions:
 
 | metric | value |
 |---|---|
@@ -343,7 +346,7 @@ testing, ever** — no endurance tests. Keep all of these true:
 - **Do not put the sweep back on the generic stall detector.** Its 2°/s criterion is
   a speed rule; the sweep has its own speed-independent jam check (< 0.5° progress in
   2 s while driving). Its "arrived" band must include the Nano's deadband
-  (`ram_nano_deadband_deg()`), which is `deadband_pct` × full span — ±6° on Dyason.
+  (`ram_nano_deadband_deg()`), which is `deadband_pct` × full span — ±6° on Inno-Pilot-Rosa.
   Found on the first boat run.
 
 ## Nano: never `digitalRead()` a PWM pin — use `motor_pwm()` for D9
@@ -352,7 +355,7 @@ On AVR, `digitalRead()` calls `turnOffPWM()` on a PWM-capable pin. The pin-state
 telemetry used to `digitalRead(D9)` every loop, which silently cancelled any EN duty
 other than 0/255 — the remote-manual slow zone's `analogWrite(D9, 160)` never reached
 the motor, so REMOTE steering and the sweep could not start the rudder near a target
-(found on Dyason's second sweep, 2026-10-02). Since then every EN write goes through
+(found on Inno-Pilot-Rosa's second sweep, 2026-10-02). Since then every EN write goes through
 `motor_pwm()`, which records `g_motor_duty`, and telemetry reports EN from that.
 **Never write `analogWrite(HBRIDGE_PWM_PIN, …)` directly and never `digitalRead` D9.**
 The pump is on/off: all paths now drive 255; any future reduced duty must be ≥ 180
@@ -362,7 +365,7 @@ The pump is on/off: all paths now drive 255; any future reduced duty must be ≥
 
 Testing changes here: a simulator that runs the real bridge `main()` against a
 simulated Nano (deadband, slow zone, lag) + stub pypilot lives outside the repo at
-`~/inno-pilot-sweep-sim-2026-10-02/` (README inside), including a Dyason profile.
+`~/inno-pilot-sweep-sim-2026-10-02/` (README inside), including an Inno-Pilot-Rosa profile.
 
 ---
 
