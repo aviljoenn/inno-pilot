@@ -245,7 +245,10 @@ NUDGE_ALIVE_TIMEOUT_S  = 0.8   # page sends NUDGE HOLD every 0.2 s while held
 # stops, so stopping AT the limit ran 2.2 deg past it (0.8 deg short of the stop).
 # The jog now stops when angle + speed * lead reaches the limit.  Tune on the boat:
 # "NUDGE ... settled at" in the log shows where the rudder actually came to rest.
-NUDGE_LIMIT_LEAD_S     = 0.5
+# Measured on Inno-Pilot-Rosa (12-14 deg/s): the rudder coasts only 0.6-0.9 deg after
+# the stop; most of the old overshoot was pypilot's 5 Hz angle steps (~2.6 deg each
+# at that speed).  0.5 s stopped 3-6 deg short; 0.25 s covers one step + coast.
+NUDGE_LIMIT_LEAD_S     = 0.25
 NUDGE_SETTLE_LOG_S     = 1.5   # log the resting angle this long after a limit stop
 
 # pypilot's servo stream (COMMAND/DISENGAGE frames on the PTY) runs at >= 5 Hz in

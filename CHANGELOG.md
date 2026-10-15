@@ -51,8 +51,8 @@ deliberately not bumped.
 - **Bridge now detects pypilot dying.** pypilot's client never raises on disconnect, so the
   immediate "pypilot connection lost" stop never fired on hardware (the Nano's 1.5 s
   watchdog caught it instead). The connection state now comes from the client.
-- **Jog stops before the soft limit, not after**: it allows for its speed × 0.5 s (pypilot
-  angle lag + coast). Measured overshoot before: up to 2.2° at detection, 0.8° short of the
+- **Jog stops before the soft limit, not after**: it allows for its speed × 0.25 s (one
+  pypilot angle step + coast; tuned on Inno-Pilot-Rosa, where the coast is only 0.6–0.9°). Measured overshoot before: up to 2.2° at detection, 0.8° short of the
   stop. The log reports where the rudder settled, for tuning.
 - **No stale rudder angle to the Nano**: when pypilot hangs, the bridge stops relaying its
   frozen angle, and the Nano's cross-check only trusts a relayed angle under 0.6 s old —
