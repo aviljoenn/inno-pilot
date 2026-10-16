@@ -252,10 +252,17 @@ mDNS surface area again.
 
 **Fourth instance (2026-10-15, v3.3.1):** pypilot's serial NMEA probe (`nmea.py`
 `probe_serial()`) and the TIOCEXCL it forced onto the servo port (`servo.py`) were stripped.
-The flag outlived a killed servo process on the socat PTY, so any pypilot restart or hang left
+The flag outlived a killed servo process on the socat PTY, so any pypilot restart (incl.
+systemd's automatic restart — pypilot exits on any signal, even a hang being resumed) left
 the AP dead (EBUSY) until pypilot, bridge and socat were restarted together. Inno-Pilot has no
 serial NMEA devices — GPS/wind arrive over TCP/UDP — so the probe only ever poked the servo
 port. Lesson: **nothing but pypilot's servo may open `/dev/ttyINNOPILOT`**.
+
+**pypilot values: never `float()` them directly.** pypilot sends `False` for an invalid
+sensor reading and `float(False)` is `0.0` — a false "rudder centred" (found 2026-10-16 as a
+web rudder-bar swing on every pypilot restart). Use the bridge's `pp_number()`, which returns
+`None` (unknown). Anything that needs the angle (jog limit, sweep, REMOTE seed) must treat
+`None` as "stop / refuse", never as 0°.
 
 ---
 

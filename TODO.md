@@ -119,6 +119,37 @@ the Nano acts on them. The web remote shows them greyed out and locked, "(NOT US
 | DS-07 | `safety.comms_warn_threshold_pct`, `comms_crit_threshold_pct` | Not read | open |
 | DS-08 | `autopilot.rudder_limit_port_pct`, `rudder_limit_stbd_pct` | Replaced in v3.3.0 by the Dock-Side Wizard's degree limits (`rudder_limits.json`); greyed out "REPLACED"; still in the Nano EEPROM block (DUP-06) | open (remove with the next EEPROM layout change) |
 
+## [LOW] Jog soft-limit lead should be learned per boat (opened 2026-10-16)
+
+The jog stops at `angle + speed × NUDGE_LIMIT_LEAD_S` (0.25 s, tuned on Inno-Pilot-Rosa:
+4 runs settled 0.3–2.2° inside the limit). A boat with more coast or angle lag can pass the
+soft limit: the simulator (0.22 s lag, 0.4° coast at 4°/s) settled 1.2° past. The bridge
+already logs where each limit stop settled ("NUDGE limit stop settled at"). Learn the lead
+from those measurements, ideally in the Dock-Side Wizard's coast/rudder-speed step, and store
+it per unit. Until then keep soft limits ≥ 3° inside the stops.
+
+## [MEDIUM] Fault that self-recovers: alarm, reason and skipper acknowledgement (opened 2026-10-16)
+
+**Status:** raised by the user on the Inno-Pilot-Rosa bench test, not started.
+
+**Observed:** a simulated pypilot fault (freeze → pypilot restart) makes the Nano drop the AP
+and sound the alarm. When the fault clears by itself and steering is possible again, the
+alarm keeps sounding until STOP is pressed, and then Go must be pressed to re-engage. The
+alarm continuing is probably right — but by then the page may no longer show *why* it is
+sounding, and there is no explicit "I have noted this" step.
+
+**Design task — an elegant sequence for "fault occurred, then self-corrected":**
+- Keep alerting until the skipper acknowledges, even after recovery.
+- While alerting, always show the reason (what failed, when, and that it has recovered),
+  not a bare buzzer. Recovered vs still-failed must look different.
+- Separate **acknowledge (silence + note)** from **STOP (disengage)**: acknowledging a
+  recovered fault should not require a stop-and-re-engage cycle, and must never re-engage
+  steering by itself (no surprise re-engage — `pp_cmd_block`).
+- Decide what the OLED, the web alert panel, Telegram and the buzzer each do in each state
+  (fault active / recovered-unacknowledged / acknowledged).
+- Covers at least: pypilot hang/restart (AP_LOST), REMOTE dead-man (STEER_LOSS), motor link
+  CRIT, limits invalidated. Builds on v3.3.0's WARN_SILENCE (web STOP silences the Nano).
+
 ## [MEDIUM] First power-up: out-of-box connection and first look (opened 2026-10-15)
 
 **Status:** idea agreed in discussion 2026-10-15, not started. Goal: first unboxing and
