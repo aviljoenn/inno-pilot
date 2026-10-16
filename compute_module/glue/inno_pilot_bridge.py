@@ -124,10 +124,10 @@ def ota_host() -> str:
 # Bumped on EVERY merge of code to master, in all actively developed components at once.
 # Paused components (currently the ESP32 remote firmware + its OTA binary) are deliberately
 # NOT bumped, so the mismatch stays visible (see CLAUDE.md "Version sync").
-INNOPILOT_VERSION      = "v3.3.0"
+INNOPILOT_VERSION      = "v3.3.1"
 # Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
 # MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-INNOPILOT_VERSION_CODE = 30300
+INNOPILOT_VERSION_CODE = 30301
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -739,6 +739,20 @@ class BridgeState:
 # pypilot daemon thread
 # ===========================================================================
 
+def pp_number(value) -> Optional[float]:
+    """A pypilot value as a float, or None when pypilot marks it invalid.
+
+    pypilot sends False for an invalid sensor reading; bool is a subclass of int
+    in Python, so float(False) silently gives 0.0 -- never use float() directly.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def pypilot_worker(
     state: PypilotState,
     lock: threading.Lock,
@@ -801,39 +815,30 @@ def pypilot_worker(
                     log_pp.info("pypilot connection up")
 
                 with lock:
-                    if "ap.heading_command" in msgs:
-                        try:
-                            state.heading_cmd = float(msgs["ap.heading_command"])
-                        except Exception:
-                            pass
-                    if "imu.heading" in msgs:
-                        try:
-                            state.heading = float(msgs["imu.heading"])
-                        except Exception:
-                            pass
-                    if "rudder.angle" in msgs:
-                        try:
-                            state.rudder_angle = float(msgs["rudder.angle"])
-                        except Exception:
-                            pass
+                    # pypilot reports an INVALID sensor value as False (e.g. rudder.angle
+                    # while the servo reconnects after a restart, or with a dead rudder
+                    # sensor).  float(False) is 0.0, so the bridge used to report a
+                    # confident 0 deg: the web rudder bar/helm jumped to centre for ~0.5 s
+                    # on every pypilot restart (seen on Inno-Pilot-Rosa as a "wild swing"),
+                    # and jog limits / REMOTE seeding / stall check would have used it.
+                    # Invalid live readings now become None ("unknown").
+                    for key, attr in (("ap.heading_command", "heading_cmd"),
+                                      ("imu.heading", "heading"),
+                                      ("rudder.angle", "rudder_angle"),
+                                      ("servo.current", "servo_current")):
+                        if key in msgs:
+                            setattr(state, attr, pp_number(msgs[key]))
                     if "rudder.range" in msgs:
-                        try:
-                            state.rudder_range = float(msgs["rudder.range"])
-                        except Exception:
-                            pass
-                    if "servo.current" in msgs:
-                        try:
-                            state.servo_current = float(msgs["servo.current"])
-                        except Exception:
-                            pass
+                        rng = pp_number(msgs["rudder.range"])
+                        if rng is not None:          # never forget a known range
+                            state.rudder_range = rng
                     for key, attr in (("rudder.scale", "rudder_scale"),
                                       ("rudder.offset", "rudder_offset"),
                                       ("rudder.nonlinearity", "rudder_nonlin")):
                         if key in msgs:
-                            try:
-                                setattr(state, attr, float(msgs[key]))
-                            except Exception:
-                                pass
+                            val = pp_number(msgs[key])
+                            if val is not None:      # calibration: keep the last known value
+                                setattr(state, attr, val)
 
         except Exception as exc:
             log_pp.warning("Connection lost: %s — retrying in %ds", exc, PYPILOT_RECONNECT_DELAY_S)
@@ -2364,6 +2369,12 @@ def process_remote_line(
             return
         if limits_refuse(bstate, "Remote NUDGE %s (jog)" % direction):
             return
+        with plock:
+            jog_angle = pstate.rudder_angle
+        if jog_angle is None:
+            # The soft-limit check needs the angle: no angle, no jog.
+            log.warning("Remote NUDGE %s refused: rudder angle unknown", direction)
+            return
         cmd_val = 2000 if direction == "PORT" else 0
         now_m = time.monotonic()
         if bstate.nudge_until > 0.0 and bstate.nudge_cmd_val == cmd_val:
@@ -2987,6 +2998,11 @@ def main() -> None:
                 nudge_active = False
             elif now >= bstate.nudge_until:
                 nudge_stop(nano, bstate, "NUDGE 10 s cap reached")
+                nudge_active = False
+            elif rudder_angle is None:
+                # pypilot reports the angle invalid (sensor fault, servo reconnecting):
+                # the soft limit can no longer be checked, so the jog stops.
+                nudge_stop(nano, bstate, "rudder angle unknown — soft limit cannot be checked")
                 nudge_active = False
             else:
                 # Cancel early if rudder has reached the soft limit.  Limits are the

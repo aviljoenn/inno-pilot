@@ -599,7 +599,16 @@ class Servo(object):
 
                 try:
                     device.timeout=0 #nonblocking
-                    fcntl.ioctl(device.fileno(), TIOCEXCL) #exclusive
+                    # INNO-PILOT STRIP (v3.3.1): upstream sets TIOCEXCL here so pypilot's
+                    # NMEA serial probe (another process) cannot open the servo port.
+                    # The flag is only cleared by close_driver(); when the servo process
+                    # is killed instead (service stop, or pypilot's own watchdog after a
+                    # hang) it stays on our socat PTY, and every later non-root open
+                    # fails with EBUSY -> AP dead until pypilot + bridge + socat are
+                    # restarted together (bench test, Inno-Pilot-Rosa, 2026-10-15).
+                    # Inno-Pilot has no serial NMEA devices and the NMEA serial probe is
+                    # stripped too (nmea.py probe_serial), so nothing else opens this port.
+                    #fcntl.ioctl(device.fileno(), TIOCEXCL) #exclusive
                 except Exception as e:
                     print(_('failed set nonblocking/exclusive'), e)
                     device.close()
