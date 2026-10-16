@@ -2,11 +2,23 @@
 
 > Unit naming: "Dyason" was renamed **Inno-Pilot-Rosa** on 2026-10-15 (destined for the yacht Rosa).
 
+> **State 2026-10-16 — master v3.3.1, deployed on Inno-Pilot-Rosa.** v3.3.0 (#88) shipped the safety stops,
+> dead-men, pypilot failsafe, "no rudder motion before limits" and Dock-Side Wizard step 1; v3.3.1 (#89) fixed
+> EBUSY after pypilot restarts and the false 0° rudder angle. Bench-test record:
+> `~/inno-pilot-safety-2026-10-15/rosa-bench-test-2026-10-15.md` (workstation). Inno-Pilot-Rosa: stops ±45°,
+> soft limits 42°, no physical helm buttons.
+> **Next topics, in order:** (1) the HIGH item below — hold AP/REMOTE inside the soft limits; (2) Dock-Side
+> Wizard steps after limits; (3) Startup Wizard + first power-up; (4) self-recovering fault alarm/acknowledge.
+
 ## [HIGH PRIORITY] Rudder limits are not enforced while AP or REMOTE is steering (safety)
 
-**Status:** found 2026-10-02 during the settings review, not started.
+**Status:** found 2026-10-02 during the settings review, not started. **Next topic (2026-10-16).**
+Since v3.3.0 the limits are degrees in the bridge-owned `/var/lib/inno-pilot/rudder_limits.json` (set by
+hand in the Dock-Side Wizard, valid only for the calibration they were set against); the old % settings
+below are greyed out as replaced. The bridge enforces them for the jog and the sweep only. Nano flash is
+97% (~750 B free) — budget the Nano side carefully.
 
-`rudder_limit_port_pct` / `rudder_limit_stbd_pct` (Settings) are only honoured by the
+(Original finding:) `rudder_limit_port_pct` / `rudder_limit_stbd_pct` (Settings) are only honoured by the
 bridge's NUDGE and the rudder sweep. In AP and REMOTE the Nano stops only at
 ±`rudder_range` (`pilot_dira_lim_deg10` / `pilot_dirb_lim_deg10` come from pypilot's
 `rudder.range`), and the Nano never reads the limit bytes the bridge writes into its
@@ -43,7 +55,7 @@ Proposed commissioning order (each step depends on the ones before):
 6. Compass calibration; re-check with the motor running.
 7. Heading gains at sea (pypilot); then the off-course alarm.
 Then reliability/safety verification: STOP from every source, limits in AP, loss of
-remote / pypilot (open gap, see memory/bridge failsafe) / Nano, sea trial.
+remote / pypilot (failsafe done in v3.3.0) / Nano, sea trial.
 
 Proposed settings changes: soft limits in degrees and enforced everywhere; split
 `deadband_pct` into a position tolerance (°) and a command threshold; replace `pgain`
@@ -332,7 +344,7 @@ connected** — today's wind values (AWA ~44°, AWS 0, "true wind" 180°) are be
 - **Proposed order (each step reversible, one at a time, boat attended):** 0) tarball of /home/signalk/.signalk + Influx/Grafana export + sync Malu_Brain repo (GPS-28) + full NVMe image; 1) mitigate GHSA-4w32 now (Data Logging Directory); 2) SignalK 2.33.0 + plugin updates on bookworm (`npm i -g signalk-server@2.33.0`, config backed up, rollback = reinstall 2.13.5 + restore dir); re-test GPS-32 with a re-plug; 3) `apt upgrade` within bookworm; 4) only then Trixie: wait for a BBN trixie release, or build the `trixie` branch image yourself, onto a spare NVMe, config migrated by script — never in place.
 
 Existing items that still apply: never use pypilot's "align compass to GPS" (crash-bugged in
-`sensors.py`: `last`/`total` undefined); the bridge has no pypilot-death failsafe.
+`sensors.py`: `last`/`total` undefined). (The bridge pypilot-death failsafe was added in v3.3.0.)
 
 ---
 
@@ -420,8 +432,10 @@ connect** (`servo.py:698`), overwriting `rudder.*` and `servo.*` from `pypilot.c
 ## [HIGH PRIORITY] Nano local STOP is immediate but not latched (safety)
 
 **Status:** found 2026-10-15 (code review for the user's "immediate and unconditional disengage" priority).
-**Implemented 2026-10-15 on branch `fix/safety-stop-latch-deadman-failsafe` (not merged, needs bench test):**
-STOP latch + single-press STOP + Nano AP command watchdog. The wired helm STOP for Inno-Pilot-Rosa is still open (hardware).
+**CLOSED in software (v3.3.0, merged 2026-10-15, #88):** STOP latch + single-press STOP + Nano AP command
+watchdog; web STOP also silences every Nano alarm. AP watchdog bench-tested on Inno-Pilot-Rosa (1.43–1.51 s).
+**Still open:** the latch itself is untested on hardware (Inno-Pilot-Rosa has no helm buttons), and the wired
+helm STOP for Inno-Pilot-Rosa (hardware).
 
 `motor_simple.ino`: the Nano's STOP button acts locally at once (clears `ap_enabled_remote`, `remote_manual_active`,
 command → neutral; clutch drops because `clutch_should` needs an active mode) and then sends `BTN_EVT_STOP` to the
@@ -438,9 +452,9 @@ comms errors.
 ## [HIGH PRIORITY] REMOTE steering has no phone dead-man (safety)
 
 **Status:** found 2026-10-15 while reviewing Wi-Fi failure modes for Rosa.
-**Implemented 2026-10-15 on branch `fix/safety-stop-latch-deadman-failsafe` (not merged):** `ALIVE`
-heartbeat (0.4 s / 1.5 s, armed by `MODE MANUAL ALIVE`, only from the page that selected REMOTE), plus the
-NUDGE dead-man and the bridge pypilot-loss failsafe. Simulator-tested; needs a real-phone test.
+**CLOSED (v3.3.0, merged 2026-10-15, #88):** `ALIVE` heartbeat (0.4 s / 1.5 s, armed by `MODE MANUAL ALIVE`,
+only from the page that selected REMOTE), plus the NUDGE dead-man and the bridge pypilot-loss failsafe.
+Real-phone test on Inno-Pilot-Rosa passed (phone locked in REMOTE → STEER LOSS after 1.5 s).
 
 The bridge drops REMOTE (`MODE MANUAL`) to IDLE + STEER LOSS only when its TCP client disconnects. With the
 web remote, that client is `inno_web_remote.py` on the Pi, which stays connected when the phone vanishes
@@ -503,6 +517,10 @@ shrink by storing the sensor's ROM address instead of index lookup. Soft-float i
 hand-calibrated constants — rank it last.
 
 ## [MEDIUM] Bridge flags a false RUDDER STALL on entering REMOTE with the rudder off-centre
+
+**Status 2026-10-16:** the REMOTE-entry case was fixed in v3.0.3 (seed from the current rudder; simulator
+`remote_entry` passes). **New related case:** a false RUDDER STALL while pypilot is frozen (its angle stops
+updating while AP had been commanding) — seen on the Inno-Pilot-Rosa bench test; harmless, open.
 
 `MODE MANUAL` sets `bstate.manual_rud_target = 500` as a placeholder (the Nano seeds
 its real target from its own ADC and holds still). Until the first `RUD` arrives,
