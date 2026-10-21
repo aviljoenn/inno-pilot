@@ -49,7 +49,7 @@ RECONNECT_DELAY_S = 1.0
 # Multi-browser command arbitration has been removed: every connected
 # browser is always allowed to issue commands.
 # Sent in HELLO handshake.  Bridge logs mismatch but stays connected.
-INNOPILOT_VERSION = "v3.3.1"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
+INNOPILOT_VERSION = "v3.3.2"   # release versions only, no "_Bxx" beta suffix (dropped at v3.0.1);
                                # MAJOR=hardware, MINOR=software feature, PATCH=fix — see CLAUDE.md "Version sync"
 
 # Telegram notification config — JSON file with "token" and "chat_id" keys.
@@ -2183,6 +2183,8 @@ window.addEventListener('blur', ramHoldStop);
 // wheel, and a screen that timed out on its own must ALERT the skipper that
 // steering stopped, not stop it silently.  Coming back within 1.5 s (a quick
 // glance at another app) keeps REMOTE steering without interruption.
+// Exception since v3.3.2: touches on the wheel send "ALIVE T" whatever the
+// hidden flag says (aliveFromTouch below) — a finger on the wheel is a skipper.
 // blur is NOT treated as loss here (unlike RAM HOLD / NUDGE): the page is still
 // visible and its timers keep running, so the heartbeat continues.
 // Only the page that SELECTED REMOTE sends it (gRemoteOwner): every open page
@@ -2194,14 +2196,66 @@ window.addEventListener('blur', ramHoldStop);
 var REMOTE_ALIVE_PERIOD_MS = 400;
 var gRemoteOwner      = false;
 var gRemoteOwnerSince = 0;
+var gLastAliveSent    = 0;   // Date.now() of the last ALIVE sent (timer or touch)
+var gAliveTickLast    = 0;   // Date.now() of the previous heartbeat timer tick
+var gLastTouchMs      = 0;   // Date.now() of the last touch/drag event on the wheel
 function claimRemote() { gRemoteOwner = true; gRemoteOwnerSince = Date.now(); }
 setInterval(function() {
+  var now = Date.now();
+  // v3.3.2: a heartbeat tick that comes far too late means the browser paused
+  // this page; report it (see pageEvent) while REMOTE is in use.
+  var late = gAliveTickLast ? now - gAliveTickLast - REMOTE_ALIVE_PERIOD_MS : 0;
+  gAliveTickLast = now;
+  if (late > 600 && gMode === 'MANUAL' && gRemoteOwner) pageEvent('timer_late', {late_ms: late});
   if (gMode !== 'MANUAL') {
-    if (gRemoteOwner && Date.now() - gRemoteOwnerSince > 3000) gRemoteOwner = false;
+    if (gRemoteOwner && now - gRemoteOwnerSince > 3000) gRemoteOwner = false;
     return;
   }
-  if (gRemoteOwner && !document.hidden) sendCmd('ALIVE');
+  if (gRemoteOwner && !document.hidden) { sendCmd('ALIVE'); gLastAliveSent = now; }
 }, REMOTE_ALIVE_PERIOD_MS);
+
+// ── Touch heartbeat (v3.3.2) ───────────────────────────────────────────────
+// 2026-10-21, Samsung S20 + Chrome: while the skipper held the wheel for several
+// seconds, Chrome paused this page's timers (~1.5 s) and then reported the page
+// hidden although it stayed on screen, so the timer heartbeat stopped and REMOTE
+// ended with STEER LOSS.  A touch on the wheel is direct proof that the skipper is
+// there, so wheel touches send "ALIVE T" as well — even if Chrome claims the page
+// is hidden (user decision 2026-10-21).  A locked or unattended screen produces
+// no touches, so the 1.5 s dead-man still catches it.  Only kicks in when the
+// timer has not sent one for a while, so a healthy page sends no extra traffic.
+function aliveFromTouch() {
+  gLastTouchMs = Date.now();
+  if (gMode !== 'MANUAL' || !gRemoteOwner) return;
+  if (gLastTouchMs - gLastAliveSent < REMOTE_ALIVE_PERIOD_MS + 100) return;
+  gLastAliveSent = gLastTouchMs;
+  sendCmd('ALIVE T');
+}
+
+// ── Page lifecycle log (v3.3.2) ─────────────────────────────────────────────
+// Reports what the browser does to this page (hidden/visible, frozen/resumed,
+// focus lost, late timers) to the Pi's journal (POST /pageevent), so the next
+// unexplained STEER LOSS names its cause.  sendBeacon still delivers while the
+// page is being hidden.  Focus changes are only reported while in REMOTE.
+function pageEvent(kind, extra) {
+  var d = {ev: kind, vis: document.visibilityState, focus: document.hasFocus(),
+           mode: gMode, owner: gRemoteOwner, drag: isDragging,
+           touch_ms: gLastTouchMs ? Date.now() - gLastTouchMs : -1};
+  if (extra) for (var k in extra) d[k] = extra[k];
+  var body = JSON.stringify(d);
+  try {
+    if (navigator.sendBeacon &&
+        navigator.sendBeacon('/pageevent', new Blob([body], {type: 'application/json'}))) return;
+  } catch (e) {}
+  fetch('/pageevent', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                       body: body, keepalive: true}).catch(function() {});
+}
+document.addEventListener('visibilitychange', function() { pageEvent('visibility'); });
+document.addEventListener('freeze', function() { pageEvent('freeze'); });
+document.addEventListener('resume', function() { pageEvent('resume'); });
+window.addEventListener('pagehide', function() { pageEvent('pagehide'); });
+window.addEventListener('pageshow', function() { pageEvent('pageshow'); });
+window.addEventListener('blur',  function() { if (gMode === 'MANUAL') pageEvent('blur'); });
+window.addEventListener('focus', function() { if (gMode === 'MANUAL') pageEvent('focus'); });
 
 function ramFmt(v, unit) { return (v === null || v === undefined) ? '  --' : String(v) + (unit || ''); }
 
@@ -2918,10 +2972,14 @@ function ptrAngleDeg(cx, cy) {
 function wheelStart(cx, cy) {
   isDragging   = true;
   prevPtrAngle = ptrAngleDeg(cx, cy);
+  aliveFromTouch();   // v3.3.2: a touch on the wheel is a heartbeat too
 }
 
 function wheelMove(cx, cy) {
   if (!isDragging || gMode !== 'MANUAL') return;
+  // v3.3.2: every drag event is a heartbeat too — also at full lock, where the
+  // clamped wheel no longer changes the target and so sends no RUD.
+  aliveFromTouch();
   var curr  = ptrAngleDeg(cx, cy);
   var delta = curr - prevPtrAngle;
   // Unwrap angle discontinuity at ±180°
@@ -3519,6 +3577,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_debug_toggle()
         elif self.path == "/linkevent":
             self._handle_link_event()
+        elif self.path == "/pageevent":
+            self._handle_page_event()
         elif self.path == "/update/start":
             self._handle_update_start()
         else:
@@ -3626,6 +3686,45 @@ class _Handler(BaseHTTPRequestHandler):
             "BREACH" if state == "breach" else "CLEAR",
             self.client_address[0], loss, avg, mx, n)
         (log.warning if state == "breach" else log.info)(msg)
+        self._send_json(200, {"ok": True})
+
+    # ---- POST /pageevent (v3.3.2) ----
+
+    # Keys the page may report, logged in this order; anything else is ignored.
+    _PAGE_EVENT_KEYS = ("ev", "vis", "focus", "mode", "owner", "drag", "touch_ms", "late_ms")
+
+    def _handle_page_event(self) -> None:
+        """Write a browser page-lifecycle event to the event log (journal).
+
+        Added after 2026-10-21: Chrome on a Samsung S20 paused the page (its timers
+        stopped, then it reported itself hidden) while the skipper held the helm
+        wheel, so REMOTE ended with STEER LOSS and nothing visible on screen.  The
+        page reports visibility/freeze/focus changes and late timers so the next
+        occurrence names its cause.  Values are reduced to short plain tokens so a
+        page cannot inject anything odd into the journal.
+        """
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 2048:
+            self.close_connection = True      # body left unread: do not reuse
+            self._send_json(413, {"ok": False})
+            return
+        body = self.rfile.read(length) if length else b""
+        try:
+            d = json.loads(body)
+            if not isinstance(d, dict) or "ev" not in d:
+                raise ValueError
+        except (json.JSONDecodeError, ValueError, TypeError):
+            self._send_json(400, {"ok": False})
+            return
+        fields = []
+        for key in self._PAGE_EVENT_KEYS:
+            if key in d:
+                val = "".join(ch if ch.isalnum() or ch in "._-" else "_"
+                              for ch in str(d[key]))[:24]
+                fields.append(f"{key}={val}")
+        msg = "PAGE_EVENT client=%s %s" % (self.client_address[0], " ".join(fields))
+        # A late heartbeat timer during REMOTE is the precursor of a STEER LOSS.
+        (log.warning if d.get("ev") == "timer_late" else log.info)(msg)
         self._send_json(200, {"ok": True})
 
     # ---- POST /command ----

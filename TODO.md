@@ -7,6 +7,9 @@
 > EBUSY after pypilot restarts and the false 0° rudder angle. Bench-test record:
 > `~/inno-pilot-safety-2026-10-15/rosa-bench-test-2026-10-15.md` (workstation). Inno-Pilot-Rosa: stops ±45°,
 > soft limits 42°, no physical helm buttons.
+> **2026-10-21:** v3.3.2 (branch `fix/remote-chatter-touch-heartbeat`) fixes false REMOTE STEER LOSS from Chrome
+> pausing the page, Nano REMOTE motor chatter, and keeps the journal across reboots — see the "REMOTE
+> hand-steering findings register" (RS-xx).
 > **Next topics, in order:** (1) the HIGH item below — hold AP/REMOTE inside the soft limits; (2) Dock-Side
 > Wizard steps after limits; (3) Startup Wizard + first power-up; (4) self-recovering fault alarm/acknowledge.
 
@@ -516,6 +519,25 @@ shrink by storing the sensor's ROM address instead of index lookup. Soft-float i
 ~750 B+, but converting the ADC/calibration maths to fixed-point risks the
 hand-calibrated constants — rank it last.
 
+## [HIGH] REMOTE hand-steering findings register (opened 2026-10-21)
+
+From a REMOTE session on Inno-Pilot-Rosa (on Malu) that stopped by itself, and an attended dock test with a
+packet capture on the Pi (Samsung S20 + Chrome). Evidence and tools: `~/inno-pilot-remote-steer-2026-10-21/`
+on the workstation (`FINDINGS.md`, capture, decoders, simulator results).
+
+| ID | Where | Finding | Fix / action | Status |
+|---|---|---|---|---|
+| RS-01 | Web page on the phone | With the finger held on the wheel for seconds, Chrome on the S20 paused the page's timers (1.3–1.7 s, no requests at all while the phone's TCP stack kept acking) and then reported the page hidden although it stayed on screen; the timer heartbeat stopped → 2× false STEER LOSS in 3 min. Pi and Wi-Fi fine (every request served in 2–20 ms, pings ≤ 70 ms). Mechanism inside Chrome/One UI unknown | v3.3.2: wheel touches send `ALIVE T` even when "hidden" (user decision); `PAGE_EVENT` lifecycle log + bridge "heartbeat late" log | fixed in v3.3.2 — **verify on the S20** (long hold at full lock) |
+| RS-02 | Nano REMOTE loop | 144 of 189 motor starts lasted 1–2 ms (same start/stop threshold at the deadband edge) | v3.3.2: start at 1.5 × deadband, min run 60 ms, min rest 150 ms, no direct reversal; bridge stall check aligned | fixed in v3.3.2 — **verify on the boat** (Debug capture, count runs < 50 ms) |
+| RS-03 | Motor supply | 13.4–13.8 V at rest → 8.0 V at pump starts, 9–10.5 V running, one reading 6.3 V. Nano low-voltage fault is suppressed while the motor runs, so nothing flags it. Current sensor reads a constant (raw 80) — pump current unknown | Measure battery vs IBT-2 input during a run (cable size, fuse holder, connections); check whether a motor start disturbs the rudder reading (shared ground); get the current sensor working | open (hardware) |
+| RS-04 | Web remote SSE | A slow phone's SSE subscriber is dropped (`queue.Full`) but its stream is never closed and the drop is logged at DEBUG (the web remote never runs at DEBUG): the page would silently freeze on stale state | Close the dropped stream so EventSource reconnects; log at WARNING | open (latent, not seen 2026-10-21) |
+| RS-05 | REMOTE range | REMOTE drove the rudder to 45.7° (the physical stops); the soft limits are 42° | The [HIGH PRIORITY] limits item at the top of this file | open (tracked there) |
+| RS-06 | Bridge stall check | 7 RUDDER STALL warnings in 3 min of REMOTE (two at the stops, others near the target: the 2°-per-200 ms rule vs a slow, sagging pump) | Rework the REMOTE stall rule (see the MEDIUM item below) | open |
+| RS-07 | Bridge debug log | Motor direction label backwards | v3.3.2 | fixed (LOW item below closed) |
+| RS-08 | Wi-Fi at the helm | Both hops marginal: phone −81/−67/−45 dBm, Inno-Pilot-Rosa −78/−67/−65 dBm (min/median/max, MikroTik view); once −75 dBm / CCQ 58 %. Not the cause on 2026-10-21 but little margin | Radio placement / AP position; on Rosa: its own hotspot | open |
+| RS-09 | First stop (18:25) | Bunched wheel targets and page-measured probe loss looked like Wi-Fi stalls, but the page measures its own probe delays, so a page stall explains them equally | Read the v3.3.2 `PAGE_EVENT` / "heartbeat late" lines after the next session | open (observe) |
+| RS-10 | Journal | Volatile on Raspberry Pi OS: a reboot erased all evidence | v3.3.2: persistent, 64 MB cap (`inno-pilot-journald.conf`) | fixed in v3.3.2 |
+
 ## [MEDIUM] Bridge flags a false RUDDER STALL on entering REMOTE with the rudder off-centre
 
 **Status 2026-10-16:** the REMOTE-entry case was fixed in v3.0.3 (seed from the current rudder; simulator
@@ -613,6 +635,10 @@ item above for the other blocker.
 ## [LOW] Bridge debug log labels motor direction backwards
 
 **Status:** not started (2026-10-01). Cosmetic, debug log only.
+**FIXED in v3.3.2 (2026-10-21):** the label now follows the firmware's own convention (RPWM = port,
+LPWM = stbd, `motor_simple.ino` "Motor convention") and honours `features.invert_motor`, so a unit
+wired the other way is labelled correctly too. Confirmed by the 2026-10-21 REMOTE capture: LPWM high
+while the rudder went +2.7° → +19.9° (starboard on the Nano axis). See RS-07.
 
 `inno_pilot_bridge.py` ~1967 decodes `Nano motor pins` as `[PORT]` when D3 (LPWM) is high,
 but on Inno-Pilot-Rosa a NUDGE STBD drove D3 and the rudder moved to starboard (pypilot angle went

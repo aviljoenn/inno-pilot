@@ -30,11 +30,11 @@ enum ButtonID : uint8_t;
 // Meaning: MAJOR = hardware change, MINOR = software feature change, PATCH = patch / bug fix.
 // Bumped on EVERY merge of code to master, in all actively developed components at once
 // (see CLAUDE.md "Version sync").
-const char INNOPILOT_VERSION[] = "v3.3.1";
+const char INNOPILOT_VERSION[] = "v3.3.2";
 // Numeric form of INNOPILOT_VERSION: major*10000 + minor*100 + patch (v3.0.2 -> 30002).
 // Sent by the bridge in BRIDGE_VERSION_CODE (uint16) and compared for !VER MISMATCH!.
 // MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-const uint16_t INNOPILOT_VERSION_CODE = 30301;
+const uint16_t INNOPILOT_VERSION_CODE = 30302;
 
 // Boot / online timing (user-tweakable)
 bool ap_enabled_remote = false;        // true when AP engaged (set by COMMAND_CODE, cleared by DISENGAGE_CODE)
@@ -297,6 +297,24 @@ enum RemoteManualState : uint8_t { RM_DRIVING = 0, RM_BRAKING = 1, RM_SETTLED = 
 RemoteManualState rm_state         = RM_SETTLED;
 unsigned long     rm_brake_start_ms = 0;      // millis() when brake pulse began
 unsigned long     rm_brake_dur_ms  = 0;       // computed brake duration for this pulse
+
+// ---- Remote-manual anti-chatter (v3.3.2) ----
+// The 2026-10-21 boat capture (Inno-Pilot-Rosa) showed 144 of 189 REMOTE motor
+// starts lasting only 1-2 ms: the loop started AND stopped on the same deadband
+// edge, so a one-count wobble of the rudder reading (or the reading disturbed by
+// the motor start itself) switched the pump on and off.  Every start is an inrush;
+// one pulled the motor supply down to 6.3 V.  Three rules stop that:
+//   1. Start only beyond 1.5 x the deadband; stop at the deadband (hysteresis).
+//      The bridge's REMOTE stall check uses the same 1.5 x start threshold.
+//   2. A run lasts at least RM_MIN_ON_MS, unless a limit/end blocks the move
+//      (limits, ends and STOP always stop at once — STOP leaves this branch).
+//   3. After any stop, rest at least RM_MIN_OFF_MS before starting again, and a
+//      running pump is never reversed directly: it stops, rests, then restarts.
+const unsigned long RM_MIN_ON_MS  = 60UL;   // ~0.6 deg of travel at ~10 deg/s
+const unsigned long RM_MIN_OFF_MS = 150UL;  // let pump + reading settle
+int8_t            rm_dir    = 0;   // direction being driven: +1 stbd, -1 port, 0 = off
+unsigned long     rm_on_ms  = 0;   // millis() when the current run started
+unsigned long     rm_off_ms = 0;   // millis() when the last run ended
 
 // ---- Rudder speed estimation ----
 // Differentiates smoothed ADC over a ~50 ms window.
@@ -1764,6 +1782,8 @@ void update_motor_from_command() {
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
       last_drive_dir = 0;
       rm_state = RM_SETTLED;
+      if (rm_dir != 0) rm_off_ms = now;   // a run ended: start the rest time
+      rm_dir = 0;
       return;
     }
 
@@ -1810,6 +1830,9 @@ void update_motor_from_command() {
     //   deadband_deg10 = span_deg10 * pct/100 = span_deg10 * g_deadband / 1000
     int16_t REMOTE_DEADBAND = (int16_t)(span_deg10 * (int32_t)g_deadband / 1000);
     if (REMOTE_DEADBAND < 8) REMOTE_DEADBAND = 8;   // ~0.8 deg floor: avoid hunting
+    // Start threshold (v3.3.2 anti-chatter rule 1): a settled rudder only starts
+    // moving once the error exceeds 1.5 x the deadband; a run stops at the deadband.
+    int16_t rm_start_db = REMOTE_DEADBAND + REMOTE_DEADBAND / 2;
 
     // Slow zone: originally reduced PWM within this band of target to limit
     // overshoot.  Since 2026-10-02 RM_SLOW_PWM == 255, so it no longer changes
@@ -1849,16 +1872,21 @@ void update_motor_from_command() {
           last_drive_dir = 0;
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
-          // Check where we ended up
-          rm_state = (abs_error <= REMOTE_DEADBAND) ? RM_SETTLED : RM_DRIVING;
+          // v3.3.2: always settle; SETTLED applies the start threshold and the rest
+          // time before any new run (was: straight back to DRIVING if outside the
+          // deadband).  Braking is disabled anyway (BRAKE_MIN_SPEED_CPS).
+          rm_off_ms = now;
+          rm_state  = RM_SETTLED;
         }
         // else: keep brake pulse running (pins already set when entering BRAKING)
         break;
       }
 
       case RM_SETTLED: {
-        // In deadband — stay put unless target moves outside
-        if (abs_error > REMOTE_DEADBAND) {
+        // In deadband — stay put unless target moves outside.
+        // v3.3.2: outside the START threshold (1.5 x deadband, rule 1) and only
+        // after the rest time since the last run (rule 3).
+        if (abs_error > rm_start_db && (now - rm_off_ms >= RM_MIN_OFF_MS)) {
           rm_state = RM_DRIVING;
           // fall through to DRIVING below
         } else {
@@ -1878,6 +1906,14 @@ void update_motor_from_command() {
         int8_t dir = 0;
         if      (error >  REMOTE_DEADBAND) dir = +1;   // need stbd
         else if (error < -REMOTE_DEADBAND) dir = -1;   // need port
+
+        // v3.3.2 rule 2: a run that has only just started keeps going inside the
+        // deadband for RM_MIN_ON_MS (no 1-2 ms pulses).  The limit/end checks
+        // below still apply, so this can never drive into a limit.
+        if (dir == 0 && rm_dir != 0 && (now - rm_on_ms < RM_MIN_ON_MS)) dir = rm_dir;
+        // v3.3.2 rule 3: never reverse a running pump directly — stop here; the
+        // rest time in SETTLED applies before it starts the other way.
+        if (rm_dir != 0 && dir == -rm_dir) dir = 0;
 
         // Respect calibrated pilot limits + physical end switches for the end we
         // would drive into (axis: + = stbd = dira, - = port = dirb).  The over_*_end
@@ -1901,6 +1937,8 @@ void update_motor_from_command() {
           digitalWrite(HBRIDGE_RPWM_PIN, LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, LOW);
           rm_state = RM_SETTLED;
+          if (rm_dir != 0) rm_off_ms = now;   // a run ended: start the rest time
+          rm_dir = 0;
           break;
         }
 
@@ -1920,6 +1958,7 @@ void update_motor_from_command() {
           rm_brake_dur_ms   = est_brake_ms;
           rm_brake_start_ms = now;
           rm_state          = RM_BRAKING;
+          rm_dir            = 0;            // the run toward the target is over
           SET_MOTOR_REASON(MRSN_RM_BRAKE);                    // B26: record activation reason
           motor_pwm(clutch_settled ? 255 : 0);
           break;
@@ -1937,6 +1976,8 @@ void update_motor_from_command() {
           digitalWrite(HBRIDGE_RPWM_PIN, rpwm_high ? HIGH : LOW);
           digitalWrite(HBRIDGE_LPWM_PIN, rpwm_high ? LOW  : HIGH);
           last_drive_dir = dd;
+          if (rm_dir == 0) rm_on_ms = now;  // a new run starts (rule 2 timer)
+          rm_dir = dir;
           SET_MOTOR_REASON(MRSN_RM_DRIVE);                    // B26: record activation reason
           uint8_t pwm = (abs_error <= SLOW_ZONE_DEG10) ? RM_SLOW_PWM : 255;
           motor_pwm(clutch_settled ? pwm : 0);
@@ -1948,6 +1989,7 @@ void update_motor_from_command() {
   } else {
     // Not in remote-manual mode — reset state machine so next entry starts clean
     rm_state = RM_SETTLED;
+    rm_dir   = 0;   // the other branches below own the motor now
   }
 
   // ---- Manual override branch (AP disengaged) ----

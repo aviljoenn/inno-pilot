@@ -124,10 +124,10 @@ def ota_host() -> str:
 # Bumped on EVERY merge of code to master, in all actively developed components at once.
 # Paused components (currently the ESP32 remote firmware + its OTA binary) are deliberately
 # NOT bumped, so the mismatch stays visible (see CLAUDE.md "Version sync").
-INNOPILOT_VERSION      = "v3.3.1"
+INNOPILOT_VERSION      = "v3.3.2"
 # Numeric form sent to the Nano (BRIDGE_VERSION_CODE, uint16): major*10000 + minor*100 + patch.
 # MUST be changed together with INNOPILOT_VERSION.  (Replaces INNOPILOT_BUILD_NUM.)
-INNOPILOT_VERSION_CODE = 30301
+INNOPILOT_VERSION_CODE = 30302
 
 # ---------------------------------------------------------------------------
 # Serial devices
@@ -239,6 +239,12 @@ BTN_EVT_NAMES = {BTN_EVT_MINUS10: "-10", BTN_EVT_MINUS1: "-1", BTN_EVT_TOGGLE: "
 # ---------------------------------------------------------------------------
 REMOTE_ALIVE_TIMEOUT_S = 1.5   # page sends ALIVE every 0.4 s while in REMOTE
 NUDGE_ALIVE_TIMEOUT_S  = 0.8   # page sends NUDGE HOLD every 0.2 s while held
+# v3.3.2: an ALIVE arriving more than this after the previous one is logged as a
+# near-miss, so the journal shows how close REMOTE came to a STEER LOSS without
+# Debug.  Since v3.3.2 the page also sends "ALIVE T" from touches on the wheel
+# (Chrome on a Samsung S20 paused the page's timers while the skipper held the
+# wheel, 2026-10-21); plain "ALIVE" comes from the page's 0.4 s timer.
+REMOTE_ALIVE_LATE_S    = 1.0
 
 # Jog soft-limit lead (bench test 2026-10-15): the bridge sees pypilot's rudder angle
 # ~0.2-0.4 s late (5 Hz updates + filtering) and the rudder coasts after the motor
@@ -1687,6 +1693,16 @@ def ram_nano_deadband_deg(rng: float) -> float:
     return max(0.8, 2.0 * rng * pct / 100.0)
 
 
+def remote_start_band_pct(rng: float) -> float:
+    """The Nano's REMOTE start threshold as a percentage of the full span.
+
+    Mirrors motor_simple.ino v3.3.2 anti-chatter rule 1: a settled rudder only
+    starts moving once the error exceeds 1.5 x the deadband (rm_start_db); a run
+    stops at the deadband.  Same units as RDR_PCT / the RUD target (0-100).
+    """
+    return 1.5 * ram_nano_deadband_deg(rng) / (2.0 * rng) * 100.0
+
+
 def ram_send_target(nano: serial.Serial, bstate: BridgeState) -> None:
     """Send the current stroke's end target to the Nano (re-asserting MANUAL).
 
@@ -2003,7 +2019,15 @@ def process_remote_line(
         # REMOTE dead-man heartbeat.  Only meaningful in REMOTE; the first one
         # arms enforcement for this REMOTE session (see REMOTE_ALIVE_TIMEOUT_S).
         if bstate.mode == MODE_MANUAL:
-            bstate.manual_alive_last = time.monotonic()
+            alive_now = time.monotonic()
+            gap = alive_now - bstate.manual_alive_last
+            if bstate.manual_hb_seen and gap > REMOTE_ALIVE_LATE_S:
+                # Near-miss (or the first beat after a trip-length gap): record it.
+                src = "touch" if len(parts) > 1 and parts[1].upper() == "T" else "timer"
+                log.warning("REMOTE heartbeat late: %.2f s since the previous one "
+                            "(this one from the page %s; STEER LOSS at %.1f s)",
+                            gap, src, REMOTE_ALIVE_TIMEOUT_S)
+            bstate.manual_alive_last = alive_now
             if not bstate.manual_hb_seen:
                 bstate.manual_hb_seen = True
                 log.info("REMOTE dead-man heartbeat active (timeout %.1f s)",
@@ -2875,9 +2899,7 @@ def main() -> None:
                 # Determine the commanded direction this cycle: +1=port, -1=stbd, 0=idle.
                 # Uses rudder_angle (degrees, pypilot convention: positive=port) for the
                 # 2° comparison so the threshold is independent of rudder_range calibration.
-                deadband_pct = float(
-                    _pilot_settings.get("autopilot", {}).get("deadband_pct", 3.0)
-                )
+                # (The REMOTE branch's deadband comes from remote_start_band_pct() since v3.3.2.)
                 if bstate.mode == MODE_AP and bstate.servo_cmd_dir != 0:
                     # servo_cmd_dir: +1=port (increasing angle), -1=stbd (decreasing angle)
                     commanded_dir = bstate.servo_cmd_dir
@@ -2887,7 +2909,11 @@ def main() -> None:
                 elif (
                     bstate.mode == MODE_MANUAL
                     and rudder_pct is not None
-                    and abs(bstate.manual_rud_target / 10.0 - rudder_pct) > deadband_pct
+                    # v3.3.2: "commanded" only beyond the Nano's START threshold
+                    # (remote_start_band_pct).  Between one and 1.5 deadbands the
+                    # Nano deliberately holds still, which would count as a fail.
+                    and abs(bstate.manual_rud_target / 10.0 - rudder_pct)
+                        > remote_start_band_pct(rudder_range)
                 ):
                     # Higher pct = port = increasing rudder_angle
                     commanded_dir = 1 if bstate.manual_rud_target / 10.0 > rudder_pct else -1
@@ -3270,11 +3296,20 @@ def main() -> None:
 
                 elif code == PIN_STATE_CODE:
                     # H-bridge pin state change from Nano (D2/D3/D9)
-                    d2 = bool(value & 0x01)   # D2  RPWM  (stbd direction)
-                    d3 = bool(value & 0x02)   # D3  LPWM  (port direction)
+                    d2 = bool(value & 0x01)   # D2  RPWM  (port direction, reference build)
+                    d3 = bool(value & 0x02)   # D3  LPWM  (stbd direction, reference build)
                     d9 = bool(value & 0x04)   # D9  EN/PWM (motor enabled)
+                    # Direction as motor_simple.ino drives it: RPWM HIGH = PORT,
+                    # LPWM HIGH = STBD, swapped by features.invert_motor.  Until
+                    # v3.3.1 this label had PORT and STBD the wrong way round
+                    # (found in the 2026-10-21 REMOTE capture: "[PORT]" while the
+                    # rudder moved to starboard).
+                    inv = bool(_pilot_settings.get("features", {}).get("invert_motor", False))
                     if d9:
-                        direction = "STBD" if d2 else ("PORT" if d3 else "EN-only?")
+                        if d2 or d3:
+                            direction = "PORT" if d2 != inv else "STBD"
+                        else:
+                            direction = "EN-only?"
                     else:
                         direction = "STOP"
                     log.debug(
