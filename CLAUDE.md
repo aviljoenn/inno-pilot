@@ -386,6 +386,12 @@ disengagement must always be available.** Keep all of these true:
   a second open phone must not keep REMOTE alive. A hidden page stops the
   heartbeat on purpose (screen auto-lock must *alert*, not stop silently). The paused ESP32
   remote never sends ALIVE and keeps the TCP-drop-only behaviour — keep that working.
+  **Since v3.3.2 wheel touches also send `ALIVE T`** (`aliveFromTouch()`), even while the
+  browser reports the page hidden — user decision 2026-10-21, after Chrome on a Samsung S20
+  paused the page's timers and flagged it hidden while the skipper held the wheel (on screen,
+  nothing visible), causing false STEER LOSS. A hidden page *with no touches* must still stop
+  after 1.5 s. Diagnose with the journal: bridge `REMOTE heartbeat late` (> 1.0 s, says timer or
+  touch) and web remote `PAGE_EVENT` lines (visibility, freeze/resume, focus, `timer_late`).
 - **NUDGE dead-man:** press sends `NUDGE PORT|STBD`, then `NUDGE HOLD` every 0.2 s, then
   `NUDGE STOP`. HOLD must never start or resume a jog (a jog stopped by the cap, a rudder
   limit or a Nano STOP stays stopped while the finger is still down).
@@ -447,6 +453,28 @@ Simulator coverage (`~/inno-pilot-sweep-sim-2026-10-02/`, `SIM_PP_SERVO=1`): `li
 and `lim_commission` (with `SIM_LIMITS=none`), `lim_invalidate_remote lim_invalidate_ap
 lim_pp_outage_remote`. `SIM_LIMITS=set` (default) pre-writes valid limits so the older
 scenarios still run.
+
+## Nano REMOTE loop anti-chatter (v3.3.2): keep these rules together
+
+Found 2026-10-21 on Inno-Pilot-Rosa: 144 of 189 REMOTE motor starts lasted 1–2 ms (start and stop
+on the same deadband edge), each an inrush that sagged the motor supply (once to 6.3 V). In
+`update_motor_from_command()`'s REMOTE branch:
+1. Start only when the error exceeds `rm_start_db` = 1.5 × `REMOTE_DEADBAND`; stop at the deadband.
+2. A run lasts at least `RM_MIN_ON_MS` (60 ms) — but limit/end checks are applied **after** that
+   extension, so it can never drive into a limit; STOP leaves the branch and is never delayed.
+3. After any stop, rest `RM_MIN_OFF_MS` (150 ms); a running pump is never reversed directly.
+Every path that stops the REMOTE motor must clear `rm_dir` (and set `rm_off_ms` if a run ended).
+The bridge's REMOTE stall check uses `remote_start_band_pct()` — keep it equal to the Nano's start
+threshold, or the deliberate hold between 1 and 1.5 deadbands is counted as a stall.
+
+**Reversal pause, ALL drive paths (v3.3.2, user-approved 2026-10-23):** the IBT-2's starboard side
+failed on 2026-10-21 0.7 s after a 440 ms starboard run was switched straight into port, followed by
+three more reversals in 0.8 s at 8.9 V supply (plugging a spinning pump ≈ 2× stall current). Every
+path that sets a direction (AP incl. NUDGE, jog, REMOTE drive, the disabled REMOTE brake) must call
+`rev_blocked(dir)` first: it stops a motor that runs the other way and refuses the opposite direction
+until `REVERSAL_PAUSE_MS` (300 ms) after the stop. `motor_pwm()` keeps the bookkeeping (`g_run_dir`,
+`g_motor_off_ms`), so all EN writes must keep going through it. A new drive path that skips
+`rev_blocked()` reintroduces the failure mode. Flash is at 99% (240 bytes free) after this change.
 
 ## Nano: never `digitalRead()` a PWM pin — use `motor_pwm()` for D9
 

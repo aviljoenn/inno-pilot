@@ -10,6 +10,43 @@ Full rule: CLAUDE.md "Version sync".
 
 ## [Unreleased]
 
+## [v3.3.2] — 2026-10-21
+
+Patch release. Bumped across all actively developed components (Nano, bridge, web remote).
+The paused ESP32 remote firmware (v1.3.3_B3) and its OTA binary are deliberately not bumped.
+Diagnosed on Inno-Pilot-Rosa from a REMOTE hand-steering session that stopped by itself, plus an
+attended dock test with a packet capture (Samsung S20, Chrome).
+
+### Fixed
+- **REMOTE stopped (STEER LOSS) while the skipper was steering.** With a finger held on the helm
+  wheel for several seconds, Chrome on a Samsung S20 paused the web page's timers (~1.5 s) and then
+  reported the page hidden although it stayed on screen, so the page's heartbeat stopped and the
+  bridge's 1.5 s dead-man ended REMOTE. Wi-Fi and the Pi were fine (pings answered within 70 ms,
+  every request served in 2–20 ms). Touches on the wheel now send a heartbeat too (`ALIVE T`),
+  also while the browser claims the page is hidden — a finger on the wheel is a skipper. The
+  dead-man itself is unchanged: no heartbeat and no touches for 1.5 s still means STEER LOSS
+  (screen locked, phone gone).
+- **Motor chatter in REMOTE.** 144 of 189 REMOTE motor starts lasted only 1–2 ms: the Nano started
+  and stopped on the same deadband edge, and each start's inrush pulled the motor supply down (once
+  to 6.3 V). The Nano now starts only beyond 1.5 × the deadband (stops at the deadband), runs at
+  least 60 ms once started, rests at least 150 ms after any stop, and never reverses a running pump
+  directly. Limits, rudder ends and STOP still stop at once. The bridge's REMOTE stall check uses the
+  same start threshold, so the deliberate hold between 1 and 1.5 deadbands is not counted as a stall.
+- **Pump reversals destroyed an H-bridge.** On 2026-10-21 the IBT-2's starboard side failed 0.7 s after a
+  440 ms starboard run was switched straight into port with no stop, followed by three more reversals
+  in 0.8 s while the supply sagged to 8.9 V. Driving a pump that still spins the other way draws up to
+  about twice its stall current. Every drive path (autopilot incl. NUDGE, jog, REMOTE) now stops first
+  and waits 300 ms before driving the opposite direction (`rev_blocked()`); the old "EN off before
+  direction change" lasted microseconds. It can only ever keep the motor off.
+- **Debug log motor direction was backwards** (`[PORT]` while the rudder moved to starboard). The
+  bridge now labels RPWM = port, LPWM = starboard as the firmware drives them (honours `invert_motor`).
+
+### Added
+- **Diagnostics that survive.** The journal is kept across reboots (64 MB cap; Raspberry Pi OS keeps
+  it in RAM by default). The bridge logs a late REMOTE heartbeat (> 1.0 s) as a warning, naming
+  whether it came from the timer or a touch. The page reports hidden/visible, frozen/resumed, focus
+  changes and late timers to the journal (`PAGE_EVENT`), so the next unexplained stop names its cause.
+
 ## [v3.3.1] — 2026-10-15
 
 Patch release. Bumped across all actively developed components (Nano, bridge, web remote);

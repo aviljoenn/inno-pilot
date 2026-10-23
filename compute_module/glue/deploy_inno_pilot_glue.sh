@@ -84,6 +84,15 @@ sudo cp "$REPO_DIR/inno-pilot-bridge.service"     /etc/systemd/system/inno-pilot
 sudo cp "$REPO_DIR/inno-pilot-web-remote.service" /etc/systemd/system/inno-pilot-web-remote.service
 sudo cp "$REPO_DIR/inno-health-notify.service"    /etc/systemd/system/inno-health-notify.service
 
+# Keep the journal across reboots (v3.3.2) — see the comments in the file.
+# journald only reads Storage= at start, so restart it; it flushes the RAM journal
+# to /var/log/journal and keeps the services' log streams open across the restart.
+echo "Installing journald drop-in -> /etc/systemd/journald.conf.d/60-inno-pilot.conf"
+sudo mkdir -p /etc/systemd/journald.conf.d /var/log/journal
+sudo cp "$REPO_DIR/inno-pilot-journald.conf" /etc/systemd/journald.conf.d/60-inno-pilot.conf
+sudo chmod 644 /etc/systemd/journald.conf.d/60-inno-pilot.conf
+sudo systemctl restart systemd-journald
+
 # Reload systemd
 echo "Reloading systemd daemon..."
 sudo systemctl daemon-reload
