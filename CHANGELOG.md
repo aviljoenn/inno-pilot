@@ -32,6 +32,12 @@ attended dock test with a packet capture (Samsung S20, Chrome).
   least 60 ms once started, rests at least 150 ms after any stop, and never reverses a running pump
   directly. Limits, rudder ends and STOP still stop at once. The bridge's REMOTE stall check uses the
   same start threshold, so the deliberate hold between 1 and 1.5 deadbands is not counted as a stall.
+- **Pump reversals destroyed an H-bridge.** On 2026-10-21 the IBT-2's starboard side failed 0.7 s after a
+  440 ms starboard run was switched straight into port with no stop, followed by three more reversals
+  in 0.8 s while the supply sagged to 8.9 V. Driving a pump that still spins the other way draws up to
+  about twice its stall current. Every drive path (autopilot incl. NUDGE, jog, REMOTE) now stops first
+  and waits 300 ms before driving the opposite direction (`rev_blocked()`); the old "EN off before
+  direction change" lasted microseconds. It can only ever keep the motor off.
 - **Debug log motor direction was backwards** (`[PORT]` while the rudder moved to starboard). The
   bridge now labels RPWM = port, LPWM = starboard as the firmware drives them (honours `invert_motor`).
 

@@ -467,6 +467,15 @@ Every path that stops the REMOTE motor must clear `rm_dir` (and set `rm_off_ms` 
 The bridge's REMOTE stall check uses `remote_start_band_pct()` — keep it equal to the Nano's start
 threshold, or the deliberate hold between 1 and 1.5 deadbands is counted as a stall.
 
+**Reversal pause, ALL drive paths (v3.3.2, user-approved 2026-10-23):** the IBT-2's starboard side
+failed on 2026-10-21 0.7 s after a 440 ms starboard run was switched straight into port, followed by
+three more reversals in 0.8 s at 8.9 V supply (plugging a spinning pump ≈ 2× stall current). Every
+path that sets a direction (AP incl. NUDGE, jog, REMOTE drive, the disabled REMOTE brake) must call
+`rev_blocked(dir)` first: it stops a motor that runs the other way and refuses the opposite direction
+until `REVERSAL_PAUSE_MS` (300 ms) after the stop. `motor_pwm()` keeps the bookkeeping (`g_run_dir`,
+`g_motor_off_ms`), so all EN writes must keep going through it. A new drive path that skips
+`rev_blocked()` reintroduces the failure mode. Flash is at 99% (240 bytes free) after this change.
+
 ## Nano: never `digitalRead()` a PWM pin — use `motor_pwm()` for D9
 
 On AVR, `digitalRead()` calls `turnOffPWM()` on a PWM-capable pin. The pin-state

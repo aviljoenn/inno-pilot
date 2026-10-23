@@ -197,9 +197,45 @@ const uint8_t HBRIDGE_PWM_PIN  = 9;   // EN (R_EN + L_EN tied together)
 // silently cancelled any duty other than 0/255 (found 2026-10-02 — the remote-
 // manual slow zone's 160 never reached the motor, so the rudder did not move).
 uint8_t g_motor_duty = 0;
+
+// ---- Reversal pause (v3.3.2) ----
+// 2026-10-21 (Inno-Pilot-Rosa): the IBT-2's starboard side failed 0.7 s after a 440 ms
+// starboard run was switched straight into port with no stop, followed by three more
+// direction changes within 0.8 s while the supply sagged to 8.9 V.  Driving a pump that is
+// still spinning the other way ("plugging") draws up to about twice its stall current.
+// Every drive path (AP incl. NUDGE, jog, REMOTE, the disabled REMOTE brake pulse) asks
+// rev_blocked() before it sets a direction: the opposite direction is only driven
+// REVERSAL_PAUSE_MS after the motor stopped, and a request to reverse a running motor
+// stops it first.  The previous "EN off before direction change" lasted microseconds.
+const unsigned long REVERSAL_PAUSE_MS = 300UL;  // pump spin-down time before reversing
+int8_t        g_run_dir      = 0;   // direction of the current/last run: +1 LPWM, -1 RPWM, 0 none yet
+unsigned long g_motor_off_ms = 0;   // millis() when the motor last stopped
+
 inline void motor_pwm(uint8_t duty) {
+  // Reversal-pause bookkeeping: when a run ends, and which way a new run goes (the
+  // callers set the direction pins before enabling).  D2/D3 are plain digital outputs.
+  if (duty == 0 && g_motor_duty != 0) g_motor_off_ms = millis();
+  if (duty != 0 && g_motor_duty == 0)
+    g_run_dir = digitalRead(HBRIDGE_LPWM_PIN) ? +1 : (digitalRead(HBRIDGE_RPWM_PIN) ? -1 : 0);
   analogWrite(HBRIDGE_PWM_PIN, duty);
   g_motor_duty = duty;
+}
+
+// Motor off, both direction pins low (the hydraulic lock holds the rudder).
+inline void motor_off() {
+  motor_pwm(0);
+  digitalWrite(HBRIDGE_RPWM_PIN, LOW);
+  digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+}
+
+// true = do not drive direction `dir` (+1 = LPWM high, -1 = RPWM high) right now.
+// A request to reverse a running motor stops it here; the opposite direction is then
+// allowed REVERSAL_PAUSE_MS after the stop.  It only ever keeps the motor OFF, so it can
+// never add motion; callers just stop and try again next loop.
+bool rev_blocked(int8_t dir) {
+  if (g_run_dir != -dir) return false;            // same direction, or no run yet
+  if (g_motor_duty != 0) { motor_off(); return true; }
+  return (millis() - g_motor_off_ms) < REVERSAL_PAUSE_MS;
 }
 
 // Clutch pin. Default active-HIGH: HIGH = engaged, LOW = disengaged.
@@ -1949,6 +1985,14 @@ void update_motor_from_command() {
           bool brake_toward_port = (dir > 0);                  // opposite to travel (dir>0 = driving stbd)
           bool rpwm_high = brake_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
           int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
+          // v3.3.2 reversal pause: a brake pulse IS a reversal of the running pump, so
+          // rev_blocked() stops it instead (braking was already disabled, see above).
+          if (rev_blocked(dd)) {
+            motor_off(); last_drive_dir = 0; rm_state = RM_SETTLED;
+            if (rm_dir != 0) rm_off_ms = now;
+            rm_dir = 0;
+            break;
+          }
           if (dd != last_drive_dir && last_drive_dir != 0) {
             motor_pwm(0);                   // EN off before direction change
           }
@@ -1970,6 +2014,14 @@ void update_motor_from_command() {
           bool drive_toward_port = (dir < 0);
           bool rpwm_high = drive_toward_port ^ invert_motor;   // ref: port = RPWM HIGH
           int8_t dd = rpwm_high ? -1 : +1;                     // +1 = LPWM HIGH (file convention)
+          // v3.3.2 reversal pause (all paths, see rev_blocked()): never drive a pump that
+          // is still spinning the other way.  Stay settled and try again next loop.
+          if (rev_blocked(dd)) {
+            motor_off(); last_drive_dir = 0; rm_state = RM_SETTLED;
+            if (rm_dir != 0) rm_off_ms = now;
+            rm_dir = 0;
+            break;
+          }
           if (dd != last_drive_dir && last_drive_dir != 0) {
             motor_pwm(0);                   // EN off before direction change
           }
@@ -2009,6 +2061,14 @@ void update_motor_from_command() {
       last_drive_dir = 0;
       digitalWrite(HBRIDGE_RPWM_PIN, LOW);
       digitalWrite(HBRIDGE_LPWM_PIN, LOW);
+      return;
+    }
+
+    // v3.3.2 reversal pause (see rev_blocked()).  manual_jog_dir uses the same sign as
+    // the pins: +1 = Dir-A = LPWM high, -1 = Dir-B = RPWM high.
+    if (manual_jog_dir != 0 && rev_blocked(manual_jog_dir)) {
+      motor_off();
+      last_drive_dir = 0;
       return;
     }
 
@@ -2099,6 +2159,14 @@ void update_motor_from_command() {
     if (effective < 0) effective = 0;
 
     duty = MIN_DUTY + (uint8_t)((effective * (MAX_DUTY - MIN_DUTY)) / span);
+  }
+
+  // v3.3.2 reversal pause (see rev_blocked()): never drive a pump that is still spinning
+  // the other way.  Covers pypilot reversals and the bridge's NUDGE (COMMAND frames).
+  if (rev_blocked((delta > 0) ? -1 : +1)) {
+    motor_off();
+    last_drive_dir = 0;
+    return;
   }
 
   // Direction: conv 1: delta > 0 = large value = port => Dir-B (RPWM); delta < 0 = stbd => Dir-A (LPWM)
